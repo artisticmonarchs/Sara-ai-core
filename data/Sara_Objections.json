@@ -1,0 +1,1152 @@
+[
+  {
+    "id": 1,
+    "objection_text": "They're not available.",
+    "core_emotion": "Dismissal",
+    "primary_response": "Totally understand — they must be pulled in a dozen directions. This is actually time-sensitive: we’ve identified revenue leakage affecting firms like yours. Could you transfer me, or would it be easier to lock a callback for later today?",
+    "alternative_responses": [
+      "I get it. Since it’s tied to lost clients, should I book a quick callback for later today or tomorrow morning?",
+      "No problem — I only need 15 minutes with them. Can you patch me through, or is there a better time to reach them today?",
+      "Understood. If transfer isn't possible, may I grab a preferred callback time so I don’t interrupt their workflow?"
+    ],
+    "persistence_path": [
+      "Ask for immediate transfer. If refused, offer two concrete callback slots (e.g., 'Today 3 PM or tomorrow 10 AM').",
+      "Confirm name and best callback number/email for the decision-maker.",
+      "If still blocked, log lead and schedule follow-up (3–4 weeks) with reason noted."
+    ],
+    "escalation_note": "After two polite refusals, escalate to 'urgent financial risk' language. If the gatekeeper becomes adversarial, stop pressing and collect email/contact details politely.",
+    "personalization_hook": "Revenue slipping from {{Industry}} firms in {{Location}} — it's something they'd want to see.",
+    "escalation_levels": {
+      "gentle": "No problem — when would be best to call back?",
+      "firm": "This is urgent — it's about lost clients and revenue they should know about.",
+      "final": "If I can’t reach them, could you kindly confirm the best email so I can send a very short snapshot?"
+    }
+  },
+  {
+    "id": 2,
+    "objection_text": "They're busy right now.",
+    "core_emotion": "Protectiveness",
+    "primary_response": "Absolutely, I respect that — which is why I keep these to 15 minutes. Would mornings or afternoons work better for them this week?",
+    "alternative_responses": [
+      "Got it. I can be flexible — would a quick 15 minutes tomorrow morning or late afternoon be easier?",
+      "I respect that — I’ll be concise. Is there a 15-minute window this week I can reserve on their calendar?",
+      "Understood. If now isn't good, what's the soonest short window that works for them?"
+    ],
+    "persistence_path": [
+      "Offer two specific slots and ask the gatekeeper to pick.",
+      "If they insist on no interruptions, request the best email and offer to send a one-page snapshot with calendar link.",
+      "Confirm callback time and add to schedule with a reminder message to gatekeeper the morning of the call."
+    ],
+    "escalation_note": "If gatekeeper pushes hard, pivot to a low-effort alternative: 'I'll send a one-page snapshot and a calendar link — can I confirm the email?'",
+    "personalization_hook": "We have short audits for {{Industry}} in {{Location}} that take 15 minutes to review.",
+    "escalation_levels": {
+      "gentle": "When is a convenient 15-minute slot?",
+      "firm": "This impacts revenue — a short slot now prevents larger losses.",
+      "final": "Okay — can I at least confirm their email so I can send a short snapshot?"
+    }
+  },
+  {
+    "id": 3,
+    "objection_text": "Can you send an email?",
+    "core_emotion": "Deflection",
+    "primary_response": "I can — and I will — but emails often get lost. The fastest way to see the exact numbers is a 15-minute review. Can we lock a short slot so you can review it together?",
+    "alternative_responses": [
+      "Sure, I’ll send an email. To make it useful, can we schedule a 15-minute walkthrough so I can explain the findings live?",
+      "I’ll send the email; however, our clients find the numbers more actionable when we walk them through. What time this week works for a quick review?",
+      "Happy to email. What’s the best address? Also, can we reserve a 15-minute slot to discuss it so it doesn’t sit unread?"
+    ],
+    "persistence_path": [
+      "Offer to send email + request best address.",
+      "Immediately follow with two calendar options for a review call.",
+      "If refused, send email and schedule a follow-up reminder in 7–10 days."
+    ],
+    "escalation_note": "If repeatedly met with 'send email,' make the email conditional: 'I’ll send it if we can also lock 15 minutes to discuss.'",
+    "personalization_hook": "I’ll attach a short snapshot for {{Industry}} in {{Location}} that highlights the most urgent gaps.",
+    "escalation_levels": {
+      "gentle": "I'll email over the snapshot — what’s the best contact?",
+      "firm": "Emails get buried — a 15-minute walkthrough guarantees clarity.",
+      "final": "Okay — I’ll email now and follow up in one week unless you prefer a call."
+    }
+  },
+  {
+    "id": 4,
+    "objection_text": "Not interested. (Gatekeeper)",
+    "core_emotion": "Irritation",
+    "primary_response": "Totally fair. Many gatekeepers say the same — but when their owners see the numbers, they're often surprised. I’m not selling anything; just a short 15-minute audit that could stop revenue leakage. Can you connect me?",
+    "alternative_responses": [
+      "I hear you. This isn’t a sales call — we share a quick audit that often pays for itself. Could you please pass this to the owner?",
+      "Understood. If you prefer, I'll send a one-page snapshot and ask if the owner wants a short review.",
+      "No problem. Could you let me know the best time to call back for a brief review with them?"
+    ],
+    "persistence_path": [
+      "Attempt a transfer once — if refused, offer an email snapshot + calendar link.",
+      "If gatekeeper resists, ask for the name and best callback time for the decision-maker.",
+      "If blocked, log the lead and schedule a re-approach in 3–4 weeks with a different angle."
+    ],
+    "escalation_note": "If tone shifts hostile, disengage politely and move to an email follow-up instead of forcing transfer.",
+    "personalization_hook": "This is specifically about lost revenue for {{Industry}} in {{Location}} — they’ll likely want to see it.",
+    "escalation_levels": {
+      "gentle": "I’ll send a short snapshot then — what’s the best email?",
+      "firm": "Owners in {{Location}} get surprised by how much they’re losing — it’s worth 15 minutes.",
+      "final": "Understood; I’ll follow up via email and schedule a gentle callback in a few weeks."
+    }
+  },
+  {
+    "id": 5,
+    "objection_text": "We already have someone handling this. (Gatekeeper)",
+    "core_emotion": "Complacency",
+    "primary_response": "That’s good to hear — many firms do. The value we provide is a second opinion: it’s common for gaps to remain even with active agencies. Can I connect with the owner to quickly share what we found?",
+    "alternative_responses": [
+      "Great. A quick, neutral audit often finds blind spots — would they be open to a 15-minute second opinion?",
+      "Perfect — could I speak briefly to the owner to see if our audit complements their current work?",
+      "Understood. If transfer isn't possible, can I have the best email to send a short snapshot so the owner can decide?"
+    ],
+    "persistence_path": [
+      "Ask for immediate transfer. If unavailable, request best email and a callback time.",
+      "Offer to send a non-salesy audit snapshot for the in-house/agency to review.",
+      "If refused, log the firm as 'has agency' and schedule an occasional recheck (90 days)."
+    ],
+    "escalation_note": "If gatekeeper defends strongly, pivot to 'benchmarking' language: 'We simply compare results against peers.'",
+    "personalization_hook": "We have second-opinion audits tailored to {{Industry}} benchmarks in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "No problem — can I email a one-page snapshot to their team?",
+      "firm": "Even agencies miss leakage — could the owner spare 15 minutes for a second opinion?",
+      "final": "I'll send a neutral report to their email and follow up in a month."
+    }
+  },
+  {
+    "id": 6,
+    "objection_text": "I don't know who handles this.",
+    "core_emotion": "Confusion",
+    "primary_response": "No worries — could you point me to the owner or managing partner? This directly impacts revenue, so I want to make sure the right person sees it.",
+    "alternative_responses": [
+      "That's fine — is there a general manager or office manager I should speak with about business performance?",
+      "No problem — could you tell me who usually handles client intake or marketing decisions?",
+      "Understood — would you mind sharing the best contact or email for the person who handles growth?"
+    ],
+    "persistence_path": [
+      "If name unknown, ask for the best email for general inquiries and request that they forward the snapshot to decision-maker.",
+      "If contact info is provided, confirm and offer a brief callback time.",
+      "If no info, record as 'unknown' and route to research team for follow-up via public channels."
+    ],
+    "escalation_note": "If gatekeeper is unsure repeatedly, offer to send a short email that they can forward (reduces friction).",
+    "personalization_hook": "Simple one-page snapshot for {{Industry}} in {{Location}} — quick to forward to the right person.",
+    "escalation_levels": {
+      "gentle": "Thanks — can you provide an email to forward this to?",
+      "firm": "This is directly about lost revenue — could you find who handles marketing or operations?",
+      "final": "Okay — I’ll send a one-page snapshot to the general inbox for their review."
+    }
+  },
+  {
+    "id": 7,
+    "objection_text": "We get too many calls like this.",
+    "core_emotion": "Overwhelm",
+    "primary_response": "I hear you — gatekeepers hear that a lot. This isn’t a generic sales call; it’s a targeted review showing where clients may be slipping to competitors. Could you connect me with the person who handles client intake?",
+    "alternative_responses": [
+      "Totally — that's why we keep it short and relevant. Can I have 15 minutes with the owner to show a quick snapshot?",
+      "Understood. I’ll be concise and only share items that matter to their revenue — would mornings or afternoons be better?",
+      "I appreciate that. I can email a one-page snapshot they can glance at — what’s the best contact?"
+    ],
+    "persistence_path": [
+      "Offer a non-intrusive option (one-page snapshot + calendar link).",
+      "Request a single transfer attempt. If refused, ask gatekeeper to forward the snapshot.",
+      "Mark the account as high-call-volume and re-approach with alternate messaging in 4–6 weeks."
+    ],
+    "escalation_note": "If overwhelmed, emphasize brevity and high ROI; if gatekeeper remains blocked, move to email-based approach.",
+    "personalization_hook": "Our snapshot is tailored to {{Industry}} competitors in {{Location}} — it’s short and actionable.",
+    "escalation_levels": {
+      "gentle": "I’ll keep it very short — 15 minutes max.",
+      "firm": "This is specifically about money you may be losing; it’s worth a quick look.",
+      "final": "Okay — I'll send a single-page snapshot to the inbox and follow up once."
+    }
+  },
+  {
+    "id": 8,
+    "objection_text": "Can you call back later?",
+    "core_emotion": "Delay",
+    "primary_response": "Of course — to save both our time, let’s lock an exact 15-minute slot now. Is later today or tomorrow morning better?",
+    "alternative_responses": [
+      "No problem. If you tell me a good window, I’ll lock it in now so there’s no back-and-forth.",
+      "Sure — would this afternoon or early tomorrow work? I’ll put it on the calendar.",
+      "Happy to. What specific time should I call so I don’t interrupt them again?"
+    ],
+    "persistence_path": [
+      "Offer two specific slots and confirm which one to use.",
+      "If they decline, ask for the best day/time next week and set a calendar invite.",
+      "If no slot, send an email with calendar link and a one-line urgency summary."
+    ],
+    "escalation_note": "If 'call back later' is used repeatedly, state urgency briefly: 'This is about immediate revenue risk.'",
+    "personalization_hook": "I'll block time for a short review of {{Industry}} performance in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "When would you like me to call back?",
+      "firm": "This is time-sensitive — can we lock 15 minutes today or tomorrow?",
+      "final": "Okay — I’ll email a calendar link and a snapshot for them to pick a time."
+    }
+  },
+  {
+    "id": 9,
+    "objection_text": "We don't work with external agencies.",
+    "core_emotion": "Policy",
+    "primary_response": "I respect that — this isn’t a sales pitch. We offer a neutral audit so you can see where revenue may be slipping. Many firms treat it as a second opinion and keep it in-house if they prefer.",
+    "alternative_responses": [
+      "Understood. Think of this as an independent health check — no obligations, just data to help you decide.",
+      "I get it. We can provide a non-salesy snapshot so you can pass it to whoever manages this internally.",
+      "No problem — if they'd like, we can show the numbers and leave the decision about any work entirely up to you."
+    ],
+    "persistence_path": [
+      "Offer a neutral, non-committal audit PDF to review.",
+      "Suggest a short walkthrough with the internal team: 'We’ll just show the facts.'",
+      "If refused, offer to reconnect in 3 months or provide a benchmarking snapshot via email."
+    ],
+    "escalation_note": "Avoid forcing agency language; focus on neutrality and benchmarking against competitors.",
+    "personalization_hook": "Our neutral audit shows common leakage points for {{Industry}} in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "I'll email a neutral snapshot for review.",
+      "firm": "This is a second-opinion review to identify blind spots.",
+      "final": "Understood — I’ll follow up with benchmarking info in a few months."
+    }
+  },
+  {
+    "id": 10,
+    "objection_text": "They don't take calls from unknown numbers.",
+    "core_emotion": "Avoidance",
+    "primary_response": "Totally fair — I’ll keep it short when I reach out. Could you let me know when they’re most likely to answer, or would an email work better to arrange a time?",
+    "alternative_responses": [
+      "I understand. Would you mind telling me the best windows they answer so I can try then?",
+      "No problem. I’ll send a calendar link via email so they can pick a time that works for them.",
+      "Got it — is there a preferred number I should use or an assistant I should coordinate with?"
+    ],
+    "persistence_path": [
+      "Ask for the best callback windows or an alternate number.",
+      "Offer to send calendar link to confirm a time instead of cold calling.",
+      "If unwilling, note the best times and schedule a soft follow-up research pass."
+    ],
+    "escalation_note": "If unknown-number avoidance is company policy, pivot to email/calendar scheduling immediately.",
+    "personalization_hook": "I’ll send a quick calendar link for a 15-minute {{Industry}} audit for {{Location}}.",
+    "escalation_levels": {
+      "gentle": "When are they most likely to answer?",
+      "firm": "I’ll use the calendar invite so we don’t interrupt unexpectedly.",
+      "final": "Okay — I’ll email the calendar link and a one-page snapshot."
+    }
+  },
+  {
+    "id": 11,
+    "objection_text": "Not interested. (Decision Maker)",
+    "core_emotion": "Shutdown",
+    "primary_response": "I respect that. The reason I call is simple: many firms only realize they’re losing revenue after seeing the numbers. Would a quick 15-minute snapshot be worth your time to confirm whether that's happening here?",
+    "alternative_responses": [
+      "Understood. Most leaders feel the same until they see the data — can I show you a one-page snapshot?",
+      "Fair enough — could I send a short recap and then pick a quick time to walk you through the findings?",
+      "I hear you. If nothing else, the numbers will help you confirm you’re not missing anything — 15 minutes?"
+    ],
+    "persistence_path": [
+      "Ask one clarifying question: 'Is it the timing or the subject?' to tailor the pitch.",
+      "Offer two short slots to pick from or send a one-page snapshot with a calendar link.",
+      "If refusal persists, book a re-approach in 4–6 weeks with a different hook."
+    ],
+    "escalation_note": "Use gentle curiosity first, escalate to loss-aversion only if they remain curt.",
+    "personalization_hook": "Many {{Industry}} leaders in {{Location}} wanted to check this — could I share a quick benchmark?",
+    "escalation_levels": {
+      "gentle": "Could I send a one-page snapshot?",
+      "firm": "This could reveal $10k–$20k a month in leakage — worth confirming.",
+      "final": "Okay — I'll send the snapshot and follow up in a few weeks."
+    }
+  },
+  {
+    "id": 12,
+    "objection_text": "We don't have budget.",
+    "core_emotion": "Cost Fear",
+    "primary_response": "I hear you — budget is critical. This isn't about adding cost; it's about recapturing revenue you're already losing. Wouldn't a 15-minute review be worth finding out how much you're dropping each month?",
+    "alternative_responses": [
+      "Totally understandable. The audit is focused on uncovering revenue you’re already losing — often more than the monthly cost of fixes.",
+      "I get it — if fixing leakage pays for itself, would you be open to a short review to quantify it?",
+      "I respect budget limits — this strategy session is to show potential ROI, not to sell you something on the spot."
+    ],
+    "persistence_path": [
+      "Reframe with ROI: present typical payback timelines for similar clients.",
+      "Offer a no-pressure snapshot first, then a 15-minute call to explain ROI projections.",
+      "If rejected, offer to check back after quarter-end or budget review periods."
+    ],
+    "escalation_note": "If price resistance persists, offer case studies showing payback within 30–90 days.",
+    "personalization_hook": "Firms like {{Industry}} in {{Location}} often recover their spend within 30–90 days.",
+    "escalation_levels": {
+      "gentle": "I’ll send a no-obligation snapshot to quantify the opportunity.",
+      "firm": "The monthly leakage often exceeds the cost — we'll show you how.",
+      "final": "Okay — I’ll follow up after your next budgeting cycle."
+    }
+  },
+  {
+    "id": 13,
+    "objection_text": "We already have a solution.",
+    "core_emotion": "Complacency",
+    "primary_response": "That's great — having a solution helps. The difference we provide is a fresh set of eyes. Competitors shift constantly; we often find blind spots even with in-house teams. Would you spare 15 minutes for a second opinion?",
+    "alternative_responses": [
+      "Perfect — could we do a quick benchmark to confirm nothing is being missed?",
+      "Glad to hear it. A short outside check often spots small issues that compound into large leaks.",
+      "Understood. If you like, we can quickly show a neutral comparison against local competitors."
+    ],
+    "persistence_path": [
+      "Propose a 15-minute benchmarking call that is explicitly a 'second opinion'.",
+      "Offer to send a neutral one-page competitor comparison prior to the call.",
+      "If refusal persists, note 'has internal solution' and schedule a 90-day recheck."
+    ],
+    "escalation_note": "Avoid undermining their vendor; frame as complementary benchmarking instead.",
+    "personalization_hook": "We’ll compare your {{Industry}} performance to local peers in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "Can I show you a quick benchmark?",
+      "firm": "Even top teams can miss competitor moves — it's worth confirming.",
+      "final": "Okay — I’ll send a short competitor snapshot and follow up."
+    }
+  },
+  {
+    "id": 14,
+    "objection_text": "Send me an email.",
+    "core_emotion": "Deflection",
+    "primary_response": "Happy to send an email. To make it worth your time, can we also lock a 15-minute slot so I can walk you through the high-impact findings?",
+    "alternative_responses": [
+      "I’ll send the snapshot now. What’s the best email? Also, what times work for a short follow-up?",
+      "Sure — I’ll email a concise summary and a calendar link to pick a time that suits you.",
+      "Okay — I’ll send the notes. If you’d like, I can include a few quick calendar options to choose from."
+    ],
+    "persistence_path": [
+      "Confirm email and offer two calendar slots right away.",
+      "If they prefer email only, send snapshot and schedule a follow-up reminder in 7–10 days.",
+      "Add prospect to nurture sequence with subject lines referencing the 15-minute review."
+    ],
+    "escalation_note": "If 'send email' is a repeated stall, keep the email extremely concise and include a call-to-action calendar link.",
+    "personalization_hook": "I’ll include a one-page audit for {{Industry}} in {{Location}} in that email.",
+    "escalation_levels": {
+      "gentle": "I’ll email now — what’s the best address?",
+      "firm": "To ensure it’s useful, can we also reserve 15 minutes to review it together?",
+      "final": "Okay — I’ll email and follow up in one week."
+    }
+  },
+  {
+    "id": 15,
+    "objection_text": "Call me back later.",
+    "core_emotion": "Delay",
+    "primary_response": "Sure — let’s save both of us time and lock a specific 15-minute window. Would later today or tomorrow morning be better?",
+    "alternative_responses": [
+      "No problem. What specific time should I call so I don’t interrupt again?",
+      "Understood — would next Tuesday morning or Thursday afternoon work?",
+      "Happy to — I’ll put a single invite on the calendar for a short review. Which day suits you?"
+    ],
+    "persistence_path": [
+      "Offer two concrete times and capture their choice.",
+      "If they can't commit, ask for the best day of week and follow up with a calendar link.",
+      "If no response, place contact in a timed follow-up sequence with a reminder in 7–14 days."
+    ],
+    "escalation_note": "If pattern of 'call back later' is repeated, ask 'Is now not a good time for this topic?' to identify real objections.",
+    "personalization_hook": "Let's check one short window to review {{Industry}} performance in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "When should I call back?",
+      "firm": "This is time-sensitive — can we pick a slot today or tomorrow?",
+      "final": "I'll email a calendar link and a short snapshot so you can pick a time."
+    }
+  },
+  {
+    "id": 16,
+    "objection_text": "I don't have time.",
+    "core_emotion": "Overwhelm",
+    "primary_response": "I get it — that's why this is only 15 minutes and focused on revenue you may already be losing. When is best — before lunch or after?",
+    "alternative_responses": [
+      "Totally understand. We can keep it to 10–15 minutes. Is early morning or late afternoon better?",
+      "I respect that. Would a brief recorded walkthrough be helpful that you can watch later?",
+      "No problem — how about a 10-minute slot where I show only the top 3 urgent issues?"
+    ],
+    "persistence_path": [
+      "Offer a 10–15 minute option and confirm a specific slot.",
+      "If truly unavailable, offer a recorded 5-minute snapshot + calendar link to discuss when convenient.",
+      "Add to follow-up queue with note 'busy — prefers short formats'."
+    ],
+    "escalation_note": "If time resistance continues, propose a non-live option (recording or short PDF) and follow up with a calendar link.",
+    "personalization_hook": "This is a 15-minute check on {{Industry}} leaks in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "We’ll keep it to 15 minutes — what works?",
+      "firm": "15 minutes now can prevent weeks of leakage later.",
+      "final": "Okay — I'll send a short recording and calendar link to book only if you want to review it."
+    }
+  },
+  {
+    "id": 17,
+    "objection_text": "We're happy with current results.",
+    "core_emotion": "Confidence",
+    "primary_response": "That's excellent — it’s always good to be confident. The only risk is unseen competitor advantages; a quick benchmark will confirm you’re truly maximizing pipeline. Mind if I show a one-page comparison?",
+    "alternative_responses": [
+      "Great to hear. A quick external check can validate that position — 15 minutes to confirm?",
+      "Awesome. If you’re open, we’ll just confirm there are no blind spots that competitors could exploit.",
+      "Perfect — could I send a benchmark report so you can see how you stack up locally?"
+    ],
+    "persistence_path": [
+      "Position as validation/benchmarking rather than improvement.",
+      "Offer a comparison to competitors with two brief time slots.",
+      "If declined, send benchmarking snapshot and follow up in a quarter."
+    ],
+    "escalation_note": "Avoid sounding like you’re undermining their success; frame as validation.",
+    "personalization_hook": "We’ll benchmark your {{Industry}} presence against peers in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "Can I send a 1-page benchmark?",
+      "firm": "Let's confirm nothing is being missed — 15 minutes.",
+      "final": "I'll email a short benchmark and follow up later."
+    }
+  },
+  {
+    "id": 18,
+    "objection_text": "We handle this internally.",
+    "core_emotion": "Self-reliance",
+    "primary_response": "That makes sense — many firms do. An outside second opinion often reveals blind spots internal teams miss. Would you be open to a quick, neutral review?",
+    "alternative_responses": [
+      "Understood. We act as a complimentary second opinion — no pressure, just data.",
+      "Great — if your team wants, we can present findings to them directly in a short session.",
+      "I hear that — would you like a one-page snapshot to share with your internal team?"
+    ],
+    "persistence_path": [
+      "Offer to present findings to their internal contact or team.",
+      "Request the contact details of their in-house lead and offer a joint 15-minute review.",
+      "If rejected, mark as 'internal only' and schedule a recheck in 90 days."
+    ],
+    "escalation_note": "Do not disparage their team; offer collaboration and support language.",
+    "personalization_hook": "Our neutral review is often used alongside internal teams at {{Industry}} firms in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "Can I send a short snapshot for your team?",
+      "firm": "A quick outside check often uncovers easy wins.",
+      "final": "Okay — I'll follow up with a neutral snapshot you can pass to your team."
+    }
+  },
+  {
+    "id": 19,
+    "objection_text": "Too expensive.",
+    "core_emotion": "Cost Fear",
+    "primary_response": "I hear you — cost matters. The key is this: most firms recoup the spend by closing clients they would otherwise lose. A short 15-minute review helps you quantify the opportunity before any spend.",
+    "alternative_responses": [
+      "Totally understand. We'll show potential ROI on the call — no obligation to move forward.",
+      "I get the concern. Many clients find that a single closed client pays for months of service — let us show the math.",
+      "Understood. Our call is to identify payback potential so you can make an informed decision."
+    ],
+    "persistence_path": [
+      "Reframe to ROI and payback examples from similar clients.",
+      "Offer a case study or a short ROI snapshot via email, then a 15-minute call to discuss.",
+      "If blocked, schedule a follow-up after their budget cycle or quarter."
+    ],
+    "escalation_note": "If cost remains the barrier, provide concrete ROI examples and conservative payback timelines.",
+    "personalization_hook": "Firms in {{Industry}} in {{Location}} typically see payback within X–Y months depending on case value.",
+    "escalation_levels": {
+      "gentle": "I'll send a short ROI case study.",
+      "firm": "The leakage found often exceeds the monthly cost.",
+      "final": "Okay — I'll follow up after your next budget cycle."
+    }
+  },
+  {
+    "id": 20,
+    "objection_text": "Not a priority right now.",
+    "core_emotion": "Delay",
+    "primary_response": "Understood. The problem is while it’s not a priority for you, it may be a priority for competitors who are actively taking clients. A quick 15-minute review now keeps you ahead — when would be suitable?",
+    "alternative_responses": [
+      "I get it. Many firms use short windows like this for planning — we can help prepare you for next quarter.",
+      "Fair — we can schedule a prep session so you’re not behind on January 1st.",
+      "No problem — when should I follow up so it is top of mind for you?"
+    ],
+    "persistence_path": [
+      "Offer to position the call as planning/strategy for upcoming quarters.",
+      "Suggest a short prep call and confirm time.",
+      "If declined, set a follow-up for a specific date tied to planning cycles."
+    ],
+    "escalation_note": "Tie to planning cycles and competitor action; use scarcity if needed: 'We only open X audit slots per week.'",
+    "personalization_hook": "Let's prepare so your {{Industry}} firm in {{Location}} isn't behind next quarter.",
+    "escalation_levels": {
+      "gentle": "When should I follow up?",
+      "firm": "Competitors are active now; catching up later costs more.",
+      "final": "Okay — I'll schedule a follow-up for a date you choose."
+    }
+  },
+  {
+    "id": 21,
+    "objection_text": "I'll think about it.",
+    "core_emotion": "Stall",
+    "primary_response": "Of course — to help you think with facts, let's book a 15-minute review so you have real numbers instead of guesses. What day this week works?",
+    "alternative_responses": [
+      "I hear you. Would Tuesday morning or Thursday afternoon work to lock in a short review?",
+      "No problem. To make that thinking useful, I'll send a one-page snapshot and reserve a short follow-up.",
+      "Sure — could I send a quick summary and then set a time to discuss it?"
+    ],
+    "persistence_path": [
+      "Offer two slots and require a choice to avoid passive delay.",
+      "If still vague, send snapshot and set a calendar reminder for follow-up in 7–10 days.",
+      "Add to nurture sequence with the subject line referencing the 15-minute review."
+    ],
+    "escalation_note": "If 'I'll think about it' becomes a pattern, ask 'What specifically would you like to think through?' to surface real objections.",
+    "personalization_hook": "This will give you an immediate view of {{Industry}} leakage in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "I'll send the snapshot — what time works for a quick chat?",
+      "firm": "Let's lock a time now so you have real numbers to think about.",
+      "final": "I'll follow up in a week unless you prefer a specific time."
+    }
+  },
+  {
+    "id": 22,
+    "objection_text": "I need to check with my partner.",
+    "core_emotion": "Shared Decision",
+    "primary_response": "Totally makes sense. Would you like to schedule a time when both of you can join? I can offer two options to make it easy.",
+    "alternative_responses": [
+      "Great — what two times work for you both so we can lock one in now?",
+      "Understood. I can send a calendar invite for a short review and include any materials you want to share.",
+      "Perfect — when would be a convenient time for both to join the 15-minute session?"
+    ],
+    "persistence_path": [
+      "Offer two joint slots (e.g., Tue 10 AM or Thu 3 PM) and ask which fits.",
+      "If unsure, send a calendar link with multiple times to choose from.",
+      "Confirm attendees and send a one-page pre-read before the call."
+    ],
+    "escalation_note": "Avoid pressing one decision maker to make a unilateral choice; enable the meeting to include stakeholders.",
+    "personalization_hook": "I’ll tailor the short review for your partnership and include peer benchmarks for {{Industry}} in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "When would both of you be available?",
+      "firm": "Let's pick one of these two slots so you can decide together.",
+      "final": "I'll send a flexible invite and a one-page pre-read."
+    }
+  },
+  {
+    "id": 23,
+    "objection_text": "I don't understand what you're offering.",
+    "core_emotion": "Confusion",
+    "primary_response": "Simple — we provide a short, evidence-based review that identifies where clients and revenue may be leaking online. It takes 15 minutes and I show the top 3 issues. Would you like that?",
+    "alternative_responses": [
+      "No problem. We run a quick audit and show the specific gaps vs. competitors.",
+      "I can summarize in a sentence: 'Where you're losing clients and how to stop it' — 15 minutes to explain.",
+      "Happy to clarify — we give a short snapshot with concrete next steps and numbers."
+    ],
+    "persistence_path": [
+      "Give a one-sentence value statement and offer two slots.",
+      "If still unsure, offer to email a one-page example of the audit results.",
+      "Follow up with a simple case study for the same industry."
+    ],
+    "escalation_note": "Use plain language and avoid jargon; show an example to remove confusion quickly.",
+    "personalization_hook": "I'll show where {{Industry}} competitors in {{Location}} are grabbing clients you should have.",
+    "escalation_levels": {
+      "gentle": "Would you like a short example emailed?",
+      "firm": "I'll walk you through the top 3 points in 15 minutes.",
+      "final": "I'll send a simple example and a calendar link to review it if helpful."
+    }
+  },
+  {
+    "id": 24,
+    "objection_text": "We've tried this before.",
+    "core_emotion": "Skepticism",
+    "primary_response": "I hear that. Markets move fast — approaches that worked months ago may not now. We focus on finding current gaps competitors exploit. Can I show a fresh snapshot?",
+    "alternative_responses": [
+      "Totally understandable. This is a fresh check focused on current local competitor moves.",
+      "I know it's frustrating — would a brief, neutral benchmark be useful to see if anything has changed?",
+      "Fair — let us show what’s different now vs. when you tried it before."
+    ],
+    "persistence_path": [
+      "Ask what specifically failed previously to avoid repeating mistakes.",
+      "Offer a short, no-obligation walkthrough to demonstrate difference.",
+      "If still resistant, send a case study showing turnaround after prior failure with another vendor."
+    ],
+    "escalation_note": "Listen for specifics of past failures, then address those directly with evidence or differentiated process.",
+    "personalization_hook": "We’ll show what's changed in the {{Industry}} search landscape in {{Location}} since your last attempt.",
+    "escalation_levels": {
+      "gentle": "Tell me what didn't work before so we avoid that.",
+      "firm": "This is a new snapshot of the current competitor landscape.",
+      "final": "I'll send proof points showing how others recovered after similar experiences."
+    }
+  },
+  {
+    "id": 25,
+    "objection_text": "We don't want to change anything.",
+    "core_emotion": "Resistance",
+    "primary_response": "That's a fair position. The market changes every day — a short review simply shows whether changes are happening around you. It's just data to help you decide.",
+    "alternative_responses": [
+      "I understand — this is not about forcing change, it's about confirming you're not losing ground.",
+      "No pressure — we’ll just present facts so you can choose whether to act.",
+      "I get it — would a one-page snapshot to keep on file be useful?"
+    ],
+    "persistence_path": [
+      "Reassure that the audit is informational only.",
+      "Offer to send a one-page snapshot that requires no action.",
+      "If still closed, schedule a quarterly check-in to monitor changes."
+    ],
+    "escalation_note": "Avoid pushiness; use benchmarking/monitoring language rather than recommending immediate change.",
+    "personalization_hook": "This gives a low-effort view of how {{Industry}} competitors in {{Location}} are moving.",
+    "escalation_levels": {
+      "gentle": "I'll just send a no-pressure snapshot.",
+      "firm": "Even small changes among competitors can cost clients — worth checking.",
+      "final": "I'll follow up in a quarter with an updated snapshot."
+    }
+  },
+  {
+    "id": 26,
+    "objection_text": "Send me materials.",
+    "core_emotion": "Brush-off",
+    "primary_response": "Happy to — I'll send a concise one-page snapshot that highlights top issues. Could we also reserve a 15-minute slot to walk through it so nothing gets lost in the inbox?",
+    "alternative_responses": [
+      "I’ll send materials now. What’s the best email? Also, what times work for a short follow-up?",
+      "Okay — I’ll email a one-page audit and a calendar link to schedule a quick review.",
+      "Sure — will you prefer a PDF or a short video walkthrough attached to the email?"
+    ],
+    "persistence_path": [
+      "Confirm email and send a concise one-pager with a calendar link.",
+      "Offer two specific follow-up times to choose from.",
+      "If no reply, place in nurture sequence with subject lines referencing the 15-minute review."
+    ],
+    "escalation_note": "Keep materials extremely concise; long attachments reduce response rates.",
+    "personalization_hook": "I'll include a one-page snapshot specific to {{Industry}} in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "What's the best email to send it to?",
+      "firm": "I'll include a calendar link so you can pick a time that suits you.",
+      "final": "I'll send it and check back in a week."
+    }
+  },
+  {
+    "id": 27,
+    "objection_text": "Not the right time.",
+    "core_emotion": "Timing",
+    "primary_response": "Understood. When would be a better time? I can pencil something in that suits your schedule — we’ll keep it focused and short.",
+    "alternative_responses": [
+      "No problem. Do you want to plan for next week or the week after?",
+      "Okay — I’ll put a tentative invite and follow up a day before to confirm.",
+      "If you'd prefer, I can email a short snapshot and we can book when it's convenient."
+    ],
+    "persistence_path": [
+      "Offer a concrete near-term time frame (next week or specific dates).",
+      "Place a tentative calendar hold and send a reminder 24 hours before.",
+      "If they insist on no schedule, send a short snapshot and set a follow-up date."
+    ],
+    "escalation_note": "Tie timing to planning cycles (end of month, quarter, budget cycles) to make it relevant.",
+    "personalization_hook": "Let’s pick a time that fits your {{Industry}} workload in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "When would you prefer I follow up?",
+      "firm": "Let's book a short slot next week so it’s on the calendar.",
+      "final": "I’ll follow up on your preferred date."
+    }
+  },
+  {
+    "id": 28,
+    "objection_text": "We're closing for the year.",
+    "core_emotion": "Shutdown",
+    "primary_response": "That’s fair — many firms use this time to plan for next year. A quick 15-minute prep call now can position you better for January. Want to schedule a short planning session?",
+    "alternative_responses": [
+      "Makes sense. We can do a planning call to prepare for next year — when works for you?",
+      "Totally — we’ll keep it short and focused on priorities for the new year.",
+      "Understood. If now is impossible, how about a quick call in the first week back to get ahead?"
+    ],
+    "persistence_path": [
+      "Position the call as planning/prep rather than selling.",
+      "Offer a short session before year-end or schedule in first week of January.",
+      "Send a planning checklist as a value-add when scheduling."
+    ],
+    "escalation_note": "Use the planning angle to make the timing feel strategic, not disruptive.",
+    "personalization_hook": "We’ll focus on {{Industry}} seasonal trends in {{Location}} to get you ready for Q1.",
+    "escalation_levels": {
+      "gentle": "When would you like to plan for next year?",
+      "firm": "A short planning session now gives you a head start in January.",
+      "final": "Okay — I'll follow up in early January."
+    }
+  },
+  {
+    "id": 29,
+    "objection_text": "We don't want cold callers.",
+    "core_emotion": "Aversion",
+    "primary_response": "I get that. This isn’t a cold sales push — it’s a short problem-solving review intended to protect revenue. Think of it as a quick audit, not a sales call.",
+    "alternative_responses": [
+      "Completely understood. We treat these as helpful audits — no selling during the session.",
+      "I know — that’s why our sessions are evidence-based and short. Would you consider a one-page snapshot first?",
+      "Fair — I’ll send a short summary and only set a call if you'd like to see more."
+    ],
+    "persistence_path": [
+      "Reframe the call as an audit and explicitly state 'no sales pitch' during first meeting.",
+      "Offer a one-page snapshot and calendar link for an optional review.",
+      "If resistance continues, keep communication email-only with opt-in calendar link."
+    ],
+    "escalation_note": "Do not push the 'sale' narrative; emphasize neutrality and evidence.",
+    "personalization_hook": "This audit shows where {{Industry}} clients in {{Location}} are being lost.",
+    "escalation_levels": {
+      "gentle": "I'll email a no-pressure snapshot.",
+      "firm": "This is a short, non-sales review — would you consider it?",
+      "final": "Okay — I’ll send information by email and wait for your cue."
+    }
+  },
+  {
+    "id": 30,
+    "objection_text": "I need to see numbers first.",
+    "core_emotion": "Proof-seeking",
+    "primary_response": "Perfect — that's exactly what the 15-minute review is for. We'll show specific metrics and quick wins tailored to your firm. When can I schedule 15 minutes?",
+    "alternative_responses": [
+      "Great — we’ll prepare a concise snapshot with metrics for the call.",
+      "Understood. I’ll email a preview and then book 15 minutes to walk through the numbers.",
+      "Absolutely — we’ll bring concrete examples and benchmarks for your industry."
+    ],
+    "persistence_path": [
+      "Offer immediate 15-minute slots and state you'll bring the numbers to the call.",
+      "If they want preview, send a brief sample report and set a follow-up to review the full audit.",
+      "Confirm which KPIs they care about so you tailor the snapshot."
+    ],
+    "escalation_note": "Be prepared with concrete metrics and case studies for the specific industry.",
+    "personalization_hook": "We’ll show KPIs relevant to {{Industry}} in {{Location}} — e.g., leads/week, intake response time, lost revenue estimate.",
+    "escalation_levels": {
+      "gentle": "I'll prepare the numbers — when suits you?",
+      "firm": "I'll bring a one-page metrics snapshot to the 15-minute call.",
+      "final": "I'll email a preview and then schedule a time to walk through it."
+    }
+  },
+  {
+    "id": 31,
+    "objection_text": "I hate sales calls.",
+    "core_emotion": "Irritation",
+    "primary_response": "I hear you — so do we. This isn't a sales pitch. This is a brief, useful review of revenue you may be missing. I’ll be concise and practical. Would 10–15 minutes work?",
+    "alternative_responses": [
+      "Completely get it — we keep it helpful and short, not a pushy sales call.",
+      "I understand — this is strictly a data-driven review, no hard sell.",
+      "Fair — let me send a short snapshot first and you can decide if a quick call is worth it."
+    ],
+    "persistence_path": [
+      "Reassure 'no-sales' and offer 10–15 minute window.",
+      "If still resistant, send a one-page non-salesy snapshot.",
+      "Set a light follow-up with option to opt-out."
+    ],
+    "escalation_note": "Avoid argumentative tone. Validate feelings and emphasize usefulness.",
+    "personalization_hook": "This is a short, non-sales review of {{Industry}} performance in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "I’ll be brief and practical — 10–15 minutes.",
+      "firm": "It’s worth 15 minutes to confirm you’re not losing clients.",
+      "final": "Okay — I’ll email a snapshot you can review at leisure."
+    }
+  },
+  {
+    "id": 32,
+    "objection_text": "I'm skeptical.",
+    "core_emotion": "Distrust",
+    "primary_response": "Healthy skepticism is fair. That’s why we don’t ask for commitment — just 15 minutes to show the data. If it’s not useful, we walk away. Does tomorrow morning or afternoon work?",
+    "alternative_responses": [
+      "Skepticism is smart — we’ll show evidence and case studies in 15 minutes.",
+      "I get that — we’ll bring proof, not promises. Can I show you the numbers?",
+      "Totally reasonable — I’ll prepare a short evidence pack for the call."
+    ],
+    "persistence_path": [
+      "Offer case studies and concrete KPIs in advance.",
+      "Book a 15-minute slot and promise an evidence-led discussion.",
+      "If rejected, send a brief case study and follow up in a week."
+    ],
+    "escalation_note": "Use proof/social proof; prepare specific local case studies.",
+    "personalization_hook": "I'll include a short case study for {{Industry}} in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "I'll send a short case study — want to pick a time?",
+      "firm": "We’ll show measurable results from similar clients.",
+      "final": "I'll email proof and check back later."
+    }
+  },
+  {
+    "id": 33,
+    "objection_text": "I've been contacted before.",
+    "core_emotion": "Fatigue",
+    "primary_response": "Understood — outreach is noisy. The difference here is we bring a tailored snapshot of revenue leakage specific to your firm and show exact next steps. Would a short review be useful?",
+    "alternative_responses": [
+      "I get it. We only deliver short, tailored audits with clear next steps — nothing generic.",
+      "Fair — if you give me 15 minutes, I'll show you how this is different from the rest.",
+      "I know outreach is tiresome — we focus on results, not promises. May I share a quick snapshot?"
+    ],
+    "persistence_path": [
+      "Acknowledge outreach fatigue and differentiate your approach quickly.",
+      "Offer a concise, tailored snapshot and 15-minute review with no obligation.",
+      "If still declined, add to a low-frequency nurture cadence highlighting specific client wins."
+    ],
+    "escalation_note": "Use differentiation (tailored, evidence-based) rather than claims of superiority.",
+    "personalization_hook": "I'll prepare a short, targeted audit for {{Industry}} in {{Location}} showing specific leakage points.",
+    "escalation_levels": {
+      "gentle": "I'll send a short, targeted snapshot.",
+      "firm": "This audit shows exact losses — it's not a generic pitch.",
+      "final": "I'll follow up in a month with a concise case study."
+    }
+  },
+  {
+    "id": 34,
+    "objection_text": "I'm too busy.",
+    "core_emotion": "Overload",
+    "primary_response": "Completely understand. We design this as a 10–15 minute focused session that returns clear findings. Would early morning or late afternoon work better?",
+    "alternative_responses": [
+      "I know time is limited — we can compress to a 10-minute snapshot of the top 3 issues.",
+      "No problem — we can record a 5-minute walkthrough you can watch later.",
+      "Understood — tell me the shortest window you can spare and I’ll be concise."
+    ],
+    "persistence_path": [
+      "Offer a 10-minute procedure or a recorded walkthrough option.",
+      "If accepted, confirm a single precise time to avoid back-and-forth.",
+      "If declined, send a short video snapshot and a calendar link to schedule if useful."
+    ],
+    "escalation_note": "Provide non-live options to accommodate busy leaders.",
+    "personalization_hook": "Quick 10-minute snapshot on {{Industry}} leaks in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "10 minutes — when is best?",
+      "firm": "10 minutes can prevent months of leakage.",
+      "final": "I'll send a recorded 5-minute snapshot you can view later."
+    }
+  },
+  {
+    "id": 35,
+    "objection_text": "I don't want to waste my time.",
+    "core_emotion": "Defensive",
+    "primary_response": "Totally fair — time is valuable. That's why we focus only on the top 3 immediate fixes that will impact revenue. If it's not useful, you don't owe us anything. Can we schedule 15 minutes?",
+    "alternative_responses": [
+      "Understood. We'll focus on quick wins and show you the exact impact, not theory.",
+      "I respect that — we'll only present actionable items in a short call.",
+      "Fair — I'll send a short sample of what we cover so you can decide."
+    ],
+    "persistence_path": [
+      "Offer a guaranteed-value promise: 'top 3 urgent fixes' in 15 minutes.",
+      "If they decline, send sample content of the top 3 fixes and schedule a follow-up.",
+      "Add to low-frequency follow-up if still uninterested."
+    ],
+    "escalation_note": "Guarantee value early (top 3 fixes) to reduce perceived risk of wasted time.",
+    "personalization_hook": "We'll show three immediate, low-effort wins for {{Industry}} in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "I’ll show top 3 fixes in 15 minutes.",
+      "firm": "If it’s not useful, you don't owe anything.",
+      "final": "I'll send a short sample report and follow up later."
+    }
+  },
+  {
+    "id": 36,
+    "objection_text": "I don't make this decision alone.",
+    "core_emotion": "Deflection",
+    "primary_response": "Understood — would you like to schedule a quick session where all stakeholders can join? I can offer two times to make it easy to coordinate.",
+    "alternative_responses": [
+      "Makes sense — what day/time could include all decision-makers?",
+      "I can send a calendar invite with multiple options for you to share with the team.",
+      "Perfect — should I include a one-page pre-read for anyone joining?"
+    ],
+    "persistence_path": [
+      "Offer two joint times and confirm stakeholders who should attend.",
+      "Send pre-read materials to attendees in advance to make the meeting efficient.",
+      "If scheduling is difficult, propose an async recorded walkthrough for the group."
+    ],
+    "escalation_note": "Make scheduling easy by proposing concrete times and sending pre-reads to reduce friction.",
+    "personalization_hook": "I'll tailor the pre-read for the stakeholders at your {{Industry}} firm in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "When can all stakeholders join?",
+      "firm": "Let's pick one of these two times to include everyone.",
+      "final": "I'll send a recorded walkthrough for your team to review."
+    }
+  },
+  {
+    "id": 37,
+    "objection_text": "I've been burned by agencies.",
+    "core_emotion": "Distrust",
+    "primary_response": "I completely understand — bad experiences leave scars. This isn't a contract pitch; it's a neutral audit with no obligation. We’ll show data and let you decide next steps.",
+    "alternative_responses": [
+      "I hear you. We focus on transparent metrics and short trials to rebuild trust.",
+      "Understandable. We can show client examples and conservative results to prove value.",
+      "Fair — we’ll provide a neutral snapshot and no-pressure review."
+    ],
+    "persistence_path": [
+      "Offer conservative case studies and transparent metrics up front.",
+      "Book a short, obligation-free session and record it for transparency if they want.",
+      "If they remain skeptical, offer a short pilot or a phased option as a proof step."
+    ],
+    "escalation_note": "Validate past pain, use transparency and conservative promises to rebuild trust.",
+    "personalization_hook": "I'll include trustworthy case studies for {{Industry}} in {{Location}} relevant to your size.",
+    "escalation_levels": {
+      "gentle": "I can share client examples to demonstrate our approach.",
+      "firm": "Let's do a short, no-risk review so you can evaluate the work.",
+      "final": "I'll send a conservative case study and follow up."
+    }
+  },
+  {
+    "id": 38,
+    "objection_text": "We've had a bad experience before.",
+    "core_emotion": "Past Pain",
+    "primary_response": "That makes sense — previous poor engagements change expectations. We start with a neutral, data-first audit and no commitment. If it’s valuable, great; if not, there’s no obligation.",
+    "alternative_responses": [
+      "I understand. We'll show hard metrics and avoid promises — just proof.",
+      "Fair — let me demonstrate with a short case study and a no-pressure review.",
+      "Okay — we'll keep it transparent and focused on small, verifiable wins."
+    ],
+    "persistence_path": [
+      "Offer a neutral audit and case studies showing measurable outcomes.",
+      "Book a short session and promise full transparency on methods and expected outcomes.",
+      "If declined, keep them in a low-pressure nurture list with educational material."
+    ],
+    "escalation_note": "Emphasize transparent deliverables and small, verifiable early wins.",
+    "personalization_hook": "I'll share a relevant case study for {{Industry}} in {{Location}} and keep the first steps low-risk.",
+    "escalation_levels": {
+      "gentle": "We'll keep it transparent and low-risk.",
+      "firm": "Let's run a small check to validate results—no obligation.",
+      "final": "I'll follow up with a conservative case study."
+    }
+  },
+  {
+    "id": 39,
+    "objection_text": "Your timing is off.",
+    "core_emotion": "Excuse",
+    "primary_response": "Totally fair. When would be a better time? I can pencil something in and follow up at the right moment.",
+    "alternative_responses": [
+      "No problem — what day/time is better for you?",
+      "I can work around your schedule — when’s easiest?",
+      "Understood — I'll send a calendar link so you can pick a time that fits."
+    ],
+    "persistence_path": [
+      "Offer flexible options and confirm the chosen time.",
+      "Use calendar links to let them self-serve pick a slot.",
+      "If they don't pick, set a gentle reminder for follow-up in 7–10 days."
+    ],
+    "escalation_note": "Avoid pressuring; make scheduling frictionless with self-serve links.",
+    "personalization_hook": "I'll send a calendar link with times that fit your {{Industry}} schedule in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "When should I reach out instead?",
+      "firm": "Let's lock a slot that suits you — I can send a link.",
+      "final": "I'll email options and follow up once."
+    }
+  },
+  {
+    "id": 40,
+    "objection_text": "I get these calls every day.",
+    "core_emotion": "Overwhelm",
+    "primary_response": "I don’t blame you — most are generic. This is different: we provide a tailored snapshot of lost revenue specific to your firm. If you give me 15 minutes, I’ll show you exactly where clients are leaking.",
+    "alternative_responses": [
+      "I understand — we keep it specific and concise, not generic.",
+      "Fair — I’ll send a short, tailored audit that shows whether you’re losing clients.",
+      "I know the noise is heavy — this is a one-page, evidence-based review, no fluff."
+    ],
+    "persistence_path": [
+      "Differentiate quickly: tailored, evidence-based, and concise.",
+      "Offer a one-page snapshot and two short times to review it.",
+      "If still declined, place in a low-frequency, high-value nurture stream."
+    ],
+    "escalation_note": "Use rapid differentiation; avoid generic language.",
+    "personalization_hook": "This will be a one-page report for {{Industry}} in {{Location}}, showing immediate losses.",
+    "escalation_levels": {
+      "gentle": "I'll send a short tailored snapshot.",
+      "firm": "Give me 15 minutes to show exact leakage — no fluff.",
+      "final": "I'll follow up in a month with a concise case study."
+    }
+  },
+  {
+    "id": 41,
+    "objection_text": "I'm ready to start.",
+    "core_emotion": "Excitement",
+    "primary_response": "Fantastic — that’s what we love to hear. I’ll flag this as high priority and connect you directly with our founder/lead strategist right now. What’s the best number to reach you on for the handoff?",
+    "alternative_responses": [
+      "Amazing — I’ll transfer you to the founder to finalize details.",
+      "Perfect — I’ll connect you with our lead strategist immediately.",
+      "Great — I'll get the onboarding thread started and ensure a rapid handoff."
+    ],
+    "persistence_path": [
+      "Instant warm transfer to founder/closer or schedule an immediate strategy call.",
+      "If transfer not possible, collect contact details and set an immediate follow-up call within 2 hours.",
+      "Send onboarding materials and confirm initial next steps."
+    ],
+    "escalation_note": "Prioritize instant transfer; treat as HOT lead in CRM and notify internal team.",
+    "personalization_hook": "We'll fast-track your onboarding for {{Industry}} clients in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "I'll transfer you now.",
+      "firm": "I'll route this to our founder immediately.",
+      "final": "I'll schedule the first strategic call within 2 hours and confirm."
+    }
+  },
+  {
+    "id": 42,
+    "objection_text": "Send me pricing.",
+    "core_emotion": "Curiosity",
+    "primary_response": "Happy to — pricing depends on what we find during the audit. The strategy session helps us give a tailored quote. Can we schedule 15 minutes so I can show you options aligned to your needs?",
+    "alternative_responses": [
+      "I can share typical price ranges, but the exact package depends on gaps found — would you like a quick call?",
+      "I'll email a basic pricing sheet, but the best approach is to review findings and match the solution.",
+      "I’ll send ranges now; would you prefer a pricing walkthrough after a short audit?"
+    ],
+    "persistence_path": [
+      "Share rough ranges if pressed, then push for a 15-minute audit to tailor pricing.",
+      "If not willing, email pricing ranges and include a calendar link to discuss specifics.",
+      "Log lead as 'pricing requested' and follow-up with tailored proposal after audit."
+    ],
+    "escalation_note": "Avoid committing exact pricing without context; use ranges and tie pricing to audit.",
+    "personalization_hook": "I'll provide pricing examples relevant to {{Industry}} in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "I'll email typical ranges now.",
+      "firm": "The audit lets us give a tailored quote — can we schedule 15 minutes?",
+      "final": "I'll send a price range and follow up to match it to your needs."
+    }
+  },
+  {
+    "id": 43,
+    "objection_text": "I want to sign today.",
+    "core_emotion": "Urgency",
+    "primary_response": "Excellent — I’ll connect you with our founder/closer immediately to get the paperwork moving. Do you prefer a quick call now or a brief handoff via email?",
+    "alternative_responses": [
+      "Perfect — I'm transferring you now to finalize terms.",
+      "Great — I’ll prepare the onboarding documents and connect you with the lead strategist.",
+      "Fantastic — what's the best way to complete this quickly for you: call or email?"
+    ],
+    "persistence_path": [
+      "Warm transfer to the closer/founder for immediate next steps.",
+      "If transfer not possible, collect contact details and arrange a rapid handoff within the hour.",
+      "Send contract/outlines and schedule a kickoff call."
+    ],
+    "escalation_note": "Treat as HOT lead: prioritize and expedite internal workflows.",
+    "personalization_hook": "We'll prioritize onboarding for {{Industry}} in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "I'll transfer you now.",
+      "firm": "I'll ensure a founder-level handoff immediately.",
+      "final": "I'll send the contract and schedule kickoff within 24 hours."
+    }
+  },
+  {
+    "id": 44,
+    "objection_text": "Contract questions.",
+    "core_emotion": "Detail-oriented",
+    "primary_response": "Great question — our founder or account lead handles all contract specifics. I'll connect you with them so they can answer any legal or billing details right away.",
+    "alternative_responses": [
+      "I'll transfer you to our operations lead to walk through contract terms.",
+      "Happy to clarify — what's your main concern so I can bring the right person to the call?",
+      "I can send the contract outline now and connect you to discuss specifics."
+    ],
+    "persistence_path": [
+      "Warm transfer to the appropriate internal contact (founder/ops/legal).",
+      "If transfer not possible, collect specifics and schedule a same-day callback with contract lead.",
+      "Follow up with a written summary and next steps."
+    ],
+    "escalation_note": "Do not attempt to answer complex legal/billing questions; escalate immediately.",
+    "personalization_hook": "I'll connect you with the founder to discuss contract terms for {{Industry}} in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "I'll get the right person on the line now.",
+      "firm": "Let me bring in our operations lead to address that.",
+      "final": "I'll schedule a call with our legal/ops lead within the day."
+    }
+  },
+  {
+    "id": 45,
+    "objection_text": "Can we talk now?",
+    "core_emotion": "Availability",
+    "primary_response": "Yes — I can jump on a brief call now. Would 10–15 minutes work? I'll keep it focused on the key findings and next steps.",
+    "alternative_responses": [
+      "I'm available — let's do a quick 15-minute walkthrough.",
+      "Absolutely — I can start now and keep it concise.",
+      "Great — I’ll call you right away for a short strategic check."
+    ],
+    "persistence_path": [
+      "Confirm immediate availability and call duration (10–15 minutes).",
+      "If internal transfer needed, warm-transfer or schedule the closest possible immediate slot.",
+      "After the call, capture next steps and expedite any onboarding if interested."
+    ],
+    "escalation_note": "Treat as priority and allocate staff/time for instant engagement.",
+    "personalization_hook": "We can go over the {{Industry}} findings for {{Location}} right now.",
+    "escalation_levels": {
+      "gentle": "I can start now — 15 minutes.",
+      "firm": "Let's begin immediately and focus on top issues.",
+      "final": "I'll arrange an immediate strategic handoff after the call."
+    }
+  },
+  {
+    "id": 46,
+    "objection_text": "We're a small firm.",
+    "core_emotion": "Insecurity",
+    "primary_response": "That can actually be an advantage. Smaller firms often see the biggest ROI from fixing intake and visibility issues. A short review could produce outsized results for your size.",
+    "alternative_responses": [
+      "Small firms often convert well from small improvements — 15 minutes could be high ROI.",
+      "Being small means you can move fast — let's see quick wins you can implement.",
+      "Many small practices grew quickly after a focused audit — we'd love to show you how."
+    ],
+    "persistence_path": [
+      "Emphasize high ROI potential for small firms and offer two slots.",
+      "Share case studies of similar small firms and a conservative projection.",
+      "If hesitant, offer a low-cost pilot or a no-cost snapshot."
+    ],
+    "escalation_note": "Offer phased, low-risk options for small firms.",
+    "personalization_hook": "Here's how other small {{Industry}} firms in {{Location}} achieved rapid wins.",
+    "escalation_levels": {
+      "gentle": "Let's look at quick wins for small firms.",
+      "firm": "Small changes can lead to big returns — 15 minutes is worth it.",
+      "final": "I'll send a short case study of similar small firms."
+    }
+  },
+  {
+    "id": 47,
+    "objection_text": "We're not tech-savvy.",
+    "core_emotion": "Fear",
+    "primary_response": "No problem — we handle the heavy lifting. Most of what we implement runs in the background and requires very little from your team. The 15-minute call just helps us point to the priorities.",
+    "alternative_responses": [
+      "We do the technical work — you’ll see results without needing to manage the details.",
+      "We focus on easy wins that don't require complex tech on your side.",
+      "Many clients are not technical — we guide every step and make it simple."
+    ],
+    "persistence_path": [
+      "Reassure low-effort from their side and provide examples of simple implementations.",
+      "Offer to include a technical lead on the call to answer practical questions.",
+      "If still concerned, propose a low-effort pilot to demonstrate ease."
+    ],
+    "escalation_note": "Avoid jargon; offer operational support and hand-holding.",
+    "personalization_hook": "We specialize in low-lift solutions for {{Industry}} firms in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "We handle the tech — you won't need to be technical.",
+      "firm": "We can run a low-effort pilot to prove it.",
+      "final": "I'll connect you with our technical lead to ease concerns."
+    }
+  },
+  {
+    "id": 48,
+    "objection_text": "We've got internal staff.",
+    "core_emotion": "Confidence",
+    "primary_response": "That's a strong position — internal staff are valuable. What we offer is a complementary external check that often surfaces blind spots. Would your team be open to a brief joint review?",
+    "alternative_responses": [
+      "Great — we can work alongside your team and present neutral findings.",
+      "Perfect — we’ll coordinate with your staff and share an objective snapshot.",
+      "Understood — would your internal lead like to join a short call to go through findings?"
+    ],
+    "persistence_path": [
+      "Offer to coordinate with internal staff and schedule a joint 15-minute review.",
+      "Provide a one-page report your team can validate and act on internally.",
+      "If refused, tag prospect as 'internal-only' and re-approach later with benchmarking data."
+    ],
+    "escalation_note": "Position as collaborative, not replacement; avoid undermining internal staff.",
+    "personalization_hook": "We'll present neutral benchmarks your internal team can evaluate for {{Industry}} in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "Shall we set a joint call with your internal lead?",
+      "firm": "An outside check can be a valuable complement to your staff.",
+      "final": "I'll send a report your team can review at their convenience."
+    }
+  },
+  {
+    "id": 49,
+    "objection_text": "I need more info first.",
+    "core_emotion": "Hesitation",
+    "primary_response": "Of course. What specific info would help you decide? I can send a concise one-page snapshot or a short case study relevant to your situation.",
+    "alternative_responses": [
+      "What questions should I answer right now to help?",
+      "I can prepare a brief sample report — would that be useful?",
+      "I'll send a short, focused case study and the key metrics to look at."
+    ],
+    "persistence_path": [
+      "Ask clarifying question to identify the exact info needed.",
+      "Deliver the requested info quickly and follow up with a 15-minute slot to discuss it.",
+      "If no reply, place in nurture sequence with educational touchpoints."
+    ],
+    "escalation_note": "Use clarifying questions to remove ambiguity and deliver targeted info quickly.",
+    "personalization_hook": "I'll include data that matters for {{Industry}} firms in {{Location}}.",
+    "escalation_levels": {
+      "gentle": "What info would help most?",
+      "firm": "I'll prepare that and follow up with a short call.",
+      "final": "I'll send the materials and check back in a week."
+    }
+  },
+  {
+    "id": 50,
+    "objection_text": "We don't like unsolicited calls.",
+    "core_emotion": "Aversion",
+    "primary_response": "Totally fair. That’s why this isn't a pitch — it’s a short problem-solving review to help protect revenue. If you'd prefer a one-page snapshot first, I can email that and leave the next step to you.",
+    "alternative_responses": [
+      "I understand — we keep these sessions highly useful and non-salesy.",
+      "Completely get it — I'll email a concise audit and calendar link so you can choose.",
+      "No problem — I'll provide a short snapshot for your review and leave the choice to engage up to you."
+    ],
+    "persistence_path": [
+      "Offer a one-page snapshot via email and a self-serve calendar link for optional booking.",
+      "Respect the prospect's preferences and provide an opt-out if requested.",
+      "If they engage later, prioritize a non-invasive re-approach."
+    ],
+    "escalation_note": "Always respect an explicit opt-out and remove them from outreach lists promptly.",
+    "personalization_hook": "I'll email a one-page snapshot showing how {{Industry}} competitors in {{Location}} are performing.",
+    "escalation_levels": {
+      "gentle": "I'll email a concise snapshot and a calendar link.",
+      "firm": "This is a short, non-sales review — would you consider it?",
+      "final": "Understood — I'll respect your preference and follow up only if invited."
+    }
+  }
+]

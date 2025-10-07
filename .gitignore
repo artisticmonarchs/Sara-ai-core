@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Virtual environment
+venv/
+.env
+
+# Cache and temporary data
+*.tmp
+*.bak
+*.swp
+
+# Local data
+contacts.csv
+static/audio/
+static/tts/
+
+# System
+.DS_Store
+Thumbs.db
