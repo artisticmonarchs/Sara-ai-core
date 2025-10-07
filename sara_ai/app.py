@@ -1,6 +1,10 @@
+# --------------------------------------------------------
+# app.py — Sara AI Core (Phase 5B, Production Ready)
+# --------------------------------------------------------
+
 import logging
 from flask import Flask, jsonify, request
-from sara_ai.tasks import process_event, run_inference, run_tts
+from sara_ai.tasks import run_inference, run_tts  # ✅ removed process_event
 from sara_ai.logging_utils import log_event
 
 app = Flask(__name__)
@@ -42,20 +46,6 @@ def tts():
     data = request.json or {}
     task = run_tts.delay(data)
     trace_msg = f"TTS task {task.id} submitted to Celery."
-    log_event(
-        service="flask_app",
-        event="task_enqueue",
-        status="ok",
-        message=trace_msg,
-    )
-    return jsonify({"task_id": task.id, "status": "submitted"})
-
-@app.route("/process", methods=["POST"])
-def process():
-    """Generic event processor route"""
-    data = request.json or {}
-    task = process_event.delay(data)
-    trace_msg = f"Process task {task.id} submitted to Celery."
     log_event(
         service="flask_app",
         event="task_enqueue",
