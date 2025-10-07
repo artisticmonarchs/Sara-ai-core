@@ -1,216 +1,74 @@
+# --------------------------------------------------------
 # render.yaml — Sara AI Core (Phase 5B, Production Ready)
-# Defines all core services for Sara AI backend deployment on Render
+# Defines all backend services + Redis for deployment on Render
+# --------------------------------------------------------
 
 version: "1"
 
 services:
   # --------------------------------------------------------
-  # Main Application API (Flask + Uvicorn via Gunicorn)
+  # Main Flask + Uvicorn App (HTTP API)
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-app
-    runtime: docker
-    repo: https://github.com/artisticmonarchs/Sara-ai-core
-    branch: main
-    plan: standard
-    region: ohio
-    dockerContext: .
-    dockerfilePath: ./Dockerfile
-    dockerCommand: gunicorn -w 2 -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:5000
-    healthCheckPath: /health
+    env: python
+    plan: starter
+    region: oregon
     autoDeploy: true
-
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 2 -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:5000 --timeout 120
     envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
       - key: REDIS_URL
         fromService:
           name: sara-ai-core-redis
           type: keyvalue
           property: connectionString
 
-      # App and model settings
-      - key: CELERY_BROKER_URL
-        sync: false
-      - key: CELERY_RESULT_BACKEND
-        sync: false
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: OPENAI_API_URL
-        sync: false
-      - key: OPENAI_TIMEOUT
-        sync: false
-      - key: OPENAI_MAX_TOKENS
-        sync: false
-      - key: ELEVENLABS_API_KEY
-        sync: false
-      - key: ELEVENLABS_VOICE_ID
-        sync: false
-      - key: ELEVENLABS_TTS_TIMEOUT
-        sync: false
-      - key: MP3_RETENTION_HOURS
-        sync: false
-      - key: MEETING_LINK
-        sync: false
-      - key: COMPANY_NAME
-        sync: false
-      - key: SERVER_URL
-        sync: false
-      - key: ENV_MODE
-        sync: false
-      - key: SENTRY_DSN
-        sync: false
-      - key: SARA_ROLE
-        sync: false
-      - key: SARA_NAME
-        sync: false
-      - key: RETRY_ATTEMPTS
-        sync: false
-      - key: RETRY_BACKOFF_SECONDS
-        sync: false
-      - key: SIMULATE
-        sync: false
-
   # --------------------------------------------------------
-  # Celery Worker (Background Task Processor)
+  # Celery Worker
   # --------------------------------------------------------
   - type: worker
     name: sara-ai-core-worker
-    runtime: python
-    repo: https://github.com/artisticmonarchs/Sara-ai-core
-    branch: main
-    plan: standard
-    region: ohio
+    env: python
+    plan: starter
+    region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: celery -A sara_ai.celery_app.celery worker --loglevel=info
-    autoDeploy: true
-
+    startCommand: celery -A sara_ai.celery_app worker --loglevel=info
     envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
       - key: REDIS_URL
         fromService:
           name: sara-ai-core-redis
           type: keyvalue
           property: connectionString
 
-      # Worker configuration
-      - key: CELERY_BROKER_URL
-        sync: false
-      - key: CELERY_RESULT_BACKEND
-        sync: false
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: OPENAI_API_URL
-        sync: false
-      - key: OPENAI_TIMEOUT
-        sync: false
-      - key: OPENAI_MAX_TOKENS
-        sync: false
-      - key: ELEVENLABS_API_KEY
-        sync: false
-      - key: ELEVENLABS_VOICE_ID
-        sync: false
-      - key: ELEVENLABS_TTS_TIMEOUT
-        sync: false
-      - key: MP3_RETENTION_HOURS
-        sync: false
-      - key: MEETING_LINK
-        sync: false
-      - key: COMPANY_NAME
-        sync: false
-      - key: SERVER_URL
-        sync: false
-      - key: ENV_MODE
-        sync: false
-      - key: SENTRY_DSN
-        sync: false
-      - key: SARA_ROLE
-        sync: false
-      - key: SARA_NAME
-        sync: false
-      - key: RETRY_ATTEMPTS
-        sync: false
-      - key: RETRY_BACKOFF_SECONDS
-        sync: false
-      - key: SIMULATE
-        sync: false
-
   # --------------------------------------------------------
-  # Streaming Server (WebSocket / Twilio Media Stream Gateway)
+  # Streaming / Twilio Media Server
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-streaming
-    runtime: docker
-    repo: https://github.com/artisticmonarchs/Sara-ai-core
-    branch: main
-    plan: standard
-    region: ohio
-    dockerContext: .
-    dockerfilePath: ./Dockerfile
-    dockerCommand: python -m sara_ai.streaming_server
-    healthCheckPath: /health
-    autoDeploy: true
-
+    env: python
+    plan: starter
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m sara_ai.streaming_server
     envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
       - key: REDIS_URL
         fromService:
           name: sara-ai-core-redis
           type: keyvalue
           property: connectionString
 
-      # Twilio + model configuration
-      - key: CELERY_BROKER_URL
-        sync: false
-      - key: CELERY_RESULT_BACKEND
-        sync: false
-      - key: TWILIO_ACCOUNT_SID
-        sync: false
-      - key: TWILIO_AUTH_TOKEN
-        sync: false
-      - key: TWILIO_PHONE_NUMBER
-        sync: false
-      - key: TWILIO_MEDIA_WS_URL
-        sync: false
-      - key: PUBLIC_STREAMING_URL
-        sync: false
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: OPENAI_API_URL
-        sync: false
-      - key: OPENAI_TIMEOUT
-        sync: false
-      - key: OPENAI_MAX_TOKENS
-        sync: false
-      - key: ELEVENLABS_API_KEY
-        sync: false
-      - key: ELEVENLABS_VOICE_ID
-        sync: false
-      - key: ELEVENLABS_TTS_TIMEOUT
-        sync: false
-      - key: COMPANY_NAME
-        sync: false
-      - key: SERVER_URL
-        sync: false
-      - key: ENV_MODE
-        sync: false
-      - key: SENTRY_DSN
-        sync: false
-      - key: SARA_ROLE
-        sync: false
-      - key: SARA_NAME
-        sync: false
-      - key: RETRY_ATTEMPTS
-        sync: false
-      - key: RETRY_BACKOFF_SECONDS
-        sync: false
-      - key: BUFFER_FLUSH_BYTES
-        sync: false
-      - key: SIMULATE
-        sync: false
-
-  # --------------------------------------------------------
-  # Redis (Central Key-Value Broker)
-  # --------------------------------------------------------
-  - type: keyvalue
-    name: sara-ai-core-redis
+# --------------------------------------------------------
+# Redis — Key-Value Backend for Celery + Cache
+# --------------------------------------------------------
+databases:
+  - name: sara-ai-core-redis
     plan: standard
-    region: ohio
-    maxmemoryPolicy: allkeys-lru
     ipAllowList: []
+    maxmemoryPolicy: allkeys-lru
