@@ -17,7 +17,9 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn sara_ai.app:app --bind 0.0.0.0:5000 --timeout 120
     healthCheckPath: /health
-
+    dependsOn:
+      - name: sara-ai-core-redis
+        required: true
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
@@ -38,7 +40,9 @@ services:
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
     startCommand: celery -A sara_ai.celery_app worker --loglevel=info
-
+    dependsOn:
+      - name: sara-ai-core-redis
+        required: true
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
@@ -60,7 +64,9 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: python -m sara_ai.streaming_server
     healthCheckPath: /health
-
+    dependsOn:
+      - name: sara-ai-core-redis
+        required: true
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
