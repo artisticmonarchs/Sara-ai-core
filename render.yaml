@@ -1,45 +1,37 @@
-# ============================================================
-# Sara AI — Render Deployment Configuration
-# Phase: 5A — Deployment & Environment Stabilization
-# ============================================================
+# render.yaml — Sara AI Core (Phase 5B, Production Ready)
+# Defines all core services for Sara AI backend deployment on Render
+
 version: "1"
 
 services:
-  # ------------------------------------------------------------
-  # 1. FLASK APP (Main Inference + TTS Gateway)
-  # ------------------------------------------------------------
+  # --------------------------------------------------------
+  # Main Application API (Flask + Uvicorn via Gunicorn)
+  # --------------------------------------------------------
   - type: web
-    name: sara-ai-app
+    name: sara-ai-core-app
     runtime: docker
-    repo: https://github.com/Noblecomsolutionsinc/sara-ai-bot
-    branch: phase5a-fix1-renderboot
+    repo: https://github.com/artisticmonarchs/Sara-ai-core
+    branch: main
     plan: standard
     region: ohio
     dockerContext: .
     dockerfilePath: ./Dockerfile
-    dockerCommand: >
-      gunicorn -w 2 -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:5000
+    dockerCommand: gunicorn -w 2 -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:5000
     healthCheckPath: /health
-    autoDeployTrigger: commit
+    autoDeploy: true
+
     envVars:
-      # Core infrastructure
       - key: REDIS_URL
         fromService:
-          name: sara-ai-redis
-          type: keyvalue
-          property: connectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          name: sara-ai-redis
-          type: keyvalue
-          property: connectionString
-      - key: CELERY_RESULT_BACKEND
-        fromService:
-          name: sara-ai-redis
+          name: sara-ai-core-redis
           type: keyvalue
           property: connectionString
 
-      # OpenAI / LLM
+      # App and model settings
+      - key: CELERY_BROKER_URL
+        sync: false
+      - key: CELERY_RESULT_BACKEND
+        sync: false
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_API_URL
@@ -48,124 +40,126 @@ services:
         sync: false
       - key: OPENAI_MAX_TOKENS
         sync: false
-
-      # ElevenLabs TTS
       - key: ELEVENLABS_API_KEY
         sync: false
       - key: ELEVENLABS_VOICE_ID
         sync: false
       - key: ELEVENLABS_TTS_TIMEOUT
         sync: false
-
-      # App configuration
+      - key: MP3_RETENTION_HOURS
+        sync: false
+      - key: MEETING_LINK
+        sync: false
+      - key: COMPANY_NAME
+        sync: false
       - key: SERVER_URL
         sync: false
       - key: ENV_MODE
         sync: false
-      - key: COMPANY_NAME
-        sync: false
-      - key: SARA_NAME
+      - key: SENTRY_DSN
         sync: false
       - key: SARA_ROLE
         sync: false
-      - key: MEETING_LINK
-        sync: false
-      - key: MP3_RETENTION_HOURS
-        sync: false
-
-      # Logging & Error Handling
-      - key: SENTRY_DSN
+      - key: SARA_NAME
         sync: false
       - key: RETRY_ATTEMPTS
         sync: false
       - key: RETRY_BACKOFF_SECONDS
         sync: false
+      - key: SIMULATE
+        sync: false
 
-      # Monitoring
-      - key: PROMETHEUS_METRICS_ENABLED
-        value: "true"
-
-  # ------------------------------------------------------------
-  # 2. CELERY WORKER
-  # ------------------------------------------------------------
+  # --------------------------------------------------------
+  # Celery Worker (Background Task Processor)
+  # --------------------------------------------------------
   - type: worker
-    name: sara-ai-worker
+    name: sara-ai-core-worker
     runtime: python
-    repo: https://github.com/Noblecomsolutionsinc/sara-ai-bot
-    branch: phase5a-fix1-renderboot
+    repo: https://github.com/artisticmonarchs/Sara-ai-core
+    branch: main
     plan: standard
     region: ohio
     buildCommand: pip install -r requirements.txt
     startCommand: celery -A sara_ai.celery_app.celery worker --loglevel=info
-    autoDeployTrigger: commit
+    autoDeploy: true
+
     envVars:
       - key: REDIS_URL
         fromService:
-          name: sara-ai-redis
-          type: keyvalue
-          property: connectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          name: sara-ai-redis
-          type: keyvalue
-          property: connectionString
-      - key: CELERY_RESULT_BACKEND
-        fromService:
-          name: sara-ai-redis
+          name: sara-ai-core-redis
           type: keyvalue
           property: connectionString
 
+      # Worker configuration
+      - key: CELERY_BROKER_URL
+        sync: false
+      - key: CELERY_RESULT_BACKEND
+        sync: false
       - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_API_URL
+        sync: false
+      - key: OPENAI_TIMEOUT
+        sync: false
+      - key: OPENAI_MAX_TOKENS
         sync: false
       - key: ELEVENLABS_API_KEY
         sync: false
-      - key: SENTRY_DSN
+      - key: ELEVENLABS_VOICE_ID
         sync: false
-      - key: ENV_MODE
+      - key: ELEVENLABS_TTS_TIMEOUT
+        sync: false
+      - key: MP3_RETENTION_HOURS
+        sync: false
+      - key: MEETING_LINK
         sync: false
       - key: COMPANY_NAME
         sync: false
-      - key: SARA_NAME
+      - key: SERVER_URL
+        sync: false
+      - key: ENV_MODE
+        sync: false
+      - key: SENTRY_DSN
         sync: false
       - key: SARA_ROLE
+        sync: false
+      - key: SARA_NAME
         sync: false
       - key: RETRY_ATTEMPTS
         sync: false
       - key: RETRY_BACKOFF_SECONDS
         sync: false
+      - key: SIMULATE
+        sync: false
 
-  # ------------------------------------------------------------
-  # 3. STREAMING SERVER (Twilio WebSocket)
-  # ------------------------------------------------------------
+  # --------------------------------------------------------
+  # Streaming Server (WebSocket / Twilio Media Stream Gateway)
+  # --------------------------------------------------------
   - type: web
-    name: sara-ai-streaming
+    name: sara-ai-core-streaming
     runtime: docker
-    repo: https://github.com/Noblecomsolutionsinc/sara-ai-bot
-    branch: phase5a-fix1-renderboot
+    repo: https://github.com/artisticmonarchs/Sara-ai-core
+    branch: main
     plan: standard
     region: ohio
     dockerContext: .
     dockerfilePath: ./Dockerfile
     dockerCommand: python -m sara_ai.streaming_server
     healthCheckPath: /health
-    autoDeployTrigger: commit
+    autoDeploy: true
+
     envVars:
       - key: REDIS_URL
         fromService:
-          name: sara-ai-redis
-          type: keyvalue
-          property: connectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          name: sara-ai-redis
-          type: keyvalue
-          property: connectionString
-      - key: CELERY_RESULT_BACKEND
-        fromService:
-          name: sara-ai-redis
+          name: sara-ai-core-redis
           type: keyvalue
           property: connectionString
 
+      # Twilio + model configuration
+      - key: CELERY_BROKER_URL
+        sync: false
+      - key: CELERY_RESULT_BACKEND
+        sync: false
       - key: TWILIO_ACCOUNT_SID
         sync: false
       - key: TWILIO_AUTH_TOKEN
@@ -176,30 +170,47 @@ services:
         sync: false
       - key: PUBLIC_STREAMING_URL
         sync: false
-
       - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_API_URL
+        sync: false
+      - key: OPENAI_TIMEOUT
+        sync: false
+      - key: OPENAI_MAX_TOKENS
         sync: false
       - key: ELEVENLABS_API_KEY
         sync: false
-      - key: ENV_MODE
+      - key: ELEVENLABS_VOICE_ID
+        sync: false
+      - key: ELEVENLABS_TTS_TIMEOUT
         sync: false
       - key: COMPANY_NAME
         sync: false
-      - key: SARA_NAME
+      - key: SERVER_URL
         sync: false
-      - key: SARA_ROLE
+      - key: ENV_MODE
         sync: false
       - key: SENTRY_DSN
         sync: false
+      - key: SARA_ROLE
+        sync: false
+      - key: SARA_NAME
+        sync: false
+      - key: RETRY_ATTEMPTS
+        sync: false
+      - key: RETRY_BACKOFF_SECONDS
+        sync: false
       - key: BUFFER_FLUSH_BYTES
         sync: false
+      - key: SIMULATE
+        sync: false
 
-  # ------------------------------------------------------------
-  # 4. REDIS INSTANCE
-  # ------------------------------------------------------------
+  # --------------------------------------------------------
+  # Redis (Central Key-Value Broker)
+  # --------------------------------------------------------
   - type: keyvalue
-    name: sara-ai-redis
-    plan: starter
+    name: sara-ai-core-redis
+    plan: standard
     region: ohio
     maxmemoryPolicy: allkeys-lru
     ipAllowList: []
