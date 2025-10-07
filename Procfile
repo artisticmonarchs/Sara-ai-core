@@ -1,12 +1,12 @@
 # --------------------------------------------------------
-# Procfile — Sara AI Core (Phase 5B, Fixed & Production-Ready)
+# Procfile — Sara AI Core (Phase 5B, Final Production Build)
 # --------------------------------------------------------
 
-# ✅ Flask API (uses default WSGI worker, not UvicornWorker)
+# ✅ Flask API (Gunicorn WSGI)
 web: gunicorn sara_ai.app:app --bind 0.0.0.0:$PORT --timeout 120
 
-# ✅ Celery worker (correct import path, no .celery suffix)
+# ✅ Celery Worker (Background Tasks)
 worker: celery -A sara_ai.celery_app worker --loglevel=info
 
-# ✅ Streaming server (Twilio / WebSocket Gateway)
+# ✅ Streaming Gateway (Twilio WebSocket Server)
 stream: python -m sara_ai.streaming_server

@@ -1,27 +1,24 @@
-# Use slim Python base
+# --------------------------------------------------------
+# Dockerfile — Sara AI Core (Phase 5B, Production Ready)
+# --------------------------------------------------------
+
 FROM python:3.11-slim
 
-# Set working directory
+# Prevent Python from buffering stdout/stderr
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y build-essential libsndfile1 && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip
-RUN pip install --upgrade pip
-
-# Install dependencies
+# Copy and install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
 # Copy application code
 COPY . .
 
-# Expose default port
-EXPOSE 5000
-
-# Start the Flask API with Gunicorn + UvicornWorker
-CMD ["gunicorn", "-w", "2", "-k", "uvicorn.workers.UvicornWorker", "sara_ai.app:app", "--bind", "0.0.0.0:5000"]
+# Default command: Flask app (Render uses Procfile overrides)
+CMD ["gunicorn", "sara_ai.app:app", "--bind", "0.0.0.0:5000", "--timeout", "120"]

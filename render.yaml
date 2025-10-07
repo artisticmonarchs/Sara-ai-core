@@ -1,6 +1,5 @@
 # --------------------------------------------------------
-# render.yaml — Sara AI Core (Phase 5B, Final Fixed Version)
-# Defines all 3 backend services + Redis for production deployment
+# render.yaml — Sara AI Core (Phase 5B, Final Production Build)
 # --------------------------------------------------------
 
 version: "1"
@@ -50,7 +49,7 @@ services:
           property: connectionString
 
   # --------------------------------------------------------
-  # Streaming Server (Twilio Media Stream Gateway)
+  # Streaming Server (Twilio / WebSocket Gateway)
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-streaming
