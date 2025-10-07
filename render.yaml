@@ -1,22 +1,24 @@
 # --------------------------------------------------------
-# render.yaml — Sara AI Core (Phase 5B, Production Ready)
-# Defines all backend services + Redis for deployment on Render
+# render.yaml — Sara AI Core (Phase 5B, Final Fixed Version)
+# Defines all 3 backend services + Redis for production deployment
 # --------------------------------------------------------
 
 version: "1"
 
 services:
   # --------------------------------------------------------
-  # Main Flask + Uvicorn App (HTTP API)
+  # Main Flask API (Gunicorn WSGI)
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-app
     env: python
-    plan: starter
+    plan: standard
     region: oregon
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -w 2 -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:5000 --timeout 120
+    startCommand: gunicorn sara_ai.app:app --bind 0.0.0.0:5000 --timeout 120
+    healthCheckPath: /health
+
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
@@ -27,15 +29,17 @@ services:
           property: connectionString
 
   # --------------------------------------------------------
-  # Celery Worker
+  # Celery Worker (Background Task Processor)
   # --------------------------------------------------------
   - type: worker
     name: sara-ai-core-worker
     env: python
-    plan: starter
+    plan: standard
     region: oregon
+    autoDeploy: true
     buildCommand: pip install -r requirements.txt
     startCommand: celery -A sara_ai.celery_app worker --loglevel=info
+
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
@@ -46,15 +50,18 @@ services:
           property: connectionString
 
   # --------------------------------------------------------
-  # Streaming / Twilio Media Server
+  # Streaming Server (Twilio Media Stream Gateway)
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-streaming
     env: python
-    plan: starter
+    plan: standard
     region: oregon
+    autoDeploy: true
     buildCommand: pip install -r requirements.txt
     startCommand: python -m sara_ai.streaming_server
+    healthCheckPath: /health
+
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
@@ -65,10 +72,11 @@ services:
           property: connectionString
 
 # --------------------------------------------------------
-# Redis — Key-Value Backend for Celery + Cache
+# Redis (Central Key-Value Broker)
 # --------------------------------------------------------
 databases:
   - name: sara-ai-core-redis
     plan: standard
-    ipAllowList: []
+    region: oregon
     maxmemoryPolicy: allkeys-lru
+    ipAllowList: []
