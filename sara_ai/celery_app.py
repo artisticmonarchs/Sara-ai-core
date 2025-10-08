@@ -13,15 +13,15 @@ logger = logging.getLogger("celery_app")
 # Redis configuration
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
-# Initialize Celery
-celery_app = Celery(
+# Initialize Celery (named 'celery' for Procfile alignment)
+celery = Celery(
     "sara_ai",
     broker=REDIS_URL,
     backend=REDIS_URL,
     include=["sara_ai.tasks"],
 )
 
-celery_app.conf.update(
+celery.conf.update(
     broker_transport_options={"visibility_timeout": 3600},
     task_serializer="json",
     result_serializer="json",

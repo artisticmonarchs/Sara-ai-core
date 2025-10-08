@@ -1,11 +1,13 @@
-# --------------------------------------------------------
-# tasks.py — Sara AI Core (Phase 5B, Production Ready)
-# --------------------------------------------------------
+"""
+tasks.py — Sara AI Core (Phase 5B, Production Ready)
+Contains Celery task definitions for inference and TTS.
+"""
 
-from sara_ai.celery_app import celery_app
+from sara_ai.celery_app import celery
 from sara_ai.logging_utils import log_event
 
-@celery_app.task(name="run_inference")
+
+@celery.task(name="run_inference")
 def run_inference(data: dict, trace_id: str | None = None):
     trace_id = log_event(
         service="celery",
@@ -15,7 +17,7 @@ def run_inference(data: dict, trace_id: str | None = None):
         trace_id=trace_id,
     )
     try:
-        # Core AI inference logic here (placeholder for LLM call)
+        # Core AI inference logic placeholder (LLM or model call)
         result = {"inference_result": f"Processed payload: {data}"}
 
         log_event(
@@ -38,7 +40,7 @@ def run_inference(data: dict, trace_id: str | None = None):
         raise
 
 
-@celery_app.task(name="run_tts")
+@celery.task(name="run_tts")
 def run_tts(data: dict, trace_id: str | None = None):
     trace_id = log_event(
         service="celery",
@@ -48,7 +50,7 @@ def run_tts(data: dict, trace_id: str | None = None):
         trace_id=trace_id,
     )
     try:
-        # Placeholder for TTS generation logic (handled in tts_server)
+        # Placeholder for ElevenLabs or TTS logic
         result = {"tts_output": f"TTS synthesized for: {data}"}
 
         log_event(

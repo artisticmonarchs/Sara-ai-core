@@ -7,4 +7,4 @@ web: gunicorn -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:$P
 streaming: python -m sara_ai.streaming_server
 
 # Celery Worker (background async processing)
-worker: celery -A sara_ai.celery_app worker --loglevel=info
+worker: celery -A sara_ai.celery_app.celery worker --loglevel=info
