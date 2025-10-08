@@ -1,19 +1,19 @@
-# render.yaml — Sara AI Core (Phase 5B, Final Configuration)
-# Correctly declares Celery as a worker, no port binding expected.
+# render.yaml — Sara AI Core (Final Phase 5B)
+# Defines all Render services for production
 
 version: "1"
 
 services:
   # --------------------------------------------------------
-  # 1. Main Application API
+  # Main Application API (Flask + Gunicorn + Uvicorn)
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-app
     env: python
-    plan: standard
-    region: oregon
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:$PORT
+    buildCommand: |
+      pip install -r requirements.txt
+    startCommand: |
+      gunicorn -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:$PORT
     envVars:
       - key: REDIS_URL
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
@@ -25,18 +25,17 @@ services:
         value: "1"
       - key: PORT
         value: "10000"
-    healthCheckPath: /health
 
   # --------------------------------------------------------
-  # 2. Celery Worker (Background Task Processor)
+  # Celery Worker (Background process — no ports exposed)
   # --------------------------------------------------------
   - type: worker
     name: sara-ai-core-worker
     env: python
-    plan: standard
-    region: oregon
-    buildCommand: pip install -r requirements.txt
-    startCommand: celery -A sara_ai.celery_app worker --loglevel=info
+    buildCommand: |
+      pip install -r requirements.txt
+    startCommand: |
+      celery -A sara_ai.celery_app worker --loglevel=info
     envVars:
       - key: REDIS_URL
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
@@ -48,15 +47,15 @@ services:
         value: "1"
 
   # --------------------------------------------------------
-  # 3. Streaming Server
+  # Streaming Server (WebSocket or Flask service)
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-streaming
     env: python
-    plan: standard
-    region: oregon
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -m sara_ai.streaming_server
+    buildCommand: |
+      pip install -r requirements.txt
+    startCommand: |
+      python -m sara_ai.streaming_server
     envVars:
       - key: REDIS_URL
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
@@ -67,11 +66,10 @@ services:
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: PORT
-        value: "10000"
-    healthCheckPath: /health
+        value: "10001"
 
 # --------------------------------------------------------
-# 4. Redis (Key-Value Database)
+# Redis (Key-value store, no password)
 # --------------------------------------------------------
 databases:
   - name: sara-ai-redis
