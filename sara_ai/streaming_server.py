@@ -1,37 +1,66 @@
+# sara_ai/streaming_server.py
+"""
+Streaming Server — Phase 5B (Render Deployment + Redis Integration)
+"""
+
 import os
-import json
 import uuid
 import redis
 from flask import Flask, request, jsonify
 from sara_ai.logging_utils import log_event
 
+# --------------------------------------------------------
+# Initialization
+# --------------------------------------------------------
 app = Flask(__name__)
 
-# --- Redis Client Setup ---
-redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-redis_client = redis.Redis.from_url(redis_url)
+# Environment + Redis setup
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+PORT = int(os.getenv("PORT", 10000))
+SERVICE_NAME = os.getenv("RENDER_SERVICE_NAME", "sara-ai-core-streaming")
 
-# Startup log
-log_event(
-    service="streaming_server",
-    event="startup",
-    status="ok",
-    message=f"Streaming server initialized with Redis URL: {redis_url}",
-)
+redis_client = redis.Redis.from_url(REDIS_URL)
 
-# Optional Redis connectivity check
+# Startup check
 try:
     redis_client.ping()
-    log_event(service="streaming_server", event="redis_ping", status="ok")
+    log_event(
+        service="streaming_server",
+        event="startup",
+        status="ok",
+        message=f"Connected to Redis: {REDIS_URL}",
+        extra={"service": SERVICE_NAME, "port": PORT},
+    )
 except Exception as e:
     log_event(
         service="streaming_server",
-        event="redis_ping",
+        event="startup",
         status="error",
-        extra={"error": str(e)},
+        message=f"Redis init failed: {str(e)}",
+        extra={"service": SERVICE_NAME, "port": PORT},
     )
 
+# --------------------------------------------------------
+# Healthcheck (for Render)
+# --------------------------------------------------------
+@app.route("/health", methods=["GET"])
+@app.route("/healthz", methods=["GET"])
+def health():
+    try:
+        redis_client.ping()
+        return jsonify({"status": "ok", "redis": "connected"}), 200
+    except Exception as e:
+        log_event(
+            service="streaming_server",
+            event="health_check",
+            status="error",
+            extra={"error": str(e)},
+        )
+        return jsonify({"status": "error", "redis": "unreachable"}), 500
 
+# --------------------------------------------------------
+# Stream Ingest Endpoint (Twilio or WebSocket proxy)
+# --------------------------------------------------------
 @app.route("/stream", methods=["POST"])
 def handle_stream():
     data = request.get_json(silent=True) or {}
@@ -45,11 +74,11 @@ def handle_stream():
         extra={"task": task_type, "trace_id": trace_id},
     )
 
+    # Simulated processing — replace later with Celery dispatch
     try:
-        # Placeholder for Celery task dispatch or WebSocket handling
         log_event(
             service="streaming_server",
-            event="task_dispatch",
+            event="task_dispatched",
             status="ok",
             extra={"task": task_type, "trace_id": trace_id},
         )
@@ -57,31 +86,21 @@ def handle_stream():
     except Exception as e:
         log_event(
             service="streaming_server",
-            event="task_dispatch",
+            event="task_dispatched",
             status="error",
             extra={"error": str(e), "trace_id": trace_id},
         )
-        return jsonify({"status": "error", "error": str(e), "trace_id": trace_id}), 500
+        return jsonify({"status": "error", "trace_id": trace_id}), 500
 
-
-@app.route("/healthz", methods=["GET"])
-def healthz():
-    """Health check endpoint for Render."""
-    try:
-        redis_client.ping()
-        return jsonify({"status": "ok"}), 200
-    except Exception as e:
-        return jsonify({"status": "error", "error": str(e)}), 500
-
-
+# --------------------------------------------------------
+# Entrypoint
+# --------------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
-    env_name = os.getenv("RENDER_SERVICE_NAME", "sara-ai-core-streaming")
     log_event(
         service="streaming_server",
         event="startup_complete",
         status="ok",
-        message="Streaming server is running.",
-        extra={"port": port, "env": env_name},
+        message=f"Starting Flask on port {PORT}",
+        extra={"service": SERVICE_NAME},
     )
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=PORT)
