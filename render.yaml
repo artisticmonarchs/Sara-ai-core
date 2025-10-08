@@ -1,11 +1,11 @@
-# render.yaml — Sara AI Core (Final Phase 5B)
-# Defines all Render services for production
+# render.yaml — Sara AI Core (Phase 5B Final, verified)
+# All Render services: Flask API, Celery Worker, Streaming Server, Redis
 
 version: "1"
 
 services:
   # --------------------------------------------------------
-  # Main Application API (Flask + Gunicorn + Uvicorn)
+  # Flask API Service (Gunicorn + Uvicorn)
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-app
@@ -27,7 +27,7 @@ services:
         value: "10000"
 
   # --------------------------------------------------------
-  # Celery Worker (Background process — no ports exposed)
+  # Celery Worker (background process — no port)
   # --------------------------------------------------------
   - type: worker
     name: sara-ai-core-worker
@@ -47,7 +47,7 @@ services:
         value: "1"
 
   # --------------------------------------------------------
-  # Streaming Server (WebSocket or Flask service)
+  # Streaming Server (Flask or aiohttp WebSocket)
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-streaming
@@ -69,9 +69,9 @@ services:
         value: "10001"
 
 # --------------------------------------------------------
-# Redis (Key-value store, no password)
+# Redis datastore (shared broker/result backend)
 # --------------------------------------------------------
 databases:
   - name: sara-ai-redis
     plan: standard
-    maxmemoryPolicy: allkeys-lru
+    maxmemoryPolicy:
