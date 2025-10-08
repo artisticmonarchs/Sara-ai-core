@@ -1,9 +1,9 @@
 version: "1"
 
 services:
-  # --------------------------------------------------------
-  # Main Flask API (Gunicorn + Uvicorn)
-  # --------------------------------------------------------
+  # -------------------------------
+  # Main Flask/Uvicorn App Service
+  # -------------------------------
   - type: web
     name: sara-ai-core-app
     env: python
@@ -13,18 +13,15 @@ services:
     startCommand: gunicorn -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:$PORT
     envVars:
       - key: REDIS_URL
-        fromService:
-          type: redis
-          name: sara-ai-core-redis
-          property: connectionString
-      - key: WORKER_URL
-        value: http://sara-ai-core-worker:10000
-      - key: STREAM_URL
-        value: http://sara-ai-core-streaming:10000
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
+      - key: CELERY_BROKER_URL
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
+      - key: CELERY_RESULT_BACKEND
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
 
-  # --------------------------------------------------------
-  # Celery Background Worker (no web port required)
-  # --------------------------------------------------------
+  # -------------------------------
+  # Celery Worker (Background Task Processor)
+  # -------------------------------
   - type: worker
     name: sara-ai-core-worker
     env: python
@@ -34,14 +31,15 @@ services:
     startCommand: celery -A sara_ai.celery_app worker --loglevel=info
     envVars:
       - key: REDIS_URL
-        fromService:
-          type: redis
-          name: sara-ai-core-redis
-          property: connectionString
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
+      - key: CELERY_BROKER_URL
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
+      - key: CELERY_RESULT_BACKEND
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
 
-  # --------------------------------------------------------
-  # Streaming Server (Flask or aiohttp for media stream)
-  # --------------------------------------------------------
+  # -------------------------------
+  # Streaming Server (Realtime Audio Stream)
+  # -------------------------------
   - type: web
     name: sara-ai-core-streaming
     env: python
@@ -51,15 +49,8 @@ services:
     startCommand: python -m sara_ai.streaming_server
     envVars:
       - key: REDIS_URL
-        fromService:
-          type: redis
-          name: sara-ai-core-redis
-          property: connectionString
-
-# --------------------------------------------------------
-# Redis Service
-# --------------------------------------------------------
-databases:
-  - name: sara-ai-core-redis
-    plan: standard
-    maxmemoryPolicy: allkeys-lru
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
+      - key: CELERY_BROKER_URL
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
+      - key: CELERY_RESULT_BACKEND
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
