@@ -1,85 +1,97 @@
+# sara_ai/streaming_server.py
 """
-streaming_server.py — Phase 5B Final (Render-Ready)
+Streaming Server — Phase 5B (Render + Redis Resilient)
 
 Twilio / WebSocket Gateway for Sara AI Core.
-Routes incoming Twilio Media Streams and dispatches Celery tasks.
+Routes incoming events and dispatches Celery tasks.
 """
 
 import os
-import asyncio
-import logging
+import uuid
+import redis
 from flask import Flask, request, jsonify
 from sara_ai.logging_utils import log_event
 from sara_ai.tasks import run_inference, run_tts
-from sara_ai.celery_app import redis_client
 
-# --------------------------------------------------------
-# Initialization
-# --------------------------------------------------------
 app = Flask(__name__)
-PORT = int(os.getenv("PORT", 5001))
 
-# Startup banner
+# --------------------------------------------------------
+# Redis Setup
+# --------------------------------------------------------
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
+# Optional fallback for Render public hostname (rarely used)
+if ".internal" in REDIS_URL:
+    fallback = os.getenv("REDIS_PUBLIC_URL")
+    if fallback:
+        REDIS_URL = fallback
+
+redis_client = redis.Redis.from_url(REDIS_URL)
+
+# Startup logs
 log_event(
     service="streaming_server",
     event="startup",
     status="ok",
-    details={"port": PORT},
+    message=f"Redis client initialized with URL: {REDIS_URL}",
 )
 
-# --------------------------------------------------------
-# Healthcheck endpoint
-# --------------------------------------------------------
-@app.route("/health", methods=["GET"])
-def health():
-    try:
-        redis_client.ping()
-        return jsonify({"status": "ok", "redis": "connected"}), 200
-    except Exception as e:
-        log_event(
-            service="streaming_server",
-            event="health_check",
-            status="error",
-            details={"error": str(e)},
-        )
-        return jsonify({"status": "error", "redis": "unreachable"}), 500
+# Test Redis connectivity
+try:
+    redis_client.ping()
+    log_event(service="streaming_server", event="redis_ping", status="ok")
+except Exception as e:
+    log_event(
+        service="streaming_server",
+        event="redis_ping",
+        status="error",
+        details={"error": str(e)},
+    )
 
 # --------------------------------------------------------
-# Twilio stream ingest endpoint
+# Stream Handler
 # --------------------------------------------------------
 @app.route("/stream", methods=["POST"])
-def stream_event():
-    try:
-        data = request.get_json(force=True)
-        stream_type = data.get("type", "inference")
+def handle_stream():
+    data = request.get_json(silent=True) or {}
+    trace_id = str(uuid.uuid4())[:8]
+    task_type = data.get("task", "inference")
 
-        if stream_type == "tts":
+    log_event(
+        service="streaming_server",
+        event="request_received",
+        status="ok",
+        details={"task": task_type, "trace_id": trace_id},
+    )
+
+    try:
+        if task_type == "tts":
             run_tts.delay(data)
-            task_type = "tts"
         else:
             run_inference.delay(data)
-            task_type = "inference"
 
         log_event(
             service="streaming_server",
             event="enqueue_task",
             status="ok",
-            details={"task": task_type},
+            details={"task": task_type, "trace_id": trace_id},
         )
-        return jsonify({"status": "queued", "task": task_type}), 202
+        return jsonify({"status": "queued", "task": task_type, "trace_id": trace_id}), 202
 
     except Exception as e:
         log_event(
             service="streaming_server",
             event="enqueue_task",
             status="error",
-            details={"error": str(e)},
+            details={"error": str(e), "trace_id": trace_id},
         )
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"status": "error", "message": str(e), "trace_id": trace_id}), 500
+
 
 # --------------------------------------------------------
 # Entrypoint
 # --------------------------------------------------------
 if __name__ == "__main__":
+    PORT = int(os.getenv("PORT", 5002))
     log_event(service="streaming_server", event="startup_main", status="ok")
     app.run(host="0.0.0.0", port=PORT)
