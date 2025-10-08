@@ -1,11 +1,11 @@
-# render.yaml — Sara AI Core (Phase 5B, Final Production Configuration)
-# Defines all core services for Sara AI backend deployment on Render.
+# render.yaml — Sara AI Core (Phase 5B, Final Configuration)
+# Correctly declares Celery as a worker, no port binding expected.
 
 version: "1"
 
 services:
   # --------------------------------------------------------
-  # 1. Main Application API (Flask + Gunicorn + Uvicorn)
+  # 1. Main Application API
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-app
@@ -28,7 +28,7 @@ services:
     healthCheckPath: /health
 
   # --------------------------------------------------------
-  # 2. Celery Worker (Background Processing)
+  # 2. Celery Worker (Background Task Processor)
   # --------------------------------------------------------
   - type: worker
     name: sara-ai-core-worker
@@ -48,7 +48,7 @@ services:
         value: "1"
 
   # --------------------------------------------------------
-  # 3. Streaming Server (WebSocket Media Stream)
+  # 3. Streaming Server
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-streaming
@@ -71,10 +71,9 @@ services:
     healthCheckPath: /health
 
 # --------------------------------------------------------
-# 4. Redis (Key-Value Store)
+# 4. Redis (Key-Value Database)
 # --------------------------------------------------------
 databases:
   - name: sara-ai-redis
     plan: standard
-    ipAllowList: []
     maxmemoryPolicy: allkeys-lru
