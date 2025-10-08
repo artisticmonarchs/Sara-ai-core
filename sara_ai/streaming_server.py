@@ -1,97 +1,119 @@
-# sara_ai/streaming_server.py
-"""
-Streaming Server — Phase 5B (Render + Redis Resilient)
-
-Twilio / WebSocket Gateway for Sara AI Core.
-Routes incoming events and dispatches Celery tasks.
-"""
-
 import os
-import uuid
-import redis
+import asyncio
+import traceback
 from flask import Flask, request, jsonify
+import redis
+
 from sara_ai.logging_utils import log_event
 from sara_ai.tasks import run_inference, run_tts
 
+# -------------------------------------------------------------------
+# Flask App Setup
+# -------------------------------------------------------------------
 app = Flask(__name__)
 
-# --------------------------------------------------------
-# Redis Setup
-# --------------------------------------------------------
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+# -------------------------------------------------------------------
+# Environment + Redis Initialization
+# -------------------------------------------------------------------
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+PORT = int(os.getenv("PORT", 5003))
 
-# Optional fallback for Render public hostname (rarely used)
-if ".internal" in REDIS_URL:
-    fallback = os.getenv("REDIS_PUBLIC_URL")
-    if fallback:
-        REDIS_URL = fallback
+redis_client = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
-redis_client = redis.Redis.from_url(REDIS_URL)
-
-# Startup logs
-log_event(
-    service="streaming_server",
-    event="startup",
-    status="ok",
-    message=f"Redis client initialized with URL: {REDIS_URL}",
-)
-
-# Test Redis connectivity
 try:
     redis_client.ping()
-    log_event(service="streaming_server", event="redis_ping", status="ok")
+    log_event(
+        service="streaming_server",
+        event="startup",
+        status="ok",
+        message=f"Redis client initialized and reachable at {REDIS_URL}",
+    )
 except Exception as e:
     log_event(
         service="streaming_server",
-        event="redis_ping",
-        status="error",
-        details={"error": str(e)},
+        event="startup_error",
+        status="failed",
+        message="Redis connection failed during startup",
+        error=str(e),
+        stacktrace=traceback.format_exc(),
     )
+    raise SystemExit(1)
 
-# --------------------------------------------------------
-# Stream Handler
-# --------------------------------------------------------
-@app.route("/stream", methods=["POST"])
-def handle_stream():
-    data = request.get_json(silent=True) or {}
-    trace_id = str(uuid.uuid4())[:8]
-    task_type = data.get("task", "inference")
-
-    log_event(
-        service="streaming_server",
-        event="request_received",
-        status="ok",
-        details={"task": task_type, "trace_id": trace_id},
-    )
-
+# -------------------------------------------------------------------
+# Routes
+# -------------------------------------------------------------------
+@app.route("/health", methods=["GET"])
+def health_check():
     try:
-        if task_type == "tts":
-            run_tts.delay(data)
-        else:
-            run_inference.delay(data)
-
-        log_event(
-            service="streaming_server",
-            event="enqueue_task",
-            status="ok",
-            details={"task": task_type, "trace_id": trace_id},
-        )
-        return jsonify({"status": "queued", "task": task_type, "trace_id": trace_id}), 202
-
+        redis_client.ping()
+        return jsonify({"status": "healthy", "redis": "connected"}), 200
     except Exception as e:
         log_event(
             service="streaming_server",
-            event="enqueue_task",
-            status="error",
-            details={"error": str(e), "trace_id": trace_id},
+            event="healthcheck_error",
+            status="failed",
+            message="Redis healthcheck failed",
+            error=str(e),
         )
-        return jsonify({"status": "error", "message": str(e), "trace_id": trace_id}), 500
+        return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 
-# --------------------------------------------------------
-# Entrypoint
-# --------------------------------------------------------
+@app.route("/inference", methods=["POST"])
+async def inference():
+    try:
+        data = request.json or {}
+        task_id = run_inference.delay(data)
+        log_event(
+            service="streaming_server",
+            event="enqueue_inference",
+            status="queued",
+            message=f"Inference task enqueued ({task_id})",
+        )
+        return jsonify({"status": "queued", "task_id": str(task_id)}), 202
+    except Exception as e:
+        log_event(
+            service="streaming_server",
+            event="inference_enqueue_error",
+            status="failed",
+            message="Error enqueueing inference task",
+            error=str(e),
+            stacktrace=traceback.format_exc(),
+        )
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route("/tts", methods=["POST"])
+async def tts():
+    try:
+        data = request.json or {}
+        task_id = run_tts.delay(data)
+        log_event(
+            service="streaming_server",
+            event="enqueue_tts",
+            status="queued",
+            message=f"TTS task enqueued ({task_id})",
+        )
+        return jsonify({"status": "queued", "task_id": str(task_id)}), 202
+    except Exception as e:
+        log_event(
+            service="streaming_server",
+            event="tts_enqueue_error",
+            status="failed",
+            message="Error enqueueing TTS task",
+            error=str(e),
+            stacktrace=traceback.format_exc(),
+        )
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+# -------------------------------------------------------------------
+# Entry Point
+# -------------------------------------------------------------------
 if __name__ == "__main__":
-    PORT = int(os.getenv("PORT", 5002))
-    log_event(service="streaming_server", event="startup_main", status="ok")
+    log_event(
+        service="streaming_server",
+        event="startup_banner",
+        status="ok",
+        message=f"Streaming Server running on port {PORT}",
+    )
     app.run(host="0.0.0.0", port=PORT)
