@@ -2,7 +2,7 @@ version: "1"
 
 services:
   # --------------------------------------------------------
-  # Main Application API (Flask + Uvicorn via Gunicorn)
+  # Main Flask API (Gunicorn + Uvicorn)
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-app
@@ -23,7 +23,7 @@ services:
         value: http://sara-ai-core-streaming:10000
 
   # --------------------------------------------------------
-  # Celery Background Worker (no exposed port)
+  # Celery Background Worker (no web port required)
   # --------------------------------------------------------
   - type: worker
     name: sara-ai-core-worker
@@ -40,7 +40,7 @@ services:
           property: connectionString
 
   # --------------------------------------------------------
-  # Streaming Server (WebSocket/Flask server)
+  # Streaming Server (Flask or aiohttp for media stream)
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-streaming
@@ -57,7 +57,7 @@ services:
           property: connectionString
 
 # --------------------------------------------------------
-# Redis Instance
+# Redis Service
 # --------------------------------------------------------
 databases:
   - name: sara-ai-core-redis
