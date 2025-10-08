@@ -1,12 +1,11 @@
-# --------------------------------------------------------
-# Procfile — Sara AI Core (Phase 5B, Final Production Build)
-# --------------------------------------------------------
+# Procfile — Sara AI Core (Phase 5B)
+# Defines process types for Render deployment
 
-# ✅ Flask API (Gunicorn WSGI)
-web: gunicorn sara_ai.app:app --bind 0.0.0.0:$PORT --timeout 120
+# Main API service (Flask + Uvicorn + Gunicorn)
+web: gunicorn -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:$PORT --timeout 120
 
-# ✅ Celery Worker (Background Tasks)
-worker: celery -A sara_ai.celery_app worker --loglevel=info
+# Celery worker (background tasks)
+worker: celery -A sara_ai.celery_app worker --loglevel=info --pool=prefork --concurrency=2
 
-# ✅ Streaming Gateway (Twilio WebSocket Server)
-stream: python -m sara_ai.streaming_server
+# Streaming server (Twilio gateway)
+streaming: gunicorn -k uvicorn.workers.UvicornWorker sara_ai.streaming_server:app --bind 0.0.0.0:$PORT --timeout 120

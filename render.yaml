@@ -1,100 +1,71 @@
-# --------------------------------------------------------
-# render.yaml — Sara AI Core (Phase 5B, Final Production Build)
-# --------------------------------------------------------
+# render.yaml — Sara AI Core (Phase 5B)
+# Defines all Render services for Sara AI backend deployment
 
 version: "1"
 
 services:
   # --------------------------------------------------------
-  # Main Flask API (Gunicorn WSGI)
+  # 1️⃣ Main Application API
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-app
     env: python
     plan: standard
-    region: oregon
-    autoDeploy: true
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn sara_ai.app:app --bind 0.0.0.0:$PORT --timeout 120
-    healthCheckPath: /health
-    dependsOn:
-      - name: sara-ai-core-redis
-        required: true
+    startCommand: gunicorn -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:$PORT --timeout 120
     envVars:
-      - key: PYTHONUNBUFFERED
-        value: "1"
+      - key: ENV
+        value: production
       - key: REDIS_URL
-        fromService:
-          name: sara-ai-core-redis
-          type: keyvalue
-          property: connectionString
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
       - key: CELERY_BROKER_URL
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
       - key: CELERY_RESULT_BACKEND
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
 
   # --------------------------------------------------------
-  # Celery Worker (Background Task Processor)
+  # 2️⃣ Celery Worker
   # --------------------------------------------------------
   - type: worker
     name: sara-ai-core-worker
     env: python
     plan: standard
-    region: oregon
-    autoDeploy: true
     buildCommand: pip install -r requirements.txt
-    startCommand: celery -A sara_ai.celery_app worker --loglevel=info
-    dependsOn:
-      - name: sara-ai-core-redis
-        required: true
+    startCommand: celery -A sara_ai.celery_app worker --loglevel=info --pool=prefork --concurrency=2
     envVars:
-      - key: PYTHONUNBUFFERED
-        value: "1"
+      - key: ENV
+        value: production
       - key: REDIS_URL
-        fromService:
-          name: sara-ai-core-redis
-          type: keyvalue
-          property: connectionString
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
       - key: CELERY_BROKER_URL
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
       - key: CELERY_RESULT_BACKEND
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
 
   # --------------------------------------------------------
-  # Streaming Server (Twilio / WebSocket Gateway)
+  # 3️⃣ Streaming Server (Twilio Gateway)
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-streaming
     env: python
     plan: standard
-    region: oregon
-    autoDeploy: true
     buildCommand: pip install -r requirements.txt
-    # ✅ Use Gunicorn+Uvicorn for Render port binding
-    startCommand: gunicorn -k uvicorn.workers.UvicornWorker sara_ai.streaming_server:app --bind 0.0.0.0:$PORT
-    healthCheckPath: /healthz
-    dependsOn:
-      - name: sara-ai-core-redis
-        required: true
+    startCommand: gunicorn -k uvicorn.workers.UvicornWorker sara_ai.streaming_server:app --bind 0.0.0.0:$PORT --timeout 120
     envVars:
-      - key: PYTHONUNBUFFERED
-        value: "1"
+      - key: ENV
+        value: production
       - key: REDIS_URL
-        fromService:
-          name: sara-ai-core-redis
-          type: keyvalue
-          property: connectionString
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
       - key: CELERY_BROKER_URL
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
       - key: CELERY_RESULT_BACKEND
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
 
 # --------------------------------------------------------
-# Redis (Central Key-Value Broker)
+# 4️⃣ Redis (Render Key-Value Store)
 # --------------------------------------------------------
 databases:
-  - name: sara-ai-core-redis
+  - name: sara-ai-redis
     plan: standard
-    region: oregon
-    maxmemoryPolicy: allkeys-lru
     ipAllowList: []
+    maxmemoryPolicy: allkeys-lru
