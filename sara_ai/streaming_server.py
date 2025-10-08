@@ -1,106 +1,87 @@
 import os
-import asyncio
+import json
+import uuid
+import redis
 from flask import Flask, request, jsonify
 from sara_ai.logging_utils import log_event
-from sara_ai.tasks import run_inference, run_tts
 
 app = Flask(__name__)
-PORT = int(os.getenv("PORT", 8002))
 
-# ---------------------------------------------------------------------
-# ✅ Startup banner
-# ---------------------------------------------------------------------
+# --- Redis Client Setup ---
+redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+redis_client = redis.Redis.from_url(redis_url)
+
+# Startup log
+log_event(
+    service="streaming_server",
+    event="startup",
+    status="ok",
+    message=f"Streaming server initialized with Redis URL: {redis_url}",
+)
+
+# Optional Redis connectivity check
 try:
-    log_event(
-        service="streaming_server",
-        event="startup",
-        status="ok",
-        message="Streaming server initialized and ready.",
-        extra={
-            "port": PORT,
-            "env": os.getenv("RENDER_SERVICE_NAME", "local"),
-        },
-    )
+    redis_client.ping()
+    log_event(service="streaming_server", event="redis_ping", status="ok")
 except Exception as e:
-    print(f"⚠️ Startup log_event failed: {e}")
-
-# ---------------------------------------------------------------------
-# ✅ Healthcheck endpoint
-# ---------------------------------------------------------------------
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok", "service": "streaming_server"}), 200
-
-# ---------------------------------------------------------------------
-# ✅ Inference endpoint
-# ---------------------------------------------------------------------
-@app.route("/inference", methods=["POST"])
-async def inference():
-    data = request.get_json(force=True)
-    trace_id = data.get("trace_id")
     log_event(
         service="streaming_server",
-        event="inference_request",
-        status="received",
-        message="Inference request received.",
-        extra={"trace_id": trace_id},
+        event="redis_ping",
+        status="error",
+        extra={"error": str(e)},
+    )
+
+
+@app.route("/stream", methods=["POST"])
+def handle_stream():
+    data = request.get_json(silent=True) or {}
+    trace_id = str(uuid.uuid4())[:8]
+    task_type = data.get("task", "unknown")
+
+    log_event(
+        service="streaming_server",
+        event="request_received",
+        status="ok",
+        extra={"task": task_type, "trace_id": trace_id},
     )
 
     try:
-        result = await asyncio.to_thread(run_inference, data)
+        # Placeholder for Celery task dispatch or WebSocket handling
         log_event(
             service="streaming_server",
-            event="inference_response",
-            status="success",
-            message="Inference completed successfully.",
-            extra={"trace_id": trace_id},
+            event="task_dispatch",
+            status="ok",
+            extra={"task": task_type, "trace_id": trace_id},
         )
-        return jsonify(result), 200
+        return jsonify({"status": "ok", "trace_id": trace_id}), 200
     except Exception as e:
         log_event(
             service="streaming_server",
-            event="inference_error",
+            event="task_dispatch",
             status="error",
-            message=str(e),
-            extra={"trace_id": trace_id},
+            extra={"error": str(e), "trace_id": trace_id},
         )
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"status": "error", "error": str(e), "trace_id": trace_id}), 500
 
-# ---------------------------------------------------------------------
-# ✅ TTS endpoint
-# ---------------------------------------------------------------------
-@app.route("/tts", methods=["POST"])
-async def tts():
-    data = request.get_json(force=True)
-    trace_id = data.get("trace_id")
-    log_event(
-        service="streaming_server",
-        event="tts_request",
-        status="received",
-        message="TTS request received.",
-        extra={"trace_id": trace_id},
-    )
 
+@app.route("/healthz", methods=["GET"])
+def healthz():
+    """Health check endpoint for Render."""
     try:
-        result = await asyncio.to_thread(run_tts, data)
-        log_event(
-            service="streaming_server",
-            event="tts_response",
-            status="success",
-            message="TTS generation completed successfully.",
-            extra={"trace_id": trace_id},
-        )
-        return jsonify(result), 200
+        redis_client.ping()
+        return jsonify({"status": "ok"}), 200
     except Exception as e:
-        log_event(
-            service="streaming_server",
-            event="tts_error",
-            status="error",
-            message=str(e),
-            extra={"trace_id": trace_id},
-        )
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT)
+    port = int(os.getenv("PORT", 10000))
+    env_name = os.getenv("RENDER_SERVICE_NAME", "sara-ai-core-streaming")
+    log_event(
+        service="streaming_server",
+        event="startup_complete",
+        status="ok",
+        message="Streaming server is running.",
+        extra={"port": port, "env": env_name},
+    )
+    app.run(host="0.0.0.0", port=port)
