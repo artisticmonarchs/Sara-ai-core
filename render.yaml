@@ -15,7 +15,7 @@ services:
     region: oregon
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn sara_ai.app:app --bind 0.0.0.0:5000 --timeout 120
+    startCommand: gunicorn sara_ai.app:app --bind 0.0.0.0:$PORT --timeout 120
     healthCheckPath: /health
     dependsOn:
       - name: sara-ai-core-redis
@@ -28,6 +28,10 @@ services:
           name: sara-ai-core-redis
           type: keyvalue
           property: connectionString
+      - key: CELERY_BROKER_URL
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
+      - key: CELERY_RESULT_BACKEND
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
 
   # --------------------------------------------------------
   # Celery Worker (Background Task Processor)
@@ -51,6 +55,10 @@ services:
           name: sara-ai-core-redis
           type: keyvalue
           property: connectionString
+      - key: CELERY_BROKER_URL
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
+      - key: CELERY_RESULT_BACKEND
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
 
   # --------------------------------------------------------
   # Streaming Server (Twilio / WebSocket Gateway)
@@ -62,8 +70,9 @@ services:
     region: oregon
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m sara_ai.streaming_server
-    healthCheckPath: /health
+    # ✅ Use Gunicorn+Uvicorn for Render port binding
+    startCommand: gunicorn -k uvicorn.workers.UvicornWorker sara_ai.streaming_server:app --bind 0.0.0.0:$PORT
+    healthCheckPath: /healthz
     dependsOn:
       - name: sara-ai-core-redis
         required: true
@@ -75,6 +84,10 @@ services:
           name: sara-ai-core-redis
           type: keyvalue
           property: connectionString
+      - key: CELERY_BROKER_URL
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
+      - key: CELERY_RESULT_BACKEND
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
 
 # --------------------------------------------------------
 # Redis (Central Key-Value Broker)
