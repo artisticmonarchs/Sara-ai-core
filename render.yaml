@@ -1,42 +1,22 @@
-# render.yaml — Sara AI Core (Phase 5B Final, verified)
-# All Render services: Flask API, Celery Worker, Streaming Server, Redis
+# render.yaml — Sara AI Core (Final Phase 5B Verified)
 
 version: "1"
 
 services:
   # --------------------------------------------------------
-  # Flask API Service (Gunicorn + Uvicorn)
+  # Main Application API (Flask + Uvicorn via Gunicorn)
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-app
     env: python
+    plan: starter
     buildCommand: |
+      pip install --upgrade pip
       pip install -r requirements.txt
-    startCommand: |
-      gunicorn -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:$PORT
+    startCommand: gunicorn -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:$PORT
     envVars:
-      - key: REDIS_URL
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
-      - key: CELERY_BROKER_URL
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
-      - key: CELERY_RESULT_BACKEND
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
-      - key: PYTHONUNBUFFERED
-        value: "1"
       - key: PORT
-        value: "10000"
-
-  # --------------------------------------------------------
-  # Celery Worker (background process — no port)
-  # --------------------------------------------------------
-  - type: worker
-    name: sara-ai-core-worker
-    env: python
-    buildCommand: |
-      pip install -r requirements.txt
-    startCommand: |
-      celery -A sara_ai.celery_app worker --loglevel=info
-    envVars:
+        value: 8000
       - key: REDIS_URL
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
       - key: CELERY_BROKER_URL
@@ -47,15 +27,39 @@ services:
         value: "1"
 
   # --------------------------------------------------------
-  # Streaming Server (Flask or aiohttp WebSocket)
+  # Streaming Server (Flask Async Server)
   # --------------------------------------------------------
   - type: web
     name: sara-ai-core-streaming
     env: python
+    plan: starter
     buildCommand: |
+      pip install --upgrade pip
       pip install -r requirements.txt
-    startCommand: |
-      python -m sara_ai.streaming_server
+    startCommand: python -m sara_ai.streaming_server
+    envVars:
+      - key: PORT
+        value: 5005
+      - key: REDIS_URL
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
+      - key: CELERY_BROKER_URL
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
+      - key: CELERY_RESULT_BACKEND
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
+  # --------------------------------------------------------
+  # Celery Worker (Background Worker)
+  # --------------------------------------------------------
+  - type: worker
+    name: sara-ai-core-worker
+    env: python
+    plan: starter
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: celery -A sara_ai.celery_app worker --loglevel=info
     envVars:
       - key: REDIS_URL
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
@@ -65,13 +69,8 @@ services:
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
       - key: PYTHONUNBUFFERED
         value: "1"
-      - key: PORT
-        value: "10001"
 
-# --------------------------------------------------------
-# Redis datastore (shared broker/result backend)
-# --------------------------------------------------------
 databases:
   - name: sara-ai-redis
     plan: standard
-    maxmemoryPolicy:
+    ipAllowList: []
