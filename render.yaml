@@ -1,55 +1,65 @@
-# render.yaml — Sara AI Core (Phase 5B Final, Port Binding Fix)
-
 version: "1"
 
 services:
-  # 1️⃣ Main API
+  # --------------------------------------------------------
+  # Main Application API (Flask + Uvicorn via Gunicorn)
+  # --------------------------------------------------------
   - type: web
     name: sara-ai-core-app
     env: python
     plan: standard
+    region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:$PORT --timeout 120
+    startCommand: gunicorn -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:$PORT
     envVars:
       - key: REDIS_URL
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
-      - key: CELERY_BROKER_URL
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
-      - key: CELERY_RESULT_BACKEND
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
+        fromService:
+          type: redis
+          name: sara-ai-core-redis
+          property: connectionString
+      - key: WORKER_URL
+        value: http://sara-ai-core-worker:10000
+      - key: STREAM_URL
+        value: http://sara-ai-core-streaming:10000
 
-  # 2️⃣ Celery Worker
+  # --------------------------------------------------------
+  # Celery Background Worker (no exposed port)
+  # --------------------------------------------------------
   - type: worker
     name: sara-ai-core-worker
     env: python
     plan: standard
+    region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: celery -A sara_ai.celery_app worker --loglevel=info --pool=prefork --concurrency=2
+    startCommand: celery -A sara_ai.celery_app worker --loglevel=info
     envVars:
       - key: REDIS_URL
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
-      - key: CELERY_BROKER_URL
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
-      - key: CELERY_RESULT_BACKEND
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
+        fromService:
+          type: redis
+          name: sara-ai-core-redis
+          property: connectionString
 
-  # 3️⃣ Streaming Server
+  # --------------------------------------------------------
+  # Streaming Server (WebSocket/Flask server)
+  # --------------------------------------------------------
   - type: web
     name: sara-ai-core-streaming
     env: python
     plan: standard
+    region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -k uvicorn.workers.UvicornWorker sara_ai.streaming_server:app --bind 0.0.0.0:$PORT --timeout 120
+    startCommand: python -m sara_ai.streaming_server
     envVars:
       - key: REDIS_URL
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
-      - key: CELERY_BROKER_URL
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
-      - key: CELERY_RESULT_BACKEND
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
+        fromService:
+          type: redis
+          name: sara-ai-core-redis
+          property: connectionString
 
+# --------------------------------------------------------
+# Redis Instance
+# --------------------------------------------------------
 databases:
-  - name: sara-ai-redis
+  - name: sara-ai-core-redis
     plan: standard
-    ipAllowList: []
     maxmemoryPolicy: allkeys-lru
