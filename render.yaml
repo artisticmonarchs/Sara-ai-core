@@ -1,9 +1,12 @@
+# render.yaml — Sara AI Core (Phase 5B, Final Production Configuration)
+# Defines all core services for Sara AI backend deployment on Render.
+
 version: "1"
 
 services:
-  # -------------------------------
-  # Main Flask/Uvicorn App Service
-  # -------------------------------
+  # --------------------------------------------------------
+  # 1. Main Application API (Flask + Gunicorn + Uvicorn)
+  # --------------------------------------------------------
   - type: web
     name: sara-ai-core-app
     env: python
@@ -18,10 +21,15 @@ services:
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
       - key: CELERY_RESULT_BACKEND
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PORT
+        value: "10000"
+    healthCheckPath: /health
 
-  # -------------------------------
-  # Celery Worker (Background Task Processor)
-  # -------------------------------
+  # --------------------------------------------------------
+  # 2. Celery Worker (Background Processing)
+  # --------------------------------------------------------
   - type: worker
     name: sara-ai-core-worker
     env: python
@@ -36,10 +44,12 @@ services:
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
       - key: CELERY_RESULT_BACKEND
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
+      - key: PYTHONUNBUFFERED
+        value: "1"
 
-  # -------------------------------
-  # Streaming Server (Realtime Audio Stream)
-  # -------------------------------
+  # --------------------------------------------------------
+  # 3. Streaming Server (WebSocket Media Stream)
+  # --------------------------------------------------------
   - type: web
     name: sara-ai-core-streaming
     env: python
@@ -54,3 +64,17 @@ services:
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
       - key: CELERY_RESULT_BACKEND
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: PORT
+        value: "10000"
+    healthCheckPath: /health
+
+# --------------------------------------------------------
+# 4. Redis (Key-Value Store)
+# --------------------------------------------------------
+databases:
+  - name: sara-ai-redis
+    plan: standard
+    ipAllowList: []
+    maxmemoryPolicy: allkeys-lru
