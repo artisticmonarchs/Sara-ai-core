@@ -1,25 +1,12 @@
-# ================================================================
 # render.yaml — Sara AI Core (Final Phase 5B, Production-Ready)
-# ================================================================
-# Defines all core backend services for Sara AI production deployment on Render
-# Includes: Flask App API, Celery Worker, and Streaming Server
-# Uses: Redis key-value store for Celery + transient cache
-# ================================================================
-
 version: "1"
 
-# --------------------------------------------------------
-# Redis Key-Value Service
-# --------------------------------------------------------
 services:
   - name: sara-ai-redis
     type: redis
     plan: standard
     maxmemoryPolicy: allkeys-lru
 
-  # --------------------------------------------------------
-  # Main Application API (Flask + Uvicorn via Gunicorn)
-  # --------------------------------------------------------
   - name: sara-ai-core-app
     type: web
     env: python
@@ -27,7 +14,7 @@ services:
     region: oregon
     buildCommand: pip install -r requirements.txt
     startCommand: >
-      gunicorn -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:$PORT
+      gunicorn -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:$PORT --timeout 120
     envVars:
       - key: REDIS_URL
         fromService:
@@ -44,19 +31,14 @@ services:
         sync: false
       - key: FLASK_ENV
         value: "production"
-      - key: PORT
-        value: "10000"
 
-  # --------------------------------------------------------
-  # Celery Worker Service
-  # --------------------------------------------------------
   - name: sara-ai-core-worker
-    type: worker
+    type: background
     env: python
     plan: standard
     region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: celery -A sara_ai.celery_app.celery worker --loglevel=INFO -Q sara-ai-core-queue
+    startCommand: celery -A sara_ai.celery_app.celery worker --loglevel=INFO -Q sara-ai-core-queue --concurrency=2
     envVars:
       - key: REDIS_URL
         fromService:
@@ -72,16 +54,15 @@ services:
       - key: SENTRY_DSN
         sync: false
 
-  # --------------------------------------------------------
-  # Streaming Server (WebSocket / Twilio Media Streams)
-  # --------------------------------------------------------
   - name: sara-ai-core-streaming
     type: web
     env: python
     plan: standard
     region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m sara_ai.streaming_server
+    # Run streaming as a web service bound to $PORT using Gunicorn
+    startCommand: >
+      gunicorn sara_ai.streaming_server:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
     envVars:
       - key: REDIS_URL
         fromService:
@@ -96,13 +77,8 @@ services:
         value: "info"
       - key: SENTRY_DSN
         sync: false
-      - key: PORT
-        value: "10001"
 
-# ================================================================
 # Notes:
-# - Redis connection string is auto-injected by Render (public hostname, no .internal suffix)
-# - All logs are JSON structured via logging_utils.py
-# - Trace IDs auto-propagate across services
-# - Each service uses the same WORKER_QUEUE for unified Celery routing
-# ================================================================
+# - Removed static PORT environment variables: Render injects $PORT at runtime for web services.
+# - Streaming server is run with Gunicorn so Render's port-scanner sees an open port.
+# - Worker is a background service (Celery) so Render will not expect it to bind a port.
