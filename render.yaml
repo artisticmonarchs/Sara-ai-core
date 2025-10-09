@@ -1,9 +1,8 @@
 # ================================================================
-# render.yaml — Sara AI Core (Final Phase 5B, Production-Ready)
+# render.yaml — Sara AI Core + Observability (Phase 5C)
 # ================================================================
 # Defines all core backend services for Sara AI production deployment on Render
-# Includes: Flask App API, Celery Worker, and Streaming Server
-# Uses: Redis key-value store for Celery + transient cache
+# Includes: Flask App API, Celery Worker, Streaming Server, Redis, and Grafana Agent
 # ================================================================
 
 version: "1"
@@ -99,10 +98,29 @@ services:
       - key: PORT
         value: "10001"
 
+  # --------------------------------------------------------
+  # Grafana Agent (Prometheus + Loki telemetry exporter)
+  # --------------------------------------------------------
+  - name: sara-ai-agent
+    type: web
+    env: docker
+    plan: standard
+    region: oregon
+    dockerfilePath: ./Dockerfile.agent
+    envVars:
+      - key: GRAFANA_CLOUD_API_TOKEN
+        sync: false
+      - key: GRAFANA_CLOUD_REMOTE_WRITE_URL
+        value: "https://prometheus-prod-36-prod-us-west-0.grafana.net/api/prom/push"
+      - key: GRAFANA_CLOUD_INSTANCE
+        value: "noblecomsolutions"
+      - key: PORT
+        value: "10002"
+
 # ================================================================
 # Notes:
-# - Redis connection string is auto-injected by Render (public hostname, no .internal suffix)
-# - All logs are JSON structured via logging_utils.py
-# - Trace IDs auto-propagate across services
-# - Each service uses the same WORKER_QUEUE for unified Celery routing
+# - Redis: used as broker and transient cache
+# - Grafana Agent pushes Prometheus metrics + logs to Grafana Cloud
+# - DO NOT hardcode your API token; set it in Render Environment tab
+# - Logs and metrics auto-exported with trace_id propagation
 # ================================================================
