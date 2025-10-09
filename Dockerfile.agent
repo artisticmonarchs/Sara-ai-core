@@ -2,10 +2,17 @@
 # Dockerfile.agent — Grafana Agent for Sara AI
 # ============================================
 
+# Use official Grafana Agent image
 FROM grafana/agent:latest
 
-# Copy our agent configuration file into standard path
+# Copy our configuration into the agent's directory
 COPY agent-config.yaml /etc/agent/config.yaml
 
-# Run Grafana Agent with the provided config
+# Expose internal metrics port (optional for Render health)
+EXPOSE 12345
+
+# Default entrypoint for Grafana Agent
+ENTRYPOINT ["/bin/grafana-agent"]
+
+# Run Grafana Agent with our configuration file
 CMD ["run", "--config.file=/etc/agent/config.yaml"]

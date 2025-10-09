@@ -1,5 +1,104 @@
+# ================================================================
+# Render Deployment — Sara AI Core + Grafana Agent
+# Phase 5C — Production Observability Configuration
+# ================================================================
+
+version: "1"
+
+services:
   # --------------------------------------------------------
-  # Grafana Agent (Prometheus + Loki telemetry exporter)
+  # Redis Service
+  # --------------------------------------------------------
+  - name: sara-ai-redis
+    type: redis
+    plan: standard
+    maxmemoryPolicy: allkeys-lru
+
+  # --------------------------------------------------------
+  # Flask API (App)
+  # --------------------------------------------------------
+  - name: sara-ai-core-app
+    type: web
+    env: python
+    plan: standard
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: >
+      gunicorn -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          name: sara-ai-redis
+          type: redis
+          property: connectionString
+      - key: WORKER_QUEUE
+        value: "sara-ai-core-queue"
+      - key: LOG_LEVEL
+        value: "info"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: SENTRY_DSN
+        sync: false
+      - key: FLASK_ENV
+        value: "production"
+      - key: PORT
+        value: "10000"
+
+  # --------------------------------------------------------
+  # Celery Worker
+  # --------------------------------------------------------
+  - name: sara-ai-core-worker
+    type: worker
+    env: python
+    plan: standard
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: >
+      celery -A sara_ai.celery_app.celery worker --loglevel=INFO -Q sara-ai-core-queue
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          name: sara-ai-redis
+          type: redis
+          property: connectionString
+      - key: WORKER_QUEUE
+        value: "sara-ai-core-queue"
+      - key: LOG_LEVEL
+        value: "info"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: SENTRY_DSN
+        sync: false
+
+  # --------------------------------------------------------
+  # Streaming Server (Twilio / WebSocket)
+  # --------------------------------------------------------
+  - name: sara-ai-core-streaming
+    type: web
+    env: python
+    plan: standard
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m sara_ai.streaming_server
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          name: sara-ai-redis
+          type: redis
+          property: connectionString
+      - key: WORKER_QUEUE
+        value: "sara-ai-core-queue"
+      - key: LOG_LEVEL
+        value: "info"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: SENTRY_DSN
+        sync: false
+      - key: PORT
+        value: "10001"
+
+  # --------------------------------------------------------
+  # Grafana Agent (Prometheus + Loki)
   # --------------------------------------------------------
   - name: sara-ai-agent
     type: web
@@ -19,6 +118,8 @@
         value: "https://prometheus-prod-36-prod-us-west-0.grafana.net/api/prom/push"
       - key: GRAFANA_CLOUD_INSTANCE
         value: "noblecomsolutions"
+      - key: LOG_LEVEL
+        value: "info"
       - key: PORT
         value: "10002"
     autoDeploy: true
