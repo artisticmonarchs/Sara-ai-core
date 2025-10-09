@@ -1,13 +1,15 @@
-# ============================================================
-# Dockerfile.agent — Sara AI Observability Container (Flow Mode)
-# ============================================================
+# ================================================================
+# Dockerfile.agent — Grafana Agent for Render (Flow Mode)
+# ================================================================
 
-FROM grafana/agent:latest
+# Use official Grafana Agent
+FROM grafana/agent:v0.32.0
 
-# Copy Flow config
+# Copy River config into container
 COPY agent-config.river /etc/agent/config.river
 
-EXPOSE 12345
+# Expose Render port
+ENV PORT=12345
 
-ENTRYPOINT ["/usr/bin/grafana-agent"]
-CMD ["run", "--config.file=/etc/agent/config.river"]
+# Run Grafana Agent with explicit config file
+CMD ["/usr/bin/grafana-agent", "run", "--config.file=/etc/agent/config.river"]

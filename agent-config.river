@@ -1,3 +1,15 @@
+# ================================================================
+# agent-config.river — Grafana Agent config (Flow Mode)
+# ================================================================
+
+metrics {
+  global {
+    scrape_interval = "15s"
+  }
+
+  wal_directory = "/tmp/agent/wal"
+}
+
 remote_write {
   url = env("GRAFANA_CLOUD_REMOTE_WRITE_URL")
   basic_auth {
@@ -15,19 +27,3 @@ logs {
     }
   }
 }
-
-# Optional: adjust/remove node_exporter target if not running inside container
-# metrics {
-#   wal_directory = "/tmp/wal"
-#   global {
-#     scrape_interval = "15s"
-#   }
-#   configs {
-#     scrape_configs {
-#       job_name = "node"
-#       static_configs {
-#         targets = ["localhost:9100"]
-#       }
-#     }
-#   }
-# }
