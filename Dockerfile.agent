@@ -1,13 +1,13 @@
 # ============================================================
-# Dockerfile.agent — Sara AI Observability Container (Final)
+# Dockerfile.agent — Sara AI Observability Container (Flow Mode)
 # ============================================================
 
 FROM grafana/agent:latest
 
-# Copy our custom config
-COPY agent-config.yaml /etc/agent/config.yaml
+# Copy Flow config
+COPY agent-config.river /etc/agent/config.river
 
 EXPOSE 12345
 
 ENTRYPOINT ["/usr/bin/grafana-agent"]
-CMD ["run", "--config.file=/etc/agent/config.yaml"]
+CMD ["run", "--config.file=/etc/agent/config.river"]

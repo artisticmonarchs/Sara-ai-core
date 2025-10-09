@@ -1,0 +1,71 @@
+// ============================================================
+// agent-config.river — Grafana Agent (Flow Mode)
+// Metrics + Logs integration for Sara AI (Render)
+// ============================================================
+
+logging {
+  level = "info"
+}
+
+// ------------------------------------------------------------
+// METRICS PIPELINE (Prometheus → Grafana Cloud)
+// ------------------------------------------------------------
+
+prometheus.scrape "sara_ai" {
+  targets = [
+    { __address__ = "sara-ai-core-app:10000" },
+    { __address__ = "sara-ai-core-streaming:10001" }
+  ]
+  scrape_interval = "60s"
+}
+
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = env("GRAFANA_CLOUD_REMOTE_WRITE_URL")
+    basic_auth {
+      username = env("GRAFANA_CLOUD_USER")
+      password = env("GRAFANA_CLOUD_API_TOKEN")
+    }
+  }
+}
+
+prometheus.relabel "forward_metrics" {
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+}
+
+// ------------------------------------------------------------
+// LOGS PIPELINE (Loki → Grafana Cloud)
+// ------------------------------------------------------------
+
+local.file_match "app_logs" {
+  // Capture all service logs written to Render’s container stdout
+  path_targets = [
+    "/var/log/*.log",
+    "/var/lib/docker/containers/*/*.log",
+    "/proc/1/fd/1"
+  ]
+}
+
+loki.process "parse_logs" {
+  forward_to = [loki.write.grafana_cloud.receiver]
+}
+
+loki.write "grafana_cloud" {
+  endpoint {
+    url = env("GRAFANA_CLOUD_LOKI_URL")
+    basic_auth {
+      username = env("GRAFANA_CLOUD_USER")
+      password = env("GRAFANA_CLOUD_API_TOKEN")
+    }
+  }
+}
+
+// Tag logs for easier filtering in Grafana Cloud
+loki.relabel "add_labels" {
+  forward_to = [loki.process.parse_logs.receiver]
+  rule {
+    source_labels = ["__path__"]
+    target_label = "service"
+    replacement = "sara-ai"
+  }
+}

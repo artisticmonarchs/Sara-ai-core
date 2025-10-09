@@ -1,24 +1,15 @@
 # ================================================================
-# render.yaml — Sara AI Core + Observability (Phase 5C, Final)
-# ================================================================
-# Defines all backend services for Sara AI production deployment.
-# Includes: Flask API, Celery Worker, Streaming Server, Redis, Grafana Agent.
+# render.yaml — Sara AI Core + Observability (Flow Mode)
 # ================================================================
 
 version: "1"
 
 services:
-  # --------------------------------------------------------
-  # Redis Key-Value Service
-  # --------------------------------------------------------
   - name: sara-ai-redis
     type: redis
     plan: standard
     maxmemoryPolicy: allkeys-lru
 
-  # --------------------------------------------------------
-  # Main Application API (Flask + Gunicorn + Uvicorn)
-  # --------------------------------------------------------
   - name: sara-ai-core-app
     type: web
     env: python
@@ -35,20 +26,13 @@ services:
           property: connectionString
       - key: WORKER_QUEUE
         value: "sara-ai-core-queue"
-      - key: PYTHONUNBUFFERED
-        value: "1"
       - key: LOG_LEVEL
         value: "info"
-      - key: SENTRY_DSN
-        sync: false
       - key: FLASK_ENV
         value: "production"
       - key: PORT
         value: "10000"
 
-  # --------------------------------------------------------
-  # Celery Worker Service
-  # --------------------------------------------------------
   - name: sara-ai-core-worker
     type: worker
     env: python
@@ -65,16 +49,9 @@ services:
           property: connectionString
       - key: WORKER_QUEUE
         value: "sara-ai-core-queue"
-      - key: PYTHONUNBUFFERED
-        value: "1"
       - key: LOG_LEVEL
         value: "info"
-      - key: SENTRY_DSN
-        sync: false
 
-  # --------------------------------------------------------
-  # Streaming Server (WebSocket + Twilio Media Streams)
-  # --------------------------------------------------------
   - name: sara-ai-core-streaming
     type: web
     env: python
@@ -90,17 +67,13 @@ services:
           property: connectionString
       - key: WORKER_QUEUE
         value: "sara-ai-core-queue"
-      - key: PYTHONUNBUFFERED
-        value: "1"
       - key: LOG_LEVEL
         value: "info"
-      - key: SENTRY_DSN
-        sync: false
       - key: PORT
         value: "10001"
 
   # --------------------------------------------------------
-  # Grafana Agent (Prometheus + Loki telemetry exporter)
+  # Grafana Agent — Metrics + Logs Exporter (Flow Mode)
   # --------------------------------------------------------
   - name: sara-ai-agent
     type: web
@@ -109,27 +82,20 @@ services:
     region: oregon
     dockerfilePath: ./Dockerfile.agent
     buildCommand: ""
-    startCommand: /usr/bin/grafana-agent run --config.file=/etc/agent/config.yaml
+    startCommand: >
+      /usr/bin/grafana-agent run --config.file=/etc/agent/config.river
     disk:
       name: agent-config
       mountPath: /etc/agent
     envVars:
-      - key: GRAFANA_CLOUD_API_TOKEN
-        sync: false
       - key: GRAFANA_CLOUD_REMOTE_WRITE_URL
         value: "https://prometheus-prod-36-prod-us-west-0.grafana.net/api/prom/push"
-      - key: GRAFANA_CLOUD_INSTANCE
+      - key: GRAFANA_CLOUD_LOKI_URL
+        value: "https://logs-prod-006.grafana.net/loki/api/v1/push"
+      - key: GRAFANA_CLOUD_USER
         value: "noblecomsolutions"
+      - key: GRAFANA_CLOUD_API_TOKEN
+        sync: false
       - key: PORT
         value: "12345"
     autoDeploy: true
-
-# ================================================================
-# Notes:
-# - Redis: used as Celery broker and transient cache.
-# - Flask API: serves main Sara AI endpoints.
-# - Celery Worker: handles async background jobs.
-# - Streaming Server: real-time WebSocket & Twilio bridge.
-# - Grafana Agent: scrapes metrics + pushes logs to Grafana Cloud.
-# - Environment variables securely stored in Render’s dashboard.
-# ================================================================
