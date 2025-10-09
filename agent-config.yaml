@@ -1,11 +1,11 @@
 # ============================================================
-# Grafana Agent Configuration — Sara AI (Static Mode)
+# agent-config.yaml — Grafana Agent Configuration (Sara AI)
 # ============================================================
 
 server:
   log_level: info
-  http_listen_address: 0.0.0.0
-  http_listen_port: 12345  # Local port for agent health & metrics
+  listen_address: 0.0.0.0
+  listen_port: 12345  # Local agent metrics + health endpoint
 
 metrics:
   global:
@@ -34,7 +34,7 @@ metrics:
       remote_write:
         - url: ${GRAFANA_CLOUD_REMOTE_WRITE_URL}
           basic_auth:
-            username: 2725645  # noblecomsolutions stack ID
+            username: 2725645
             password: ${GRAFANA_CLOUD_API_TOKEN}
 
 logs:
