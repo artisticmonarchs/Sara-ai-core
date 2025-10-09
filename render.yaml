@@ -7,10 +7,10 @@
 
 version: "1"
 
-# --------------------------------------------------------
-# Redis Key-Value Service
-# --------------------------------------------------------
 services:
+  # --------------------------------------------------------
+  # Redis Key-Value Service
+  # --------------------------------------------------------
   - name: sara-ai-redis
     type: redis
     plan: standard
@@ -107,6 +107,12 @@ services:
     plan: standard
     region: oregon
     dockerfilePath: ./Dockerfile.agent
+    disk:
+      name: agent-config
+      mountPath: /etc/agent
+    buildCommand: ""
+    startCommand: >
+      grafana-agent run /etc/agent/config.yaml
     envVars:
       - key: GRAFANA_CLOUD_API_TOKEN
         sync: false
@@ -116,6 +122,7 @@ services:
         value: "noblecomsolutions"
       - key: PORT
         value: "10002"
+    autoDeploy: true
 
 # ================================================================
 # Notes:
