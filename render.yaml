@@ -1,8 +1,8 @@
 # ================================================================
-# render.yaml — Sara AI Core + Observability (Phase 5C)
+# render.yaml — Sara AI Core + Observability (Phase 5C, Final)
 # ================================================================
-# Defines all core backend services for Sara AI production deployment on Render
-# Includes: Flask App API, Celery Worker, Streaming Server, Redis, and Grafana Agent
+# Defines all backend services for Sara AI production deployment
+# Includes: Flask API, Celery Worker, Streaming Server, Redis, Grafana Agent
 # ================================================================
 
 version: "1"
@@ -55,7 +55,8 @@ services:
     plan: standard
     region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: celery -A sara_ai.celery_app.celery worker --loglevel=INFO -Q sara-ai-core-queue
+    startCommand: >
+      celery -A sara_ai.celery_app.celery worker --loglevel=INFO -Q sara-ai-core-queue
     envVars:
       - key: REDIS_URL
         fromService:
@@ -107,12 +108,11 @@ services:
     plan: standard
     region: oregon
     dockerfilePath: ./Dockerfile.agent
+    buildCommand: ""
+    startCommand: grafana-agent run --config.file=/etc/agent/config.yaml
     disk:
       name: agent-config
       mountPath: /etc/agent
-    buildCommand: ""
-    startCommand: >
-      grafana-agent run /etc/agent/config.yaml
     envVars:
       - key: GRAFANA_CLOUD_API_TOKEN
         sync: false
@@ -127,7 +127,7 @@ services:
 # ================================================================
 # Notes:
 # - Redis: used as broker and transient cache
-# - Grafana Agent pushes Prometheus metrics + logs to Grafana Cloud
-# - DO NOT hardcode your API token; set it in Render Environment tab
-# - Logs and metrics auto-exported with trace_id propagation
+# - Grafana Agent: pushes metrics/logs to Grafana Cloud
+# - API token is stored securely via Render’s Environment tab
+# - Logs + metrics fully integrated with trace_id propagation
 # ================================================================

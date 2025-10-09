@@ -1,0 +1,11 @@
+# ============================================
+# Dockerfile.agent — Grafana Agent for Sara AI
+# ============================================
+
+FROM grafana/agent:latest
+
+# Copy our agent configuration file into standard path
+COPY agent-config.yaml /etc/agent/config.yaml
+
+# Run Grafana Agent with the provided config
+CMD ["run", "--config.file=/etc/agent/config.yaml"]
