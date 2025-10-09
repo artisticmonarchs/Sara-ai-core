@@ -1,9 +1,9 @@
 # ============================================================
-# Dockerfile.agent — Sara AI Observability Container
+# Dockerfile.agent — Sara AI Observability Container (Final)
 # ============================================================
 
-# Use the official Grafana Agent image
-FROM grafana/agent:v0.37.5
+# Use the latest Grafana Agent image (Flow-compatible)
+FROM grafana/agent:latest
 
 # Copy our custom config into the container
 COPY agent-config.yaml /etc/agent/config.yaml
