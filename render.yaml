@@ -1,73 +1,106 @@
-# ============================================================
-# Render.yaml — Sara AI Production Deployment Configuration
-# ============================================================
+# ================================================================
+# render.yaml — Sara AI Core + Observability (Phase 5C, Final)
+# ================================================================
+# Defines all backend services for Sara AI production deployment
+# Includes: Flask API, Celery Worker, Streaming Server, Redis, Grafana Agent
+# ================================================================
+
+version: "1"
 
 services:
   # --------------------------------------------------------
-  # 1. Sara AI Core App (Flask + Gunicorn)
-  # --------------------------------------------------------
-  - name: sara-ai-core
-    type: web
-    env: docker
-    plan: standard
-    region: oregon
-    dockerfilePath: ./Dockerfile
-    buildCommand: ""
-    startCommand: gunicorn -b 0.0.0.0:5000 sara_ai.app:app
-    envVars:
-      - key: REDIS_URL
-        value: "redis://sara-ai-redis:6379/0"
-      - key: CELERY_BROKER_URL
-        value: "redis://sara-ai-redis:6379/0"
-      - key: PORT
-        value: "5000"
-      - key: LOG_LEVEL
-        value: "info"
-      - key: SENTRY_DSN
-        sync: false
-      - key: OPENAI_API_KEY
-        sync: false
-    autoDeploy: true
-
-  # --------------------------------------------------------
-  # 2. Sara AI Celery Worker
-  # --------------------------------------------------------
-  - name: sara-ai-worker
-    type: worker
-    env: docker
-    plan: standard
-    region: oregon
-    dockerfilePath: ./Dockerfile
-    buildCommand: ""
-    startCommand: celery -A sara_ai.celery_app.celery_app worker --loglevel=info
-    envVars:
-      - key: REDIS_URL
-        value: "redis://sara-ai-redis:6379/0"
-      - key: CELERY_BROKER_URL
-        value: "redis://sara-ai-redis:6379/0"
-      - key: LOG_LEVEL
-        value: "info"
-      - key: SENTRY_DSN
-        sync: false
-      - key: OPENAI_API_KEY
-        sync: false
-    autoDeploy: true
-
-  # --------------------------------------------------------
-  # 3. Redis (Primary Broker + Cache)
+  # Redis Key-Value Service
   # --------------------------------------------------------
   - name: sara-ai-redis
     type: redis
-    plan: free
-    region: oregon
+    plan: standard
     maxmemoryPolicy: allkeys-lru
-    ipAllowList: []  # private access only
-    disk:
-      name: redis-data
-      mountPath: /data
 
   # --------------------------------------------------------
-  # 4. Grafana Agent (Prometheus + Loki Telemetry Exporter)
+  # Main Application API (Flask + Gunicorn + Uvicorn)
+  # --------------------------------------------------------
+  - name: sara-ai-core-app
+    type: web
+    env: python
+    plan: standard
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: >
+      gunicorn -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          name: sara-ai-redis
+          type: redis
+          property: connectionString
+      - key: WORKER_QUEUE
+        value: "sara-ai-core-queue"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: LOG_LEVEL
+        value: "info"
+      - key: SENTRY_DSN
+        sync: false
+      - key: FLASK_ENV
+        value: "production"
+      - key: PORT
+        value: "10000"
+
+  # --------------------------------------------------------
+  # Celery Worker Service
+  # --------------------------------------------------------
+  - name: sara-ai-core-worker
+    type: worker
+    env: python
+    plan: standard
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: >
+      celery -A sara_ai.celery_app.celery_app worker --loglevel=info -Q sara-ai-core-queue
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          name: sara-ai-redis
+          type: redis
+          property: connectionString
+      - key: WORKER_QUEUE
+        value: "sara-ai-core-queue"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: LOG_LEVEL
+        value: "info"
+      - key: SENTRY_DSN
+        sync: false
+
+  # --------------------------------------------------------
+  # Streaming Server (WebSocket + Twilio Media Streams)
+  # --------------------------------------------------------
+  - name: sara-ai-core-streaming
+    type: web
+    env: python
+    plan: standard
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m sara_ai.streaming_server
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          name: sara-ai-redis
+          type: redis
+          property: connectionString
+      - key: WORKER_QUEUE
+        value: "sara-ai-core-queue"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: LOG_LEVEL
+        value: "info"
+      - key: SENTRY_DSN
+        sync: false
+      - key: PORT
+        value: "10001"
+
+  # --------------------------------------------------------
+  # Grafana Agent (Prometheus + Loki telemetry exporter)
   # --------------------------------------------------------
   - name: sara-ai-agent
     type: web
@@ -76,7 +109,7 @@ services:
     region: oregon
     dockerfilePath: ./Dockerfile.agent
     buildCommand: ""
-    startCommand: agent run --config.file=/etc/agent/config.yaml
+    startCommand: /bin/agent --config.file=/etc/agent/config.yaml
     disk:
       name: agent-config
       mountPath: /etc/agent
@@ -87,8 +120,14 @@ services:
         value: "https://prometheus-prod-36-prod-us-west-0.grafana.net/api/prom/push"
       - key: GRAFANA_CLOUD_INSTANCE
         value: "noblecomsolutions"
-      - key: LOG_LEVEL
-        value: "info"
       - key: PORT
-        value: "10002"
+        value: "12345"
     autoDeploy: true
+
+# ================================================================
+# Notes:
+# - Redis: used as broker and transient cache
+# - Grafana Agent: pushes metrics/logs to Grafana Cloud
+# - API token stored securely in Render’s Environment tab
+# - Logs + metrics fully integrated with trace_id propagation
+# ================================================================
