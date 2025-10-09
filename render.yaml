@@ -31,7 +31,7 @@ services:
       - key: FLASK_ENV
         value: "production"
       - key: PORT
-        value: "10000"
+        fromDatabase: true
 
   - name: sara-ai-core-worker
     type: worker
@@ -70,22 +70,22 @@ services:
       - key: LOG_LEVEL
         value: "info"
       - key: PORT
-        value: "10001"
+        fromDatabase: true
 
   # --------------------------------------------------------
-  # Grafana Agent — Metrics + Logs Exporter
+  # Grafana Agent — Metrics + Logs (Flow mode)
   # --------------------------------------------------------
   - name: sara-ai-agent
     type: web
     env: docker
     plan: standard
     region: oregon
+    # dockerfilePath must point to where Dockerfile.agent lives relative to repo root.
     dockerfilePath: ./Dockerfile.agent
     buildCommand: ""
+    # Render will use this startCommand — DO NOT leave empty
     startCommand: /usr/bin/grafana-agent run --config.file=/etc/agent/config.river
-    disk:
-      name: agent-config
-      mountPath: /etc/agent
+    # NOTE: no disk mount by default — we copy config into image in Dockerfile.agent
     envVars:
       - key: GRAFANA_CLOUD_REMOTE_WRITE_URL
         value: "https://prometheus-prod-36-prod-us-west-0.grafana.net/api/prom/push"
@@ -94,7 +94,7 @@ services:
       - key: GRAFANA_CLOUD_INSTANCE
         value: "noblecomsolutions"
       - key: GRAFANA_CLOUD_API_TOKEN
-        sync: false
+        fromDatabase: true
       - key: PORT
-        value: "12345"
+        fromDatabase: true
     autoDeploy: true

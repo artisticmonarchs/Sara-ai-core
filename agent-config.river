@@ -1,27 +1,58 @@
-# Grafana Agent — Flow Mode Configuration
+# Grafana Agent — Flow Mode Configuration (agent-config.river)
+# Sends Prometheus metrics to Grafana Cloud and writes logs to Grafana Loki.
+# Uses environment variables injected by Render:
+#   GRAFANA_CLOUD_REMOTE_WRITE_URL
+#   GRAFANA_CLOUD_LOKI_URL
+#   GRAFANA_CLOUD_INSTANCE
+#   GRAFANA_CLOUD_API_TOKEN
 
-metrics {
-  global {
-    scrape_interval = "15s"
-  }
+# Basic runtime logging for agent
+logging {
+  level = "info"
+}
 
-  remote_write {
+# Remote write for Prometheus metrics
+prometheus.remote_write "grafana" {
+  # Single endpoint; Grafana Cloud Prometheus remote write URL from env
+  endpoint {
     url = env("GRAFANA_CLOUD_REMOTE_WRITE_URL")
-    basic_auth {
-      username = env("GRAFANA_CLOUD_INSTANCE")
-      password = env("GRAFANA_CLOUD_API_TOKEN")
+
+    # Use basic auth with instance name + API token from Render envs
+    http_client_config {
+      basic_auth {
+        username = env("GRAFANA_CLOUD_INSTANCE")
+        password = env("GRAFANA_CLOUD_API_TOKEN")
+      }
     }
   }
 }
 
-logs {
-  clients {
+# Scrape local targets (example: scrape a local exporter or the app)
+# Update __address__ if your service exposes metrics on a different port.
+prometheus.scrape "sara-ai-local" {
+  # Collect from a set of static targets inside the container
+  targets = [
+    { __address__ = "127.0.0.1:9090" }  # change this if your app exposes /metrics elsewhere
+  ]
+
+  # Forward scraped metrics to the remote_write receiver above
+  forward_to = [prometheus.remote_write.grafana.receiver]
+}
+
+# Loki writer to push logs to Grafana Cloud Loki
+loki.write "grafana" {
+  endpoint {
     url = env("GRAFANA_CLOUD_LOKI_URL")
-    basic_auth {
-      username = env("GRAFANA_CLOUD_INSTANCE")
-      password = env("GRAFANA_CLOUD_API_TOKEN")
+
+    http_client_config {
+      basic_auth {
+        username = env("GRAFANA_CLOUD_INSTANCE")
+        password = env("GRAFANA_CLOUD_API_TOKEN")
+      }
     }
   }
-
-  positions_directory = "/tmp/agent/wal"
 }
+
+# NOTE:
+# - Adjust prometheus.scrape targets if your app/worker/streaming expose metrics on different ports.
+# - agent will create its own internal WAL. Dockerfile ensures /tmp/agent/wal exists.

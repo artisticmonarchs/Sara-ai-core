@@ -1,11 +1,11 @@
 # Use official Grafana Agent v0.32.0
 FROM grafana/agent:v0.32.0
 
-# Copy River configuration
+# Copy River configuration into the image (so it exists if no external disk is mounted)
 COPY agent-config.river /etc/agent/config.river
 
-# Ensure positions directory exists
-RUN mkdir -p /tmp/agent/wal
+# Ensure positions / WAL directory exists and is writable
+RUN mkdir -p /tmp/agent/wal && chmod -R 0755 /tmp/agent/wal
 
 # Run Grafana Agent with explicit config
 CMD ["/usr/bin/grafana-agent", "run", "--config.file=/etc/agent/config.river"]
