@@ -1,25 +1,18 @@
-# ============================================
-# Dockerfile.agent — Grafana Agent for Sara AI
-# ============================================
-# This image is responsible for collecting metrics & logs
-# from all Sara AI services and forwarding them to Grafana Cloud.
-# ============================================
+# ============================================================
+# Dockerfile.agent — Grafana Agent for Sara AI Observability
+# ============================================================
 
-# Use the official Grafana Agent image (contains /bin/agent)
+# Use the official lightweight Grafana Agent image
 FROM grafana/agent:latest
 
-# Copy our custom configuration into the container
-COPY agent-config.yaml /etc/agent/config.yaml
-
-# Expose the health & metrics port (matches render.yaml PORT=12345)
-EXPOSE 12345
-
-# Set a safe working directory
+# Set working directory
 WORKDIR /etc/agent
 
-# Optional: ensure file permissions are readable by agent process
-RUN chmod 644 /etc/agent/config.yaml
+# Copy configuration file from the repo into container
+COPY agent-config.yaml /etc/agent/config.yaml
 
-# Run Grafana Agent in foreground mode with our config
-ENTRYPOINT ["/bin/agent"]
-CMD ["--config.file=/etc/agent/config.yaml"]
+# Expose agent HTTP/metrics port
+EXPOSE 12345
+
+# Start the Grafana Agent using full binary path
+ENTRYPOINT ["/usr/bin/grafana-agent", "run", "--config.file=/etc/agent/config.yaml"]
