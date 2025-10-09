@@ -1,11 +1,16 @@
-# Use official Grafana Agent v0.32.0
+# Dockerfile.agent — Grafana Agent container for Sara AI
+
 FROM grafana/agent:v0.32.0
 
-# Copy River configuration into the image (so it exists if no external disk is mounted)
-COPY agent-config.river /etc/agent/config.river
+# Copy default River configuration into a safe path inside the image
+COPY agent-config.river /opt/agent/default_config.river
 
-# Ensure positions / WAL directory exists and is writable
+# Create WAL directory
 RUN mkdir -p /tmp/agent/wal && chmod -R 0755 /tmp/agent/wal
 
-# Run Grafana Agent with explicit config
-CMD ["/usr/bin/grafana-agent", "run", "--config.file=/etc/agent/config.river"]
+# Copy entrypoint script
+COPY entrypoint.sh /opt/agent/entrypoint.sh
+RUN chmod +x /opt/agent/entrypoint.sh
+
+# Set entrypoint
+ENTRYPOINT ["/opt/agent/entrypoint.sh"]

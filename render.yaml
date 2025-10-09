@@ -1,15 +1,21 @@
 # ================================================================
-# render.yaml — Sara AI Core + Observability (Flow Mode)
+# render.yaml — Sara AI Core + Grafana Agent Observability
 # ================================================================
 
 version: "1"
 
 services:
+  # --------------------------------------------------------
+  # Redis — message broker for Celery
+  # --------------------------------------------------------
   - name: sara-ai-redis
     type: redis
     plan: standard
     maxmemoryPolicy: allkeys-lru
 
+  # --------------------------------------------------------
+  # Core Web App
+  # --------------------------------------------------------
   - name: sara-ai-core-app
     type: web
     env: python
@@ -31,8 +37,11 @@ services:
       - key: FLASK_ENV
         value: "production"
       - key: PORT
-        fromDatabase: true
+        value: "10000"
 
+  # --------------------------------------------------------
+  # Celery Worker
+  # --------------------------------------------------------
   - name: sara-ai-core-worker
     type: worker
     env: python
@@ -52,6 +61,9 @@ services:
       - key: LOG_LEVEL
         value: "info"
 
+  # --------------------------------------------------------
+  # Real-time Streaming Server
+  # --------------------------------------------------------
   - name: sara-ai-core-streaming
     type: web
     env: python
@@ -70,22 +82,22 @@ services:
       - key: LOG_LEVEL
         value: "info"
       - key: PORT
-        fromDatabase: true
+        value: "10001"
 
   # --------------------------------------------------------
-  # Grafana Agent — Metrics + Logs (Flow mode)
+  # Grafana Agent — Metrics + Logs Exporter
   # --------------------------------------------------------
   - name: sara-ai-agent
     type: web
     env: docker
     plan: standard
     region: oregon
-    # dockerfilePath must point to where Dockerfile.agent lives relative to repo root.
     dockerfilePath: ./Dockerfile.agent
     buildCommand: ""
-    # Render will use this startCommand — DO NOT leave empty
-    startCommand: /usr/bin/grafana-agent run --config.file=/etc/agent/config.river
-    # NOTE: no disk mount by default — we copy config into image in Dockerfile.agent
+    startCommand: /opt/agent/entrypoint.sh
+    disk:
+      name: agent-config
+      mountPath: /etc/agent
     envVars:
       - key: GRAFANA_CLOUD_REMOTE_WRITE_URL
         value: "https://prometheus-prod-36-prod-us-west-0.grafana.net/api/prom/push"
@@ -94,7 +106,7 @@ services:
       - key: GRAFANA_CLOUD_INSTANCE
         value: "noblecomsolutions"
       - key: GRAFANA_CLOUD_API_TOKEN
-        fromDatabase: true
+        sync: false
       - key: PORT
-        fromDatabase: true
+        value: "12345"
     autoDeploy: true
