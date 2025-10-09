@@ -1,10 +1,10 @@
 # ============================================================
-# Grafana Agent Configuration — Sara AI
+# Grafana Agent Configuration — Sara AI (Final)
 # ============================================================
 
 server:
   log_level: info
-  http_listen_port: 12345  # Local port for agent health & metrics
+  http_listen_port: 12345  # Local port for agent metrics and health checks
 
 metrics:
   global:
@@ -19,7 +19,7 @@ metrics:
           metrics_path: /metrics
           scheme: https
           static_configs:
-            - targets: ['sara-ai-core-app.onrender.com']
+            - targets: ['sara-ai-core.onrender.com']
 
         # ----------------------------------------------------
         # Streaming Server
@@ -31,13 +31,17 @@ metrics:
             - targets: ['sara-ai-core-streaming.onrender.com']
 
         # ----------------------------------------------------
-        # Future: Celery Worker (optional)
+        # Future (Optional): Celery Worker
         # ----------------------------------------------------
         # - job_name: sara-ai-core-worker
         #   metrics_path: /metrics
+        #   scheme: https
         #   static_configs:
         #     - targets: ['sara-ai-core-worker.onrender.com:9102']
 
+      # --------------------------------------------------------
+      # Remote write to Grafana Cloud Prometheus
+      # --------------------------------------------------------
       remote_write:
         - url: ${GRAFANA_CLOUD_REMOTE_WRITE_URL}
           basic_auth:
