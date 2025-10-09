@@ -1,10 +1,10 @@
 # ============================================================
-# Grafana Agent Configuration — Sara AI
+# Grafana Agent Configuration — Sara AI (Phase 5C.2 Stable)
 # ============================================================
 
 server:
   log_level: info
-  http_listen_port: 12345  # Local port used for agent metrics and health checks
+  http_listen_port: ${PORT}  # Dynamically uses Render’s assigned port
 
 metrics:
   global:
@@ -16,6 +16,7 @@ metrics:
         # Main Flask API (Prometheus /metrics endpoint)
         # ----------------------------------------------------
         - job_name: sara-ai-core-app
+          scheme: https
           metrics_path: /metrics
           static_configs:
             - targets: ['sara-ai-core-app.onrender.com']
@@ -24,17 +25,10 @@ metrics:
         # Streaming Server (Prometheus /metrics endpoint)
         # ----------------------------------------------------
         - job_name: sara-ai-core-streaming
+          scheme: https
           metrics_path: /metrics
           static_configs:
             - targets: ['sara-ai-core-streaming.onrender.com']
-
-        # ----------------------------------------------------
-        # Optional Celery Worker (if exposing port 9102 later)
-        # ----------------------------------------------------
-        # - job_name: sara-ai-core-worker
-        #   metrics_path: /metrics
-        #   static_configs:
-        #     - targets: ['sara-ai-core-worker.onrender.com:9102']
 
       # --------------------------------------------------------
       # Remote Write to Grafana Cloud Prometheus
@@ -42,7 +36,7 @@ metrics:
       remote_write:
         - url: ${GRAFANA_CLOUD_REMOTE_WRITE_URL}
           basic_auth:
-            username: 2725645  # <-- Your Grafana Cloud Stack ID (noblecomsolutions)
+            username: 2725645  # noblecomsolutions stack ID
             password: ${GRAFANA_CLOUD_API_TOKEN}
 
 logs:
