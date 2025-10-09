@@ -1,12 +1,11 @@
 # ============================================================
-# Grafana Agent Configuration — Sara AI (Fixed for v0.40+)
+# Grafana Agent Configuration — Sara AI (Stable Static Mode)
 # ============================================================
 
 server:
   log_level: info
-  http:
-    listen_address: 0.0.0.0
-    listen_port: 12345  # Local port for agent health & metrics
+  http_listen_address: 0.0.0.0
+  http_listen_port: 12345  # Local port for agent health & metrics
 
 metrics:
   global:
