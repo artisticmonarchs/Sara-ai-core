@@ -1,56 +1,42 @@
-# ============================================================
-# agent-config.yaml — Grafana Agent Configuration (Sara AI)
-# ============================================================
+# ================================================================
+# agent-config.yaml — Grafana Agent (Flow mode, 2025 spec)
+# ================================================================
 
 server:
   log_level: info
-  listen_address: 0.0.0.0
-  listen_port: 12345  # Local agent metrics + health endpoint
 
 metrics:
   global:
     scrape_interval: 15s
-  configs:
-    - name: sara-ai
-      scrape_configs:
-        # ----------------------------------------------------
-        # Main Flask API
-        # ----------------------------------------------------
-        - job_name: sara-ai-core-app
-          metrics_path: /metrics
-          scheme: https
-          static_configs:
-            - targets: ['sara-ai-core-app.onrender.com']
 
-        # ----------------------------------------------------
-        # Streaming Server
-        # ----------------------------------------------------
-        - job_name: sara-ai-core-streaming
-          metrics_path: /metrics
-          scheme: https
+  wal_directory: /var/lib/grafana-agent/data
+
+  configs:
+    - name: default
+      scrape_configs:
+        - job_name: "sara-ai-core"
           static_configs:
-            - targets: ['sara-ai-core-streaming.onrender.com']
+            - targets: ["sara-ai-core-app:10000", "sara-ai-core-streaming:10001"]
 
       remote_write:
         - url: ${GRAFANA_CLOUD_REMOTE_WRITE_URL}
           basic_auth:
-            username: 2725645
+            username: ${GRAFANA_CLOUD_INSTANCE}
             password: ${GRAFANA_CLOUD_API_TOKEN}
 
 logs:
   configs:
-    - name: sara-ai-logs
+    - name: default
       positions:
         filename: /tmp/positions.yaml
       scrape_configs:
-        - job_name: sara-ai-core-logs
+        - job_name: "sara-ai-logs"
           static_configs:
-            - targets: [localhost]
+            - targets: ["localhost"]
               labels:
-                job: sara-ai-core
                 __path__: /var/log/*.log
       clients:
-        - url: https://logs-prod-006.grafana.net/loki/api/v1/push
+        - url: https://logs-prod3.grafana.net/loki/api/v1/push
           basic_auth:
-            username: 2725645
+            username: ${GRAFANA_CLOUD_INSTANCE}
             password: ${GRAFANA_CLOUD_API_TOKEN}

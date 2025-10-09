@@ -2,15 +2,12 @@
 # Dockerfile.agent — Sara AI Observability Container (Final)
 # ============================================================
 
-# Use the latest Grafana Agent image (Flow-compatible)
 FROM grafana/agent:latest
 
-# Copy our custom config into the container
+# Copy our custom config
 COPY agent-config.yaml /etc/agent/config.yaml
 
-# Expose the metrics/health port
 EXPOSE 12345
 
-# Run Grafana Agent with our config
 ENTRYPOINT ["/usr/bin/grafana-agent"]
-CMD ["--config.file=/etc/agent/config.yaml"]
+CMD ["run", "--config.file=/etc/agent/config.yaml"]
