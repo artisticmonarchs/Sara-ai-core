@@ -1,42 +1,19 @@
-# ================================================================
-# agent-config.yaml — Grafana Agent (Flow mode, 2025 spec)
-# ================================================================
-
 server:
   log_level: info
 
 metrics:
   global:
-    scrape_interval: 15s
-
+    scrape_interval: 60s
   wal_directory: /var/lib/grafana-agent/data
 
   configs:
-    - name: default
+    - name: sara-ai
       scrape_configs:
-        - job_name: "sara-ai-core"
+        - job_name: sara-ai
           static_configs:
-            - targets: ["sara-ai-core-app:10000", "sara-ai-core-streaming:10001"]
-
+            - targets: ['localhost:9090']
       remote_write:
-        - url: ${GRAFANA_CLOUD_REMOTE_WRITE_URL}
+        - url: ${env:GRAFANA_CLOUD_REMOTE_WRITE_URL}
           basic_auth:
-            username: ${GRAFANA_CLOUD_INSTANCE}
-            password: ${GRAFANA_CLOUD_API_TOKEN}
-
-logs:
-  configs:
-    - name: default
-      positions:
-        filename: /tmp/positions.yaml
-      scrape_configs:
-        - job_name: "sara-ai-logs"
-          static_configs:
-            - targets: ["localhost"]
-              labels:
-                __path__: /var/log/*.log
-      clients:
-        - url: https://logs-prod3.grafana.net/loki/api/v1/push
-          basic_auth:
-            username: ${GRAFANA_CLOUD_INSTANCE}
-            password: ${GRAFANA_CLOUD_API_TOKEN}
+            username: ${env:GRAFANA_CLOUD_USER}
+            password: ${env:GRAFANA_CLOUD_API_KEY}
