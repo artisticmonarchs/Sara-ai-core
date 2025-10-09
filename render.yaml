@@ -93,8 +93,7 @@ services:
     plan: standard
     region: oregon
     dockerfilePath: ./Dockerfile.agent
-    buildCommand: ""
-    startCommand: /opt/agent/entrypoint.sh
+    # startCommand removed — ENTRYPOINT handles startup
     disk:
       name: agent-config
       mountPath: /etc/agent

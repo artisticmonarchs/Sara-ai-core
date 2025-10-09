@@ -1,19 +1,30 @@
 #!/bin/bash
-# Entrypoint script for Grafana Agent — ensures config exists and WAL dir is ready
+set -euo pipefail
 
-set -e
+# Directories and files
+MOUNT_DIR=/etc/agent
+DEFAULT=/opt/agent/default_config.river
+TARGET=${MOUNT_DIR}/config.river
+WAL_DIR=/tmp/agent/wal
+AGENT_USER=grafana
 
-# Create WAL directory
-mkdir -p /tmp/agent/wal
-chmod -R 0755 /tmp/agent/wal
+# Prepare WAL directory
+mkdir -p "$WAL_DIR"
+chmod 0775 "$WAL_DIR"
 
-# Check if /etc/agent/config.river exists and is non-empty
-if [ ! -s /etc/agent/config.river ]; then
-  echo "Config not found or empty, copying default..."
-  mkdir -p /etc/agent
-  cp /opt/agent/default_config.river /etc/agent/config.river
-  chmod 0644 /etc/agent/config.river
+# Ensure mounted config exists; copy default if missing
+if [ ! -s "$TARGET" ]; then
+    echo "[entrypoint] config missing at $TARGET — copying default"
+    mkdir -p "$MOUNT_DIR"
+    cp "$DEFAULT" "$TARGET"
+    chmod 0644 "$TARGET"
 fi
 
-# Execute Grafana Agent
-exec /usr/bin/grafana-agent run --config.file=/etc/agent/config.river
+# Fix ownership if running as root
+chown -R ${AGENT_USER}:${AGENT_USER} "$MOUNT_DIR" "$WAL_DIR" || true
+
+# Log config checksum
+echo "[entrypoint] Using config: $(sha256sum "$TARGET")"
+
+# Run Grafana Agent as non-root
+exec su-exec ${AGENT_USER} /usr/bin/grafana-agent --config.file "$TARGET" --positions.directory "$WAL_DIR"
