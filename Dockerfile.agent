@@ -1,15 +1,11 @@
-# ================================================================
-# Dockerfile.agent — Grafana Agent for Render (Flow Mode)
-# ================================================================
-
-# Use official Grafana Agent
+# Use official Grafana Agent v0.32.0
 FROM grafana/agent:v0.32.0
 
-# Copy River config into container
+# Copy River configuration
 COPY agent-config.river /etc/agent/config.river
 
-# Expose Render port
-ENV PORT=12345
+# Ensure positions directory exists
+RUN mkdir -p /tmp/agent/wal
 
-# Run Grafana Agent with explicit config file
+# Run Grafana Agent with explicit config
 CMD ["/usr/bin/grafana-agent", "run", "--config.file=/etc/agent/config.river"]

@@ -73,7 +73,7 @@ services:
         value: "10001"
 
   # --------------------------------------------------------
-  # Grafana Agent — Metrics + Logs Exporter (Flow Mode)
+  # Grafana Agent — Metrics + Logs Exporter
   # --------------------------------------------------------
   - name: sara-ai-agent
     type: web
@@ -82,7 +82,10 @@ services:
     region: oregon
     dockerfilePath: ./Dockerfile.agent
     buildCommand: ""
-    startCommand: ""
+    startCommand: /usr/bin/grafana-agent run --config.file=/etc/agent/config.river
+    disk:
+      name: agent-config
+      mountPath: /etc/agent
     envVars:
       - key: GRAFANA_CLOUD_REMOTE_WRITE_URL
         value: "https://prometheus-prod-36-prod-us-west-0.grafana.net/api/prom/push"

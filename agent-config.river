@@ -1,20 +1,16 @@
-# ================================================================
-# agent-config.river — Grafana Agent config (Flow Mode)
-# ================================================================
+# Grafana Agent — Flow Mode Configuration
 
 metrics {
   global {
     scrape_interval = "15s"
   }
 
-  wal_directory = "/tmp/agent/wal"
-}
-
-remote_write {
-  url = env("GRAFANA_CLOUD_REMOTE_WRITE_URL")
-  basic_auth {
-    username = env("GRAFANA_CLOUD_INSTANCE")
-    password = env("GRAFANA_CLOUD_API_TOKEN")
+  remote_write {
+    url = env("GRAFANA_CLOUD_REMOTE_WRITE_URL")
+    basic_auth {
+      username = env("GRAFANA_CLOUD_INSTANCE")
+      password = env("GRAFANA_CLOUD_API_TOKEN")
+    }
   }
 }
 
@@ -26,4 +22,6 @@ logs {
       password = env("GRAFANA_CLOUD_API_TOKEN")
     }
   }
+
+  positions_directory = "/tmp/agent/wal"
 }
