@@ -1,5 +1,5 @@
 # ================================================================
-# render.yaml — Sara AI Core Services (Phase 6 Ready, Flattened Structure)
+# render.yaml — Sara AI Core (Flattened, Phase 6 Final)
 # ================================================================
 
 version: "1"
@@ -14,7 +14,7 @@ services:
     maxmemoryPolicy: allkeys-lru
 
   # --------------------------------------------------------
-  # Core Web App (Flask + Gunicorn + Uvicorn)
+  # Core Web App
   # --------------------------------------------------------
   - name: sara-ai-core-app
     type: web
@@ -23,15 +23,13 @@ services:
     region: oregon
     buildCommand: pip install -r requirements.txt
     startCommand: >
-      gunicorn -k uvicorn.workers.UvicornWorker app:app --bind 0.0.0.0:$PORT
+      bash -c "cd /app && gunicorn -k uvicorn.workers.UvicornWorker app:app --bind 0.0.0.0:$PORT"
     envVars:
       - key: REDIS_URL
         fromService:
           name: sara-ai-redis
           type: redis
           property: connectionString
-      - key: WORKER_QUEUE
-        value: "sara-ai-core-queue"
       - key: LOG_LEVEL
         value: "info"
       - key: FLASK_ENV
@@ -40,7 +38,7 @@ services:
         value: "10000"
 
   # --------------------------------------------------------
-  # Celery Worker (Background Async Tasks)
+  # Celery Worker
   # --------------------------------------------------------
   - name: sara-ai-core-worker
     type: worker
@@ -49,20 +47,18 @@ services:
     region: oregon
     buildCommand: pip install -r requirements.txt
     startCommand: >
-      celery -A celery_app.celery worker --loglevel=info -Q sara-ai-core-queue
+      bash -c "cd /app && celery -A celery_app.celery worker --loglevel=info -Q sara-ai-core-queue"
     envVars:
       - key: REDIS_URL
         fromService:
           name: sara-ai-redis
           type: redis
           property: connectionString
-      - key: WORKER_QUEUE
-        value: "sara-ai-core-queue"
       - key: LOG_LEVEL
         value: "info"
 
   # --------------------------------------------------------
-  # Real-time Streaming Server (Twilio Media Streams)
+  # Real-time Streaming Server
   # --------------------------------------------------------
   - name: sara-ai-core-streaming
     type: web
@@ -70,15 +66,14 @@ services:
     plan: standard
     region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m streaming_server
+    startCommand: >
+      bash -c "cd /app && python -m streaming_server"
     envVars:
       - key: REDIS_URL
         fromService:
           name: sara-ai-redis
           type: redis
           property: connectionString
-      - key: WORKER_QUEUE
-        value: "sara-ai-core-queue"
       - key: LOG_LEVEL
         value: "info"
       - key: PORT
