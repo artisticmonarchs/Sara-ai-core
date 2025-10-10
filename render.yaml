@@ -1,76 +1,58 @@
-# Render deployment file — Phase 6 verified
-version: "1"
 services:
-  # --- APP SERVICE ---
+  # ==========================
+  # 1️⃣  Flask Web App Service
+  # ==========================
   - type: web
     name: sara-ai-core-app
-    runtime: docker
-    repo: https://github.com/artisticmonarchs/Sara-ai-core
-    plan: standard
-    region: ohio
-    dockerContext: .
-    dockerfilePath: ./Dockerfile
-    autoDeployTrigger: commit
-    healthCheckPath: /health
-    dockerCommand: gunicorn -k uvicorn.workers.UvicornWorker app:app --chdir /app --bind 0.0.0.0:$PORT
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 2 --threads 4 --timeout 120 --log-level info
     envVars:
+      - key: ENV_MODE
+        value: render
       - key: REDIS_URL
-        fromService:
-          name: sara-ai-core-redis
-          type: keyvalue
-          property: connectionString
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: ELEVENLABS_API_KEY
-        sync: false
-      # (include your other existing env vars here)
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379
+      - key: CELERY_BROKER_URL
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
+      - key: CELERY_RESULT_BACKEND
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
+      - key: SERVER_URL
+        value: https://sara-ai-bot.onrender.com
+      - key: PUBLIC_STREAMING_URL
+        value: wss://sara-ai-streaming.onrender.com/ws
 
-  # --- WORKER SERVICE ---
-  - type: web     # use "web" instead of "worker" to avoid Render's workdir issue
+  # ==========================
+  # 2️⃣  Celery Worker Service
+  # ==========================
+  - type: worker
     name: sara-ai-core-worker
-    runtime: docker
-    repo: https://github.com/artisticmonarchs/Sara-ai-core
-    plan: standard
-    region: ohio
-    dockerContext: .
-    dockerfilePath: ./Dockerfile
-    autoDeployTrigger: commit
-    dockerCommand: celery -A celery_app.celery worker --loglevel=info
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: celery -A celery_app.celery worker --loglevel=info -Q sara-ai-core-queue
     envVars:
+      - key: ENV_MODE
+        value: render
       - key: REDIS_URL
-        fromService:
-          name: sara-ai-core-redis
-          type: keyvalue
-          property: connectionString
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: ELEVENLABS_API_KEY
-        sync: false
-      # (same env vars as app)
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379
+      - key: CELERY_BROKER_URL
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
+      - key: CELERY_RESULT_BACKEND
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
 
-  # --- STREAMING SERVICE ---
+  # ==========================
+  # 3️⃣  Streaming Service
+  # ==========================
   - type: web
     name: sara-ai-core-streaming
-    runtime: docker
-    repo: https://github.com/artisticmonarchs/Sara-ai-core
-    plan: standard
-    region: ohio
-    dockerContext: .
-    dockerfilePath: ./Dockerfile
-    autoDeployTrigger: commit
-    dockerCommand: python -m streaming_server
-    healthCheckPath: /healthz
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn streaming_server:app --workers 2 --threads 4 --timeout 120 --log-level info
     envVars:
+      - key: ENV_MODE
+        value: render
       - key: REDIS_URL
-        fromService:
-          name: sara-ai-core-redis
-          type: keyvalue
-          property: connectionString
-      # (same env vars as above)
-
-  # --- REDIS SERVICE ---
-  - type: keyvalue
-    name: sara-ai-core-redis
-    plan: starter
-    region: ohio
-    maxmemoryPolicy: allkeys-lru
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379
+      - key: CELERY_BROKER_URL
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
+      - key: CELERY_RESULT_BACKEND
+        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
