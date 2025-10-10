@@ -1,5 +1,5 @@
 # ================================================================
-# render.yaml — Sara AI Core + Grafana Agent Observability
+# render.yaml — Sara AI Core Services
 # ================================================================
 
 version: "1"
@@ -49,7 +49,7 @@ services:
     region: oregon
     buildCommand: pip install -r requirements.txt
     startCommand: >
-      celery -A sara_ai.celery_app.celery_app worker --loglevel=info -Q sara-ai-core-queue
+      celery -A sara_ai.celery_app.celery worker --loglevel=info -Q sara-ai-core-queue
     envVars:
       - key: REDIS_URL
         fromService:
@@ -83,29 +83,3 @@ services:
         value: "info"
       - key: PORT
         value: "10001"
-
-  # --------------------------------------------------------
-  # Grafana Agent — Metrics + Logs Exporter
-  # --------------------------------------------------------
-  - name: sara-ai-agent
-    type: web
-    env: docker
-    plan: standard
-    region: oregon
-    dockerfilePath: ./Dockerfile.agent
-    # startCommand removed — ENTRYPOINT handles startup
-    disk:
-      name: agent-config
-      mountPath: /etc/agent
-    envVars:
-      - key: GRAFANA_CLOUD_REMOTE_WRITE_URL
-        value: "https://prometheus-prod-36-prod-us-west-0.grafana.net/api/prom/push"
-      - key: GRAFANA_CLOUD_LOKI_URL
-        value: "https://logs-prod-006.grafana.net/loki/api/v1/push"
-      - key: GRAFANA_CLOUD_INSTANCE
-        value: "noblecomsolutions"
-      - key: GRAFANA_CLOUD_API_TOKEN
-        sync: false
-      - key: PORT
-        value: "12345"
-    autoDeploy: true
