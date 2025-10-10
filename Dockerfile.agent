@@ -1,16 +1,16 @@
 FROM grafana/agent:v0.32.0
 
-# Copy default config to a safe location inside the image
+# Put default config somewhere safe inside image
 COPY agent-config.river /opt/agent/default_config.river
 
-# Create WAL directory inside image with permissive permissions
+# Create WAL directory with permissions
 RUN mkdir -p /tmp/agent/wal && chmod 0775 /tmp/agent/wal
 
-# Copy entrypoint script and make executable
+# Copy entrypoint script
 COPY entrypoint.sh /opt/agent/entrypoint.sh
 RUN chmod +x /opt/agent/entrypoint.sh
 
-# Set ENTRYPOINT — do NOT rely on startCommand
+# Set entrypoint
 ENTRYPOINT ["/opt/agent/entrypoint.sh"]
 
 # DO NOT set CMD
