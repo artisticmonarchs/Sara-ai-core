@@ -1,21 +1,13 @@
-# ================================================================
-# render.yaml — Sara AI Core Services (Phase 6 — Stable Release)
-# ================================================================
-
-version: "1"
-
 services:
+
   # ==========================
   # 1️⃣ Flask Web App Service
   # ==========================
   - type: web
     name: sara-ai-core-app
     env: python
-    plan: standard
-    region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: >
-      gunicorn -k uvicorn.workers.UvicornWorker app:app --bind 0.0.0.0:$PORT --timeout 120 --log-level info
+    startCommand: gunicorn app:app --workers 2 --threads 4 --bind 0.0.0.0:$PORT --timeout 120 --log-level info
     envVars:
       - key: ENV_MODE
         value: render
@@ -39,18 +31,16 @@ services:
         value: Senior Growth Consultant at Noblecom Solutions
 
   # ==========================
-  # 2️⃣ Celery Worker Service
+  # 2️⃣ Celery Worker Service (Updated to `web`)
   # ==========================
-  - type: worker
+  - type: web                      # ✅ changed from `worker` to `web`
     name: sara-ai-core-worker
     env: python
-    plan: standard
-    region: oregon
     buildCommand: pip install -r requirements.txt
-    # ✅ Stable, queue-free, single concurrency to prevent Render warm shutdown
-    startCommand: >
-      celery -A celery_app.celery worker --loglevel=info --concurrency=1
+    startCommand: celery -A celery_app.celery worker --loglevel=info --concurrency=1
     envVars:
+      - key: PORT
+        value: 10002               # ✅ assign a dummy port so Render keeps it alive
       - key: ENV_MODE
         value: render
       - key: REDIS_URL
@@ -70,11 +60,8 @@ services:
   - type: web
     name: sara-ai-core-streaming
     env: python
-    plan: standard
-    region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: >
-      gunicorn -k uvicorn.workers.UvicornWorker streaming_server:app --bind 0.0.0.0:$PORT --timeout 120 --log-level info
+    startCommand: gunicorn streaming_server:app --workers 2 --threads 4 --bind 0.0.0.0:$PORT --timeout 120 --log-level info
     envVars:
       - key: ENV_MODE
         value: render
