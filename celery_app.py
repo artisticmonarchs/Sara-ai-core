@@ -1,12 +1,12 @@
 """
-celery_app.py — Phase 5B Production Build
+celery_app.py — Phase 6 Ready (Flattened Structure)
 Initializes Celery app and connects to Redis broker and backend.
 """
 
 import os
 import logging
 from celery import Celery
-from sara_ai.logging_utils import log_event
+from logging_utils import log_event      # ✅ fixed import
 
 logger = logging.getLogger("celery_app")
 
@@ -15,10 +15,10 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # Initialize Celery (named 'celery' for Procfile alignment)
 celery = Celery(
-    "sara_ai",
+    "sara_ai",                           # name can stay as identifier; not a module path
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["sara_ai.tasks"],
+    include=["tasks"],                   # ✅ fixed include path
 )
 
 celery.conf.update(

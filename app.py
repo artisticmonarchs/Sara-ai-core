@@ -1,11 +1,11 @@
 # --------------------------------------------------------
-# app.py — Sara AI Core (Phase 5B, Production Ready)
+# app.py — Sara AI Core (Post-Flatten, Phase 6 Ready)
 # --------------------------------------------------------
 
 import logging
 from flask import Flask, jsonify, request
-from sara_ai.tasks import run_inference, run_tts  # ✅ removed process_event
-from sara_ai.logging_utils import log_event
+from tasks import run_inference, run_tts        # ✅ fixed import
+from logging_utils import log_event             # ✅ fixed import
 
 app = Flask(__name__)
 logger = logging.getLogger("flask_app")

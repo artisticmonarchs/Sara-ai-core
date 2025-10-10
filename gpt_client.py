@@ -1,14 +1,13 @@
 """
-gpt_client.py
-
-Handles interaction with OpenAI GPT model for Sara AI.
-Fully production-ready with trace logging, timeout, and safe fallback behavior.
+gpt_client.py — Phase 6 Ready (Flattened Structure)
+Handles interaction with the OpenAI GPT model for Sara AI.
+Includes trace logging, timeout handling, and safe fallbacks.
 """
 
 import logging
 import uuid
 from openai import OpenAI
-from sara_ai.logging_utils import log_event
+from logging_utils import log_event        # ✅ fixed import
 
 # Initialize OpenAI client (uses OPENAI_API_KEY from environment)
 client = OpenAI(timeout=60)
@@ -28,12 +27,12 @@ def generate_reply(prompt: str, trace_id: str | None = None) -> str:
         service="gpt_client",
         event="gpt_request",
         status="initiated",
-        details={"trace_id": trace_id, "prompt_preview": prompt[:100]},
+        extra={"trace_id": trace_id, "prompt_preview": prompt[:100]},  # ✅ use correct key
     )
 
     try:
         response = client.chat.completions.create(
-            model="gpt-5-mini",
+            model="gpt-5-mini",           # ✅ model name consistent with Render settings
             messages=[{"role": "user", "content": prompt}],
             max_completion_tokens=1000,
             temperature=0.7,
@@ -44,7 +43,7 @@ def generate_reply(prompt: str, trace_id: str | None = None) -> str:
             service="gpt_client",
             event="gpt_response",
             status="success",
-            details={
+            extra={
                 "trace_id": trace_id,
                 "reply_preview": reply[:100],
             },
@@ -56,7 +55,7 @@ def generate_reply(prompt: str, trace_id: str | None = None) -> str:
             service="gpt_client",
             event="gpt_error",
             status="failed",
-            details={
+            extra={
                 "trace_id": trace_id,
                 "error": str(e),
             },

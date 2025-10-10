@@ -1,5 +1,5 @@
 # ================================================================
-# render.yaml — Sara AI Core Services
+# render.yaml — Sara AI Core Services (Phase 6 Ready, Flattened Structure)
 # ================================================================
 
 version: "1"
@@ -14,7 +14,7 @@ services:
     maxmemoryPolicy: allkeys-lru
 
   # --------------------------------------------------------
-  # Core Web App
+  # Core Web App (Flask + Gunicorn + Uvicorn)
   # --------------------------------------------------------
   - name: sara-ai-core-app
     type: web
@@ -23,7 +23,7 @@ services:
     region: oregon
     buildCommand: pip install -r requirements.txt
     startCommand: >
-      gunicorn -k uvicorn.workers.UvicornWorker sara_ai.app:app --bind 0.0.0.0:$PORT
+      gunicorn -k uvicorn.workers.UvicornWorker app:app --bind 0.0.0.0:$PORT
     envVars:
       - key: REDIS_URL
         fromService:
@@ -40,7 +40,7 @@ services:
         value: "10000"
 
   # --------------------------------------------------------
-  # Celery Worker
+  # Celery Worker (Background Async Tasks)
   # --------------------------------------------------------
   - name: sara-ai-core-worker
     type: worker
@@ -49,7 +49,7 @@ services:
     region: oregon
     buildCommand: pip install -r requirements.txt
     startCommand: >
-      celery -A sara_ai.celery_app.celery worker --loglevel=info -Q sara-ai-core-queue
+      celery -A celery_app.celery worker --loglevel=info -Q sara-ai-core-queue
     envVars:
       - key: REDIS_URL
         fromService:
@@ -62,7 +62,7 @@ services:
         value: "info"
 
   # --------------------------------------------------------
-  # Real-time Streaming Server
+  # Real-time Streaming Server (Twilio Media Streams)
   # --------------------------------------------------------
   - name: sara-ai-core-streaming
     type: web
@@ -70,7 +70,7 @@ services:
     plan: standard
     region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m sara_ai.streaming_server
+    startCommand: python -m streaming_server
     envVars:
       - key: REDIS_URL
         fromService:
