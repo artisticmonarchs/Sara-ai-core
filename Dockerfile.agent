@@ -1,18 +1,16 @@
-# Use official Grafana Agent base
 FROM grafana/agent:v0.32.0
 
 # Copy default config to a safe location inside the image
 COPY agent-config.river /opt/agent/default_config.river
 
 # Create WAL directory inside image with permissive permissions
-RUN mkdir -p /tmp/agent/wal && \
-    chmod 0775 /tmp/agent/wal
+RUN mkdir -p /tmp/agent/wal && chmod 0775 /tmp/agent/wal
 
-# Copy entrypoint script
+# Copy entrypoint script and make executable
 COPY entrypoint.sh /opt/agent/entrypoint.sh
 RUN chmod +x /opt/agent/entrypoint.sh
 
-# Set entrypoint
+# Set ENTRYPOINT — do NOT rely on startCommand
 ENTRYPOINT ["/opt/agent/entrypoint.sh"]
 
-# Do NOT use CMD/startCommand in render.yaml
+# DO NOT set CMD

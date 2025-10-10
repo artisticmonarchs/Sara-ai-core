@@ -8,6 +8,8 @@ TARGET=${MOUNT_DIR}/config.river
 WAL_DIR=/tmp/agent/wal
 AGENT_USER=grafana
 
+echo "[entrypoint] started"
+
 # Prepare WAL directory
 mkdir -p "$WAL_DIR"
 chmod 0775 "$WAL_DIR"
@@ -26,5 +28,7 @@ chown -R ${AGENT_USER}:${AGENT_USER} "$MOUNT_DIR" "$WAL_DIR" || true
 # Log config checksum
 echo "[entrypoint] Using config: $(sha256sum "$TARGET")"
 
-# Run Grafana Agent as non-root
-exec su-exec ${AGENT_USER} /usr/bin/grafana-agent --config.file "$TARGET" --positions.directory "$WAL_DIR"
+# Run Grafana Agent as non-root, PID 1
+exec su-exec ${AGENT_USER} /usr/bin/grafana-agent \
+    --config.file "$TARGET" \
+    --positions.directory "$WAL_DIR"
