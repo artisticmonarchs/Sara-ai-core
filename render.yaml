@@ -1,95 +1,76 @@
-# ================================================================
-# render.yaml — Sara AI Core (Phase 6 Clean Redeploy - v2)
-# ================================================================
-
+# Render deployment file — Phase 6 verified
 version: "1"
-
 services:
-  # --------------------------------------------------------
-  # Redis — message broker for Celery
-  # --------------------------------------------------------
-  - name: sara-ai-redis
-    type: redis
+  # --- APP SERVICE ---
+  - type: web
+    name: sara-ai-core-app
+    runtime: docker
+    repo: https://github.com/artisticmonarchs/Sara-ai-core
     plan: standard
+    region: ohio
+    dockerContext: .
+    dockerfilePath: ./Dockerfile
+    autoDeployTrigger: commit
+    healthCheckPath: /health
+    dockerCommand: gunicorn -k uvicorn.workers.UvicornWorker app:app --chdir /app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          name: sara-ai-core-redis
+          type: keyvalue
+          property: connectionString
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      # (include your other existing env vars here)
+
+  # --- WORKER SERVICE ---
+  - type: web     # use "web" instead of "worker" to avoid Render's workdir issue
+    name: sara-ai-core-worker
+    runtime: docker
+    repo: https://github.com/artisticmonarchs/Sara-ai-core
+    plan: standard
+    region: ohio
+    dockerContext: .
+    dockerfilePath: ./Dockerfile
+    autoDeployTrigger: commit
+    dockerCommand: celery -A celery_app.celery worker --loglevel=info
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          name: sara-ai-core-redis
+          type: keyvalue
+          property: connectionString
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      # (same env vars as app)
+
+  # --- STREAMING SERVICE ---
+  - type: web
+    name: sara-ai-core-streaming
+    runtime: docker
+    repo: https://github.com/artisticmonarchs/Sara-ai-core
+    plan: standard
+    region: ohio
+    dockerContext: .
+    dockerfilePath: ./Dockerfile
+    autoDeployTrigger: commit
+    dockerCommand: python -m streaming_server
+    healthCheckPath: /healthz
+    envVars:
+      - key: REDIS_URL
+        fromService:
+          name: sara-ai-core-redis
+          type: keyvalue
+          property: connectionString
+      # (same env vars as above)
+
+  # --- REDIS SERVICE ---
+  - type: keyvalue
+    name: sara-ai-core-redis
+    plan: starter
+    region: ohio
     maxmemoryPolicy: allkeys-lru
-
-  # --------------------------------------------------------
-  # Core Web App (Flask + Gunicorn + Uvicorn)
-  # --------------------------------------------------------
-  - name: sara-ai-core-app-v2
-    type: web
-    env: python
-    plan: standard
-    region: oregon
-    buildCommand: |
-      echo "=== Installing dependencies ==="
-      pip install --no-cache-dir -r requirements.txt
-    startCommand: |
-      echo "=== Starting Sara AI Core App ==="
-      gunicorn -k uvicorn.workers.UvicornWorker app:app --bind 0.0.0.0:$PORT
-    envVars:
-      - key: REDIS_URL
-        fromService:
-          name: sara-ai-redis
-          type: redis
-          property: connectionString
-      - key: WORKER_QUEUE
-        value: "sara-ai-core-queue"
-      - key: LOG_LEVEL
-        value: "info"
-      - key: FLASK_ENV
-        value: "production"
-      - key: PORT
-        value: "10000"
-
-  # --------------------------------------------------------
-  # Celery Worker (Background Tasks)
-  # --------------------------------------------------------
-  - name: sara-ai-core-worker-v2
-    type: worker
-    env: python
-    plan: standard
-    region: oregon
-    buildCommand: |
-      echo "=== Installing dependencies for Worker ==="
-      pip install --no-cache-dir -r requirements.txt
-    startCommand: |
-      echo "=== Starting Sara AI Celery Worker ==="
-      celery -A celery_app.celery worker --loglevel=info -Q sara-ai-core-queue
-    envVars:
-      - key: REDIS_URL
-        fromService:
-          name: sara-ai-redis
-          type: redis
-          property: connectionString
-      - key: WORKER_QUEUE
-        value: "sara-ai-core-queue"
-      - key: LOG_LEVEL
-        value: "info"
-
-  # --------------------------------------------------------
-  # Streaming Server (Twilio Media Streams)
-  # --------------------------------------------------------
-  - name: sara-ai-core-streaming
-    type: web
-    env: python
-    plan: standard
-    region: oregon
-    buildCommand: |
-      echo "=== Installing dependencies for Streaming Server ==="
-      pip install --no-cache-dir -r requirements.txt
-    startCommand: |
-      echo "=== Starting Sara AI Streaming Server ==="
-      python -m streaming_server
-    envVars:
-      - key: REDIS_URL
-        fromService:
-          name: sara-ai-redis
-          type: redis
-          property: connectionString
-      - key: WORKER_QUEUE
-        value: "sara-ai-core-queue"
-      - key: LOG_LEVEL
-        value: "info"
-      - key: PORT
-        value: "10001"

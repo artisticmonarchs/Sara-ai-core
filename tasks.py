@@ -1,10 +1,10 @@
 """
-tasks.py — Sara AI Core (Phase 5B, Production Ready)
+tasks.py — Sara AI Core (Phase 6 Ready, Flattened Structure)
 Contains Celery task definitions for inference and TTS.
 """
 
-from sara_ai.celery_app import celery
-from sara_ai.logging_utils import log_event
+from celery_app import celery               # ✅ fixed import
+from logging_utils import log_event         # ✅ fixed import
 
 
 @celery.task(name="run_inference")
