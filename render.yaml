@@ -1,5 +1,5 @@
 # ================================================================
-# render.yaml — Sara AI Core (Flattened, Phase 6 Final)
+# render.yaml — Sara AI Core (Phase 6 Clean Redeploy - v2)
 # ================================================================
 
 version: "1"
@@ -14,22 +14,27 @@ services:
     maxmemoryPolicy: allkeys-lru
 
   # --------------------------------------------------------
-  # Core Web App
+  # Core Web App (Flask + Gunicorn + Uvicorn)
   # --------------------------------------------------------
-  - name: sara-ai-core-app
+  - name: sara-ai-core-app-v2
     type: web
     env: python
     plan: standard
     region: oregon
-    buildCommand: pip install -r requirements.txt
-    startCommand: >
-      bash -c "cd /app && gunicorn -k uvicorn.workers.UvicornWorker app:app --bind 0.0.0.0:$PORT"
+    buildCommand: |
+      echo "=== Installing dependencies ==="
+      pip install --no-cache-dir -r requirements.txt
+    startCommand: |
+      echo "=== Starting Sara AI Core App ==="
+      gunicorn -k uvicorn.workers.UvicornWorker app:app --bind 0.0.0.0:$PORT
     envVars:
       - key: REDIS_URL
         fromService:
           name: sara-ai-redis
           type: redis
           property: connectionString
+      - key: WORKER_QUEUE
+        value: "sara-ai-core-queue"
       - key: LOG_LEVEL
         value: "info"
       - key: FLASK_ENV
@@ -38,42 +43,52 @@ services:
         value: "10000"
 
   # --------------------------------------------------------
-  # Celery Worker
+  # Celery Worker (Background Tasks)
   # --------------------------------------------------------
-  - name: sara-ai-core-worker
+  - name: sara-ai-core-worker-v2
     type: worker
     env: python
     plan: standard
     region: oregon
-    buildCommand: pip install -r requirements.txt
-    startCommand: >
-      bash -c "cd /app && celery -A celery_app.celery worker --loglevel=info -Q sara-ai-core-queue"
+    buildCommand: |
+      echo "=== Installing dependencies for Worker ==="
+      pip install --no-cache-dir -r requirements.txt
+    startCommand: |
+      echo "=== Starting Sara AI Celery Worker ==="
+      celery -A celery_app.celery worker --loglevel=info -Q sara-ai-core-queue
     envVars:
       - key: REDIS_URL
         fromService:
           name: sara-ai-redis
           type: redis
           property: connectionString
+      - key: WORKER_QUEUE
+        value: "sara-ai-core-queue"
       - key: LOG_LEVEL
         value: "info"
 
   # --------------------------------------------------------
-  # Real-time Streaming Server
+  # Streaming Server (Twilio Media Streams)
   # --------------------------------------------------------
   - name: sara-ai-core-streaming
     type: web
     env: python
     plan: standard
     region: oregon
-    buildCommand: pip install -r requirements.txt
-    startCommand: >
-      bash -c "cd /app && python -m streaming_server"
+    buildCommand: |
+      echo "=== Installing dependencies for Streaming Server ==="
+      pip install --no-cache-dir -r requirements.txt
+    startCommand: |
+      echo "=== Starting Sara AI Streaming Server ==="
+      python -m streaming_server
     envVars:
       - key: REDIS_URL
         fromService:
           name: sara-ai-redis
           type: redis
           property: connectionString
+      - key: WORKER_QUEUE
+        value: "sara-ai-core-queue"
       - key: LOG_LEVEL
         value: "info"
       - key: PORT
