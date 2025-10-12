@@ -13,3 +13,5 @@ python-magic==0.4.27
 sentry-sdk==2.19.0
 websockets==12.0
 uvicorn==0.30.0
+deepgram-sdk==3.2.5
+

@@ -1,6 +1,6 @@
 """
-tasks.py — Sara AI Core (Phase 10C)
-Unified Celery tasks for inference + TTS with structured logging, Redis metrics, and Twilio-ready audio storage.
+tasks.py — Sara AI Core (Phase 10D)
+Updated Celery tasks with Deepgram SDK v1+ async TTS handling.
 """
 
 import os
@@ -8,10 +8,11 @@ import io
 import time
 import uuid
 import traceback
+import asyncio
 from celery_app import celery
 from logging_utils import log_event
 from redis import Redis
-from deepgram import DeepgramClient, SpeakOptions
+from deepgram import Deepgram
 import openai
 
 # --------------------------------------------------------------------------
@@ -24,7 +25,7 @@ PUBLIC_AUDIO_PATH = os.getenv("PUBLIC_AUDIO_PATH", "public/audio")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
-dg_client = DeepgramClient(DG_API_KEY)
+dg_client = Deepgram(DG_API_KEY)
 openai.api_key = OPENAI_API_KEY
 
 # --------------------------------------------------------------------------
@@ -41,18 +42,30 @@ def save_audio_file(session_id: str, trace_id: str, audio_bytes: bytes) -> str:
         f.write(audio_bytes)
     return path
 
+async def deepgram_tts(text: str) -> bytes:
+    """
+    Async Deepgram TTS call using the new SDK.
+    Returns raw audio bytes in WAV format.
+    """
+    response = await dg_client.speech.synthesize({
+        "text": text,
+        "voice": DG_SPEAK_MODEL,
+        "output_format": "wav"
+    })
+    audio_bytes = response.get("audio")
+    if not audio_bytes:
+        raise RuntimeError("Deepgram returned empty audio stream.")
+    return audio_bytes
+
 # --------------------------------------------------------------------------
 # Inference Task
 # --------------------------------------------------------------------------
 @celery.task(name="sara_ai.tasks.run_inference", bind=True)
 def run_inference(self, payload: dict):
-    """
-    Process transcript → OpenAI reply → enqueue TTS.
-    """
     trace_id = payload.get("trace_id") or get_trace()
     session_id = payload.get("session_id") or str(uuid.uuid4())
     transcript = payload.get("text") or payload.get("input") or ""
-    
+
     trace_id = log_event(
         service="tasks",
         event="inference_start",
@@ -64,7 +77,6 @@ def run_inference(self, payload: dict):
 
     start_time = time.time()
     try:
-        # Generate Sara's reply
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
@@ -113,9 +125,6 @@ def run_inference(self, payload: dict):
 # --------------------------------------------------------------------------
 @celery.task(name="sara_ai.tasks.run_tts", bind=True)
 def run_tts(self, payload: dict):
-    """
-    Convert text → Deepgram Speak audio, save to public/audio, return URL.
-    """
     trace_id = payload.get("trace_id") or get_trace()
     session_id = payload.get("session_id") or str(uuid.uuid4())
     text = payload.get("text") or ""
@@ -142,17 +151,9 @@ def run_tts(self, payload: dict):
 
     start_time = time.time()
     try:
-        speak_opts = SpeakOptions(model=DG_SPEAK_MODEL)
-        response = dg_client.speak.v("1").stream({"text": text}, speak_opts)
-
-        audio_bytes = io.BytesIO()
-        for chunk in response.stream:
-            audio_bytes.write(chunk)
-
-        if audio_bytes.tell() == 0:
-            raise RuntimeError("Deepgram returned empty audio stream.")
-
-        audio_path = save_audio_file(session_id, trace_id, audio_bytes.getvalue())
+        # Async Deepgram call wrapped in sync context
+        audio_bytes = asyncio.run(deepgram_tts(text))
+        audio_path = save_audio_file(session_id, trace_id, audio_bytes)
         duration = round(time.time() - start_time, 2)
         public_url = f"/audio/{session_id}/{trace_id}.wav"
 
