@@ -1,6 +1,7 @@
 """
-app.py — Sara AI Core (Phase 10C)
-Flask API with Redis-backed sessions, trace propagation, and conversation endpoints.
+app.py — Sara AI Core (Phase 10D)
+Flask API with Redis-backed sessions, trace propagation,
+conversation endpoints, and outbound initialization.
 """
 
 import os
@@ -32,9 +33,13 @@ if REDIS_URL:
         USE_REDIS = True
         log_event(SERVICE_NAME, "redis_init", message="Connected to Redis", redis_url=REDIS_URL)
     except Exception as e:
-        log_event(SERVICE_NAME, "redis_init_failed", level="WARNING",
-                  message="Redis connection failed, falling back to in-memory sessions",
-                  error=str(e))
+        log_event(
+            SERVICE_NAME,
+            "redis_init_failed",
+            level="WARNING",
+            message="Redis connection failed, falling back to in-memory sessions",
+            error=str(e),
+        )
 else:
     log_event(SERVICE_NAME, "redis_missing", level="WARNING", message="REDIS_URL not set; using in-memory sessions")
 
@@ -47,6 +52,7 @@ SESSIONS = {} if not USE_REDIS else None
 def _session_key(session_id: str) -> str:
     return f"session:{session_id}"
 
+
 def save_session(session_id: str, data: dict):
     payload = _json.dumps(data)
     if USE_REDIS and redis_client:
@@ -54,11 +60,17 @@ def save_session(session_id: str, data: dict):
             redis_client.set(_session_key(session_id), payload, ex=SESSION_TTL_SECONDS)
             return True
         except Exception as e:
-            log_event(SERVICE_NAME, "redis_set_failed", level="ERROR",
-                      message="Failed to set session in Redis", error=str(e))
+            log_event(
+                SERVICE_NAME,
+                "redis_set_failed",
+                level="ERROR",
+                message="Failed to set session in Redis",
+                error=str(e),
+            )
     # fallback
     SESSIONS[session_id] = data
     return True
+
 
 def get_session(session_id: str) -> dict:
     if USE_REDIS and redis_client:
@@ -68,22 +80,36 @@ def get_session(session_id: str) -> dict:
                 return _json.loads(raw)
             return None
         except Exception as e:
-            log_event(SERVICE_NAME, "redis_get_failed", level="WARNING",
-                      message="Redis GET failed", error=str(e))
+            log_event(
+                SERVICE_NAME,
+                "redis_get_failed",
+                level="WARNING",
+                message="Redis GET failed",
+                error=str(e),
+            )
     return SESSIONS.get(session_id) if SESSIONS is not None else None
+
 
 def delete_session(session_id: str):
     if USE_REDIS and redis_client:
         try:
             redis_client.delete(_session_key(session_id))
         except Exception as e:
-            log_event(SERVICE_NAME, "redis_delete_failed", level="WARNING", message="Redis DELETE failed", error=str(e))
+            log_event(
+                SERVICE_NAME,
+                "redis_delete_failed",
+                level="WARNING",
+                message="Redis DELETE failed",
+                error=str(e),
+            )
     if SESSIONS is not None and session_id in SESSIONS:
         del SESSIONS[session_id]
     return True
 
+
 def get_trace() -> str:
     return str(uuid.uuid4())
+
 
 # --------------------------------------------------------------------------
 # Conversation Endpoints
@@ -97,9 +123,11 @@ def start_conversation():
     session_id = str(uuid.uuid4())
     supplied_trace = data.get("trace_id")
     trace_id = supplied_trace or log_event(
-        SERVICE_NAME, "conversation_start",
+        SERVICE_NAME,
+        "conversation_start",
         message=f"New session for {lead_name}",
-        lead_name=lead_name, industry=industry
+        lead_name=lead_name,
+        industry=industry,
     )
 
     session_obj = {
@@ -118,12 +146,14 @@ def start_conversation():
     else:
         sara_text = f"Hello {lead_name}, this is Sara from BrightReach — how are you today?"
 
-    return jsonify({
-        "session_id": session_id,
-        "trace_id": trace_id,
-        "sara_text": sara_text,
-        "prompt_preview": f"Lead: {lead_name}\nIndustry: {industry}\nContext: Starting new call."
-    })
+    return jsonify(
+        {
+            "session_id": session_id,
+            "trace_id": trace_id,
+            "sara_text": sara_text,
+            "prompt_preview": f"Lead: {lead_name}\nIndustry: {industry}\nContext: Starting new call.",
+        }
+    )
 
 
 @app.route("/conv/input", methods=["POST"])
@@ -172,7 +202,8 @@ def conversation_input():
     elif any(k in text for k in ["callback", "call me later"]):
         action = "callback"
     elif any(k in text for k in ["urgent", "today"]):
-        action = "book"; hot_lead = True
+        action = "book"
+        hot_lead = True
 
     session["callflow_step"] = next_step
     session["history"].append({"sara": sara_response})
@@ -182,22 +213,73 @@ def conversation_input():
 
     trace_id = session.get("trace_id")
     log_event(
-        SERVICE_NAME, "conversation_step",
+        SERVICE_NAME,
+        "conversation_step",
         message=f"Processed input for session {session_id}",
-        action=action, hot_lead=hot_lead,
-        trace_id=trace_id
+        action=action,
+        hot_lead=hot_lead,
+        trace_id=trace_id,
     )
 
     # Optional TTS enqueue:
     # payload = {"session_id": session_id, "sara_text": sara_response, "trace_id": trace_id, "provider": "deepgram"}
     # run_tts.delay(payload)
 
-    return jsonify({
-        "sara_text": sara_response,
-        "action": action,
-        "hot_lead": hot_lead,
-        "trace_id": trace_id
-    })
+    return jsonify(
+        {
+            "sara_text": sara_response,
+            "action": action,
+            "hot_lead": hot_lead,
+            "trace_id": trace_id,
+        }
+    )
+
+
+# --------------------------------------------------------------------------
+# Outbound Initialization (Phase 10D)
+# --------------------------------------------------------------------------
+@app.route("/outbound", methods=["POST"])
+def outbound_call():
+    data = request.get_json() or {}
+    to_number = data.get("to")
+    lead_name = data.get("name", "there")
+
+    if not to_number:
+        return jsonify({"error": "Missing 'to' number"}), 400
+
+    session_id = str(uuid.uuid4())
+    trace_id = get_trace()
+
+    session_obj = {
+        "lead_name": lead_name,
+        "to_number": to_number,
+        "history": [],
+        "callflow_step": "start",
+        "trace_id": trace_id,
+    }
+
+    save_session(session_id, session_obj)
+
+    log_event(
+        SERVICE_NAME,
+        "outbound_call_init",
+        message=f"Outbound call initiated for {lead_name}",
+        to_number=to_number,
+        trace_id=trace_id,
+    )
+
+    sara_opening = f"Hello {lead_name}, this is Sara from BrightReach. How are you today?"
+
+    return jsonify(
+        {
+            "status": "initiated",
+            "to": to_number,
+            "lead_name": lead_name,
+            "trace_id": trace_id,
+            "session_id": session_id,
+            "sara_opening": sara_opening,
+        }
+    )
 
 
 # --------------------------------------------------------------------------
