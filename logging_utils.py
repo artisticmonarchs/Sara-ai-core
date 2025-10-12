@@ -1,40 +1,89 @@
 """
-logging_utils.py — Phase 6 Ready (Flattened Structure)
-Centralized structured logging utility for Sara AI Core.
+logging_utils.py — Phase 8 Unified Logging System
+Combines Phase 7 bootstrap (rotating file + console) with Phase 8 structured JSON + trace logging.
+Lightweight, dependency-free foundation shared by all Sara AI Core services.
 """
 
-import logging
+import os
 import json
 import uuid
-from datetime import datetime
+import time
+import logging
+from logging.handlers import RotatingFileHandler
 
 
-def log_event(service, event, status, message="", level="INFO", extra=None, trace_id=None):
+# --------------------------------------------------------------------------
+# Phase 7 Bootstrap (preserved)
+# --------------------------------------------------------------------------
+def _bootstrap_logging():
     """
-    Create a structured log entry with JSON formatting and optional trace linking.
+    Initialize root logger with rotating file and console handlers.
+    Creates logs/ directory if missing.
     """
-    if trace_id is None:
-        trace_id = str(uuid.uuid4())
+    os.makedirs("logs", exist_ok=True)
+    log_file = os.path.join("logs", "sara_ai.log")
 
-    payload = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+    root_logger = logging.getLogger()
+    if not root_logger.hasHandlers():
+        root_logger.setLevel(logging.INFO)
+
+        # Rotating file handler
+        file_handler = RotatingFileHandler(log_file, maxBytes=5_000_000, backupCount=3)
+        file_handler.setFormatter(logging.Formatter("%(message)s"))
+        root_logger.addHandler(file_handler)
+
+        # Console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(logging.Formatter("%(message)s"))
+        root_logger.addHandler(console_handler)
+
+
+# Initialize immediately when imported
+_bootstrap_logging()
+
+
+# --------------------------------------------------------------------------
+# Phase 8 Structured JSON Logging
+# --------------------------------------------------------------------------
+def get_trace_id() -> str:
+    """Generate a unique trace ID for log correlation."""
+    return str(uuid.uuid4())
+
+
+def log_event(service: str, event: str, level: str = "INFO", message: str = "", **extra) -> str:
+    """
+    Emit a structured JSON log entry.
+    Compatible with both console and rotating file handlers initialized above.
+    Returns the trace_id for observability chaining.
+    """
+    trace_id = extra.get("trace_id", get_trace_id())
+
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "service": service,
         "event": event,
-        "status": status,
-        "message": message,
         "level": level,
+        "message": message,
         "trace_id": trace_id,
-        "extra": extra or {},
+        "extra": extra,
     }
 
-    log_line = json.dumps(payload)
+    line = json.dumps(record, ensure_ascii=False)
+    logger = logging.getLogger(service)
     level_upper = level.upper()
 
     if level_upper == "ERROR":
-        logging.error(log_line)
+        logger.error(line)
     elif level_upper == "WARNING":
-        logging.warning(log_line)
+        logger.warning(line)
     else:
-        logging.info(log_line)
+        logger.info(line)
 
     return trace_id
+
+
+# --------------------------------------------------------------------------
+# Smoke test (optional)
+# --------------------------------------------------------------------------
+if __name__ == "__main__":
+    log_event("logging_utils", "init_test", message="Unified logging initialized ✅")
