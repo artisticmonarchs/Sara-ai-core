@@ -1,7 +1,7 @@
 """
-gpt_client.py — Phase 10D (Fixed for new OpenAI SDK)
+gpt_client.py — Phase 10D (Final)
 Handles GPT inference for Sara AI with full trace logging,
-environment-safe proxy handling, and fault-tolerant fallback.
+Render-safe proxy cleanup, and fault-tolerant fallback.
 """
 
 import os
@@ -15,11 +15,15 @@ from logging_utils import log_event
 # Environment & Safety Fixes
 # --------------------------------------------------------------------------
 # Render and some CI/CD environments inject proxy variables automatically.
-# These break the new OpenAI SDK (v1+), which no longer accepts `proxies`.
-for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
-    os.environ.pop(key, None)
+# These break the new OpenAI SDK (v1.0+), which does not support proxies.
+for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+    if key in os.environ:
+        del os.environ[key]
 
-# Initialize OpenAI client safely (uses OPENAI_API_KEY from environment)
+
+# --------------------------------------------------------------------------
+# OpenAI Client Initialization
+# --------------------------------------------------------------------------
 try:
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 except Exception as e:
@@ -35,7 +39,7 @@ logger.setLevel(logging.INFO)
 
 
 # --------------------------------------------------------------------------
-# Core Function
+# Core Function: GPT Reply Generation
 # --------------------------------------------------------------------------
 def generate_reply(prompt: str, trace_id: str | None = None) -> str:
     """
@@ -54,7 +58,7 @@ def generate_reply(prompt: str, trace_id: str | None = None) -> str:
     )
 
     try:
-        # ✅ Compatible with OpenAI SDK v1.0+
+        # ✅ Compatible with OpenAI SDK v1.51+
         response = client.chat.completions.create(
             model=os.getenv("OPENAI_MODEL", "gpt-5-mini"),
             messages=[{"role": "user", "content": prompt}],
