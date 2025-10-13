@@ -1,6 +1,6 @@
 """
 tasks.py — Sara AI Core (Phase 10D)
-Updated Celery tasks with Deepgram SDK v1+ async TTS handling.
+Updated Celery tasks with Deepgram SDK REST TTS handling.
 """
 
 import os
@@ -9,11 +9,11 @@ import time
 import uuid
 import traceback
 import asyncio
+import requests
 from celery_app import celery
 from logging_utils import log_event
 from redis import Redis
-from deepgram import Deepgram
-import openai
+from gpt_client import generate_reply  # ✅ All GPT logic now imported cleanly
 
 # --------------------------------------------------------------------------
 # Environment & Clients
@@ -22,11 +22,8 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 DG_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 DG_SPEAK_MODEL = os.getenv("DEEPGRAM_SPEAK_MODEL", "aura-2-asteria-en")
 PUBLIC_AUDIO_PATH = os.getenv("PUBLIC_AUDIO_PATH", "public/audio")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
-dg_client = Deepgram(DG_API_KEY)
-openai.api_key = OPENAI_API_KEY
 
 # --------------------------------------------------------------------------
 # Helper
@@ -42,20 +39,30 @@ def save_audio_file(session_id: str, trace_id: str, audio_bytes: bytes) -> str:
         f.write(audio_bytes)
     return path
 
-async def deepgram_tts(text: str) -> bytes:
+def deepgram_tts_rest(text: str) -> bytes:
     """
-    Async Deepgram TTS call using the new SDK.
+    Generate TTS audio from text using Deepgram REST API.
     Returns raw audio bytes in WAV format.
     """
-    response = await dg_client.speech.synthesize({
-        "text": text,
-        "voice": DG_SPEAK_MODEL,
-        "output_format": "wav"
-    })
-    audio_bytes = response.get("audio")
-    if not audio_bytes:
-        raise RuntimeError("Deepgram returned empty audio stream.")
-    return audio_bytes
+    import requests
+    import os
+
+    DG_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+    DG_SPEAK_MODEL = "aura-asteria-en"  # or another voice model like 'aura-luna-en'
+
+    url = f"https://api.deepgram.com/v1/speak?model={DG_SPEAK_MODEL}&encoding=linear16&container=wav"
+
+    headers = {
+        "Authorization": f"Token {DG_API_KEY}",
+        "Content-Type": "text/plain"
+    }
+
+    response = requests.post(url, headers=headers, data=text.encode("utf-8"))
+
+    if response.status_code != 200:
+        raise RuntimeError(f"Deepgram TTS failed: {response.status_code} - {response.text}")
+
+    return response.content
 
 # --------------------------------------------------------------------------
 # Inference Task
@@ -77,16 +84,7 @@ def run_inference(self, payload: dict):
 
     start_time = time.time()
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "You are Sara Hayes, a friendly AI assistant."},
-                {"role": "user", "content": transcript}
-            ],
-            max_tokens=250
-        )
-        reply_text = response.choices[0].message["content"].strip()
-        tokens_used = response.usage.total_tokens
+        reply_text = generate_reply(transcript, trace_id=trace_id)
 
         # Enqueue TTS
         celery.send_task("sara_ai.tasks.run_tts", args=[{
@@ -100,10 +98,10 @@ def run_inference(self, payload: dict):
             service="tasks",
             event="inference_done",
             status="ok",
-            message=f"Inference completed ({len(reply_text)} chars, {tokens_used} tokens, {latency_ms}ms)",
+            message=f"Inference completed ({len(reply_text)} chars, {latency_ms}ms)",
             trace_id=trace_id,
             session_id=session_id,
-            extra={"tokens_used": tokens_used, "latency_ms": latency_ms},
+            extra={"latency_ms": latency_ms},
         )
 
         return {"trace_id": trace_id, "session_id": session_id, "reply": reply_text}
@@ -151,8 +149,8 @@ def run_tts(self, payload: dict):
 
     start_time = time.time()
     try:
-        # Async Deepgram call wrapped in sync context
-        audio_bytes = asyncio.run(deepgram_tts(text))
+        # REST Deepgram call
+        audio_bytes = deepgram_tts_rest(text)
         audio_path = save_audio_file(session_id, trace_id, audio_bytes)
         duration = round(time.time() - start_time, 2)
         public_url = f"/audio/{session_id}/{trace_id}.wav"

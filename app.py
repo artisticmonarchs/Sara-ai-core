@@ -9,15 +9,16 @@ import uuid
 import time
 import redis
 import json as _json
+import shutil
 from datetime import timedelta
 from flask import Flask, request, jsonify
 from logging_utils import log_event
-# from tasks import run_tts  # Uncomment when you want to enqueue TTS
+from tasks import run_tts
 
 # --------------------------------------------------------------------------
 # Flask App & Config
 # --------------------------------------------------------------------------
-app = Flask(__name__)
+app = Flask(__name__, static_folder="public", static_url_path="/public")
 SERVICE_NAME = "flask_app"
 
 # Session & Redis Config
@@ -31,7 +32,11 @@ if REDIS_URL:
         redis_client = redis.from_url(REDIS_URL, decode_responses=True)
         redis_client.ping()
         USE_REDIS = True
-        log_event(SERVICE_NAME, "redis_init", message="Connected to Redis", redis_url=REDIS_URL)
+        try:
+            redis_host = REDIS_URL.split("@")[-1]
+        except Exception:
+            redis_host = "unknown"
+        log_event(SERVICE_NAME, "redis_init", message="Connected to Redis", redis_host=redis_host)
     except Exception as e:
         log_event(
             SERVICE_NAME,
@@ -110,6 +115,29 @@ def delete_session(session_id: str):
 def get_trace() -> str:
     return str(uuid.uuid4())
 
+# --------------------------------------------------------------------------
+# Load Sara’s brains (JSON knowledge modules)
+# --------------------------------------------------------------------------
+SARA_ASSETS = {}
+SARA_BRAIN_PATH = os.environ.get("SARA_BRAIN_PATH", "assets")
+for filename in [
+    "Sara_SystemPrompt.json",
+    "Sara_Knowledgebase.json",
+    "Sara_Flow.json",
+    "Sara_MasterPrompt.json",
+    "Sara_Objections_Playbook_Full.json",
+    "Sara_Opening.json",
+]:
+    path = os.path.join(SARA_BRAIN_PATH, filename)
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                key = filename.replace(".json", "").lower()
+                SARA_ASSETS[key] = _json.load(f)
+        else:
+            log_event(SERVICE_NAME, "missing_brain_file", level="WARNING", message=f"File not found: {path}")
+    except Exception as e:
+        log_event(SERVICE_NAME, "brain_load_error", level="ERROR", message=f"Failed to load {filename}", error=str(e))
 
 # --------------------------------------------------------------------------
 # Conversation Endpoints
@@ -122,12 +150,15 @@ def start_conversation():
 
     session_id = str(uuid.uuid4())
     supplied_trace = data.get("trace_id")
-    trace_id = supplied_trace or log_event(
+    trace_id = supplied_trace or get_trace()
+
+    log_event(
         SERVICE_NAME,
         "conversation_start",
         message=f"New session for {lead_name}",
         lead_name=lead_name,
         industry=industry,
+        trace_id=trace_id,
     )
 
     session_obj = {
@@ -140,7 +171,7 @@ def start_conversation():
 
     save_session(session_id, session_obj)
 
-    opening_data = SARA_ASSETS.get("opening", {})
+    opening_data = SARA_ASSETS.get("sara_opening", {})
     if "openers" in opening_data and isinstance(opening_data["openers"], list) and opening_data["openers"]:
         sara_text = opening_data["openers"][0].replace("{lead_name}", lead_name)
     else:
@@ -174,7 +205,7 @@ def conversation_input():
     history.append({"user": user_text})
     session["history"] = history
 
-    callflow = SARA_ASSETS.get("callflow", {})
+    callflow = SARA_ASSETS.get("sara_flow", {})
     current_step = session.get("callflow_step", "start")
     next_step_data = callflow.get(current_step, {})
 
@@ -183,7 +214,7 @@ def conversation_input():
 
     # Playbook fallback
     if not sara_response:
-        playbook = SARA_ASSETS.get("playbook", {})
+        playbook = SARA_ASSETS.get("sara_objections_playbook_full", {})
         for rule in playbook.get("rules", []):
             triggers = rule.get("triggers", [])
             if any(t.lower() in user_text.lower() for t in triggers):
@@ -207,6 +238,7 @@ def conversation_input():
 
     session["callflow_step"] = next_step
     session["history"].append({"sara": sara_response})
+    session["recent_responses"] = (session.get("recent_responses", []) + [sara_response])[-5:]
 
     # Persist session
     save_session(session_id, session)
@@ -222,8 +254,8 @@ def conversation_input():
     )
 
     # Optional TTS enqueue:
-    # payload = {"session_id": session_id, "sara_text": sara_response, "trace_id": trace_id, "provider": "deepgram"}
-    # run_tts.delay(payload)
+    payload = {"session_id": session_id, "sara_text": sara_response, "trace_id": trace_id, "provider": "deepgram"}
+    run_tts.delay(payload)
 
     return jsonify(
         {
@@ -234,9 +266,8 @@ def conversation_input():
         }
     )
 
-
 # --------------------------------------------------------------------------
-# Outbound Initialization (Phase 10D)
+# Outbound Initialization
 # --------------------------------------------------------------------------
 @app.route("/outbound", methods=["POST"])
 def outbound_call():
@@ -270,6 +301,10 @@ def outbound_call():
 
     sara_opening = f"Hello {lead_name}, this is Sara from BrightReach. How are you today?"
 
+    # Enqueue TTS for async generation
+    payload = {"session_id": session_id, "sara_text": sara_opening, "trace_id": trace_id, "provider": "deepgram"}
+    run_tts.delay(payload)
+
     return jsonify(
         {
             "status": "initiated",
@@ -281,14 +316,35 @@ def outbound_call():
         }
     )
 
+# --------------------------------------------------------------------------
+# Cleanup Endpoint
+# --------------------------------------------------------------------------
+@app.route("/cleanup/<session_id>", methods=["POST"])
+def cleanup_session(session_id):
+    folder = os.path.join("public", "audio", session_id)
+    try:
+        if os.path.exists(folder):
+            shutil.rmtree(folder)
+        delete_session(session_id)
+        log_event(SERVICE_NAME, "cleanup_done", message="Cleaned session", session_id=session_id)
+        return jsonify({"status": "cleaned", "session_id": session_id})
+    except Exception as e:
+        log_event(SERVICE_NAME, "cleanup_failed", level="ERROR", message="Cleanup failed", error=str(e), session_id=session_id)
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 # --------------------------------------------------------------------------
 # Health Check
 # --------------------------------------------------------------------------
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"service": SERVICE_NAME, "status": "healthy"}), 200
-
+    status = {"service": SERVICE_NAME, "status": "healthy"}
+    if USE_REDIS and redis_client:
+        try:
+            redis_client.ping()
+            status["redis"] = "ok"
+        except Exception:
+            status["redis"] = "unhealthy"
+    return jsonify(status), 200
 
 # --------------------------------------------------------------------------
 # Local Debug
