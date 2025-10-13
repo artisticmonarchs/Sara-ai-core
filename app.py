@@ -317,6 +317,27 @@ def outbound_call():
     )
 
 # --------------------------------------------------------------------------
+# QA Endpoint: TTS Smoke Test
+# --------------------------------------------------------------------------
+@app.route("/tts_test", methods=["POST"])
+def tts_test():
+    data = request.get_json() or {}
+    text = data.get("text", "Hello from Sara AI test sequence.")
+    trace_id = get_trace()
+
+    log_event(SERVICE_NAME, "tts_test_start", message="Triggered TTS smoke test", trace_id=trace_id, text=text)
+
+    payload = {
+        "session_id": f"tts_test_{uuid.uuid4()}",
+        "sara_text": text,
+        "trace_id": trace_id,
+        "provider": "deepgram",
+    }
+
+    run_tts.delay(payload)
+    return jsonify({"status": "queued", "trace_id": trace_id, "text": text})
+
+# --------------------------------------------------------------------------
 # Cleanup Endpoint
 # --------------------------------------------------------------------------
 @app.route("/cleanup/<session_id>", methods=["POST"])
