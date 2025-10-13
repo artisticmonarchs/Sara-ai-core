@@ -1,6 +1,6 @@
 """
-tasks.py — Sara AI Core (Phase 10D)
-Updated Celery tasks with Deepgram SDK REST TTS handling.
+tasks.py — Sara AI Core (Phase 10D+)
+Celery tasks with Deepgram REST TTS + safe JSON deserialization.
 """
 
 import os
@@ -10,10 +10,11 @@ import uuid
 import traceback
 import asyncio
 import requests
+import json
 from celery_app import celery
 from logging_utils import log_event
 from redis import Redis
-from gpt_client import generate_reply  # ✅ All GPT logic now imported cleanly
+from gpt_client import generate_reply  # ✅ GPT logic imported cleanly
 
 # --------------------------------------------------------------------------
 # Environment & Clients
@@ -25,11 +26,13 @@ PUBLIC_AUDIO_PATH = os.getenv("PUBLIC_AUDIO_PATH", "public/audio")
 
 redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
 
+
 # --------------------------------------------------------------------------
-# Helper
+# Helper Functions
 # --------------------------------------------------------------------------
 def get_trace():
     return str(uuid.uuid4())
+
 
 def save_audio_file(session_id: str, trace_id: str, audio_bytes: bytes) -> str:
     folder = os.path.join(PUBLIC_AUDIO_PATH, session_id)
@@ -39,36 +42,40 @@ def save_audio_file(session_id: str, trace_id: str, audio_bytes: bytes) -> str:
         f.write(audio_bytes)
     return path
 
+
 def deepgram_tts_rest(text: str) -> bytes:
     """
     Generate TTS audio from text using Deepgram REST API.
     Returns raw audio bytes in WAV format.
     """
-    import requests
-    import os
-
     DG_API_KEY = os.getenv("DEEPGRAM_API_KEY")
-    DG_SPEAK_MODEL = "aura-asteria-en"  # or another voice model like 'aura-luna-en'
+    DG_SPEAK_MODEL = "aura-asteria-en"
 
     url = f"https://api.deepgram.com/v1/speak?model={DG_SPEAK_MODEL}&encoding=linear16&container=wav"
-
     headers = {
         "Authorization": f"Token {DG_API_KEY}",
         "Content-Type": "text/plain"
     }
 
     response = requests.post(url, headers=headers, data=text.encode("utf-8"))
-
     if response.status_code != 200:
         raise RuntimeError(f"Deepgram TTS failed: {response.status_code} - {response.text}")
 
     return response.content
 
+
 # --------------------------------------------------------------------------
 # Inference Task
 # --------------------------------------------------------------------------
 @celery.task(name="sara_ai.tasks.run_inference", bind=True)
-def run_inference(self, payload: dict):
+def run_inference(self, payload):
+    # ✅ Safe deserialization guard
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {"text": str(payload)}
+
     trace_id = payload.get("trace_id") or get_trace()
     session_id = payload.get("session_id") or str(uuid.uuid4())
     transcript = payload.get("text") or payload.get("input") or ""
@@ -118,11 +125,19 @@ def run_inference(self, payload: dict):
         )
         raise
 
+
 # --------------------------------------------------------------------------
 # TTS Task
 # --------------------------------------------------------------------------
 @celery.task(name="sara_ai.tasks.run_tts", bind=True)
-def run_tts(self, payload: dict):
+def run_tts(self, payload):
+    # ✅ Safe deserialization guard
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {"text": str(payload)}
+
     trace_id = payload.get("trace_id") or get_trace()
     session_id = payload.get("session_id") or str(uuid.uuid4())
     text = payload.get("text") or ""
@@ -149,13 +164,11 @@ def run_tts(self, payload: dict):
 
     start_time = time.time()
     try:
-        # REST Deepgram call
         audio_bytes = deepgram_tts_rest(text)
         audio_path = save_audio_file(session_id, trace_id, audio_bytes)
         duration = round(time.time() - start_time, 2)
         public_url = f"/audio/{session_id}/{trace_id}.wav"
 
-        # Metrics
         redis_client.hincrby("metrics:tts", "files_generated", 1)
 
         log_event(
