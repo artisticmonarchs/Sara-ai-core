@@ -1,6 +1,7 @@
 """
-tasks.py — Sara AI Core (Phase 10D+)
-Celery tasks with Deepgram REST TTS + safe JSON deserialization.
+tasks.py — Sara AI Core (Phase 10D++: Toby Review Integration)
+Enhanced with Deepgram config consistency, standardized error handling,
+payload sanity logging, and REST timeout safety.
 """
 
 import os
@@ -8,13 +9,11 @@ import io
 import time
 import uuid
 import traceback
-import asyncio
 import requests
-import json
 from celery_app import celery
 from logging_utils import log_event
 from redis import Redis
-from gpt_client import generate_reply  # ✅ GPT logic imported cleanly
+from gpt_client import generate_reply
 
 # --------------------------------------------------------------------------
 # Environment & Clients
@@ -23,15 +22,29 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 DG_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 DG_SPEAK_MODEL = os.getenv("DEEPGRAM_SPEAK_MODEL", "aura-2-asteria-en")
 PUBLIC_AUDIO_PATH = os.getenv("PUBLIC_AUDIO_PATH", "public/audio")
+PUBLIC_AUDIO_BASE_URL = os.getenv("PUBLIC_AUDIO_BASE_URL", "/audio")
 
 redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
 
-
 # --------------------------------------------------------------------------
-# Helper Functions
+# Helpers
 # --------------------------------------------------------------------------
 def get_trace():
     return str(uuid.uuid4())
+
+
+def tts_error_response(code: str, message: str, trace_id: str, session_id: str):
+    """Standardized error format for TTS pipeline."""
+    log_event(
+        service="tasks",
+        event="tts_error",
+        status="error",
+        message=message,
+        trace_id=trace_id,
+        session_id=session_id,
+        extra={"code": code}
+    )
+    return {"error_code": code, "error_message": message, "trace_id": trace_id, "session_id": session_id}
 
 
 def save_audio_file(session_id: str, trace_id: str, audio_bytes: bytes) -> str:
@@ -44,37 +57,55 @@ def save_audio_file(session_id: str, trace_id: str, audio_bytes: bytes) -> str:
 
 
 def deepgram_tts_rest(text: str) -> bytes:
-    """
-    Generate TTS audio from text using Deepgram REST API.
-    Returns raw audio bytes in WAV format.
-    """
-    DG_API_KEY = os.getenv("DEEPGRAM_API_KEY")
-    DG_SPEAK_MODEL = "aura-asteria-en"
-
+    """Generate TTS audio from text using Deepgram REST API with timeout safety."""
     url = f"https://api.deepgram.com/v1/speak?model={DG_SPEAK_MODEL}&encoding=linear16&container=wav"
+
     headers = {
         "Authorization": f"Token {DG_API_KEY}",
         "Content-Type": "text/plain"
     }
 
-    response = requests.post(url, headers=headers, data=text.encode("utf-8"))
+    try:
+        response = requests.post(url, headers=headers, data=text.encode("utf-8"), timeout=15)
+    except requests.Timeout:
+        raise RuntimeError("Deepgram API timeout after 15s")
+
     if response.status_code != 200:
         raise RuntimeError(f"Deepgram TTS failed: {response.status_code} - {response.text}")
 
     return response.content
 
 
+def normalize_payload(payload):
+    """Ensure Celery payload is always a dict and log if malformed."""
+    if isinstance(payload, (list, tuple)) and payload:
+        payload = payload[0]
+
+    if isinstance(payload, str):
+        import json
+        try:
+            payload = json.loads(payload)
+        except Exception:
+            payload = {"text": str(payload)}
+
+    if not isinstance(payload, dict):
+        log_event(
+            service="tasks",
+            event="payload_warning",
+            status="warn",
+            message="Non-dict payload received, defaulting to empty dict",
+            trace_id=get_trace(),
+        )
+        payload = {}
+
+    return payload
+
 # --------------------------------------------------------------------------
 # Inference Task
 # --------------------------------------------------------------------------
 @celery.task(name="sara_ai.tasks.run_inference", bind=True)
 def run_inference(self, payload):
-    # ✅ Safe deserialization guard
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except Exception:
-            payload = {"text": str(payload)}
+    payload = normalize_payload(payload)
 
     trace_id = payload.get("trace_id") or get_trace()
     session_id = payload.get("session_id") or str(uuid.uuid4())
@@ -93,7 +124,6 @@ def run_inference(self, payload):
     try:
         reply_text = generate_reply(transcript, trace_id=trace_id)
 
-        # Enqueue TTS
         celery.send_task("sara_ai.tasks.run_tts", args=[{
             "text": reply_text,
             "trace_id": trace_id,
@@ -125,18 +155,12 @@ def run_inference(self, payload):
         )
         raise
 
-
 # --------------------------------------------------------------------------
 # TTS Task
 # --------------------------------------------------------------------------
 @celery.task(name="sara_ai.tasks.run_tts", bind=True)
 def run_tts(self, payload):
-    # ✅ Safe deserialization guard
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except Exception:
-            payload = {"text": str(payload)}
+    payload = normalize_payload(payload)
 
     trace_id = payload.get("trace_id") or get_trace()
     session_id = payload.get("session_id") or str(uuid.uuid4())
@@ -152,22 +176,14 @@ def run_tts(self, payload):
     )
 
     if not text:
-        log_event(
-            service="tasks",
-            event="tts_missing_text",
-            status="error",
-            message="No text provided for TTS",
-            trace_id=trace_id,
-            session_id=session_id,
-        )
-        return {"error": "Missing text", "trace_id": trace_id, "session_id": session_id}
+        return tts_error_response("NO_TEXT", "No text provided for TTS", trace_id, session_id)
 
     start_time = time.time()
     try:
         audio_bytes = deepgram_tts_rest(text)
         audio_path = save_audio_file(session_id, trace_id, audio_bytes)
         duration = round(time.time() - start_time, 2)
-        public_url = f"/audio/{session_id}/{trace_id}.wav"
+        public_url = f"{PUBLIC_AUDIO_BASE_URL}/{session_id}/{trace_id}.wav"
 
         redis_client.hincrby("metrics:tts", "files_generated", 1)
 
@@ -183,14 +199,6 @@ def run_tts(self, payload):
 
         return {"trace_id": trace_id, "session_id": session_id, "audio_url": public_url}
 
-    except Exception:
+    except Exception as e:
         err_msg = traceback.format_exc()
-        log_event(
-            service="tasks",
-            event="tts_failed",
-            status="error",
-            message=err_msg,
-            trace_id=trace_id,
-            session_id=session_id,
-        )
-        return {"error": str(err_msg), "trace_id": trace_id, "session_id": session_id}
+        return tts_error_response("TTS_FAILURE", str(e), trace_id, session_id)
