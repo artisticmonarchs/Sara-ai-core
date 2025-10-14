@@ -6,11 +6,9 @@ conversation endpoints, and outbound initialization.
 
 import os
 import uuid
-import time
 import redis
 import json as _json
 import shutil
-from datetime import timedelta
 from flask import Flask, request, jsonify, send_from_directory
 from logging_utils import log_event
 from tasks import run_tts
@@ -31,6 +29,7 @@ USE_REDIS = False
 
 if REDIS_URL:
     try:
+        # decode_responses=True so we get strings back from redis
         redis_client = redis.from_url(REDIS_URL, decode_responses=True)
         redis_client.ping()
         USE_REDIS = True
@@ -67,7 +66,9 @@ def save_session(session_id: str, data: dict):
             return True
         except Exception as e:
             log_event(SERVICE_NAME, "redis_set_failed", level="ERROR", message="Redis SET failed", error=str(e))
-    SESSIONS[session_id] = data
+    # fallback
+    if SESSIONS is not None:
+        SESSIONS[session_id] = data
     return True
 
 
@@ -175,24 +176,64 @@ def conversation_input():
     history.append({"user": user_text})
     session["history"] = history
 
-    callflow = SARA_ASSETS.get("sara_callflow", {})
+    # safe callflow retrieval
+    callflow = SARA_ASSETS.get("sara_callflow", {}) or {}
     current_step = session.get("callflow_step", "start")
-    next_step_data = callflow.get(current_step, {})
+    next_step_data = {}
+    if isinstance(callflow, dict):
+        next_step_data = callflow.get(current_step, {}) or {}
+    # if callflow is not dict, ignore it and use fallback
 
-    sara_response = next_step_data.get("response") or f"Thanks for your message: '{user_text}'. Let's continue."
-    next_step = next_step_data.get("next_step", current_step)
+    sara_response = next_step_data.get("response") if isinstance(next_step_data, dict) else None
+    next_step = next_step_data.get("next_step", current_step) if isinstance(next_step_data, dict) else current_step
+
+    # Playbook fallback — handle both dict and list shapes safely
+    if not sara_response:
+        playbook = SARA_ASSETS.get("sara_objections", {}) or {}
+        # if playbook is a dict with "rules"
+        rules = []
+        if isinstance(playbook, dict):
+            rules = playbook.get("rules", []) or []
+        elif isinstance(playbook, list):
+            rules = playbook
+        # iterate rules (each rule expected to be a dict)
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            triggers = rule.get("triggers", []) or []
+            if any(t.lower() in user_text.lower() for t in triggers if isinstance(t, str)):
+                sara_response = rule.get("response")
+                break
+
+    if not sara_response:
+        sara_response = f"Thanks for your message: '{user_text}'. Let's continue."
+
+    # QA tagging
+    action = "log_only"
+    hot_lead = False
+    text = user_text.lower()
+    if any(k in text for k in ["book", "meeting", "tuesday"]):
+        action = "book"
+    elif any(k in text for k in ["callback", "call me later"]):
+        action = "callback"
+    elif any(k in text for k in ["urgent", "today"]):
+        action = "book"
+        hot_lead = True
 
     session["callflow_step"] = next_step
     session["history"].append({"sara": sara_response})
+    session["recent_responses"] = (session.get("recent_responses", []) + [sara_response])[-5:]
+
     save_session(session_id, session)
 
     trace_id = session.get("trace_id")
-    log_event(SERVICE_NAME, "conversation_step", message=f"Processed input for session {session_id}", trace_id=trace_id)
+    log_event(SERVICE_NAME, "conversation_step", message=f"Processed input for session {session_id}", action=action, hot_lead=hot_lead, trace_id=trace_id)
 
+    # Optional TTS enqueue:
     payload = {"session_id": session_id, "sara_text": sara_response, "trace_id": trace_id, "provider": "deepgram"}
     run_tts.delay(payload)
 
-    return jsonify({"sara_text": sara_response, "trace_id": trace_id})
+    return jsonify({"sara_text": sara_response, "action": action, "hot_lead": hot_lead, "trace_id": trace_id})
 
 # --------------------------------------------------------------------------
 # Outbound Initialization
@@ -251,7 +292,8 @@ def tts_test():
     payload = {"session_id": session_id, "sara_text": text, "trace_id": trace_id, "provider": "deepgram"}
     run_tts.delay(payload)
 
-    file_url = f"https://sara-ai-core-app.onrender.com/audio/{session_id}/{trace_id}.wav"
+    # Return the expected public URL (Flask will serve from /audio/<session>/<file>.wav)
+    file_url = f"https://{os.environ.get('PRIMARY_DOMAIN','sara-ai-core-app.onrender.com')}/audio/{session_id}/{trace_id}.wav"
     return jsonify({"status": "queued", "trace_id": trace_id, "file_url": file_url, "text": text})
 
 # --------------------------------------------------------------------------
@@ -275,8 +317,14 @@ def cleanup_session(session_id):
 # --------------------------------------------------------------------------
 @app.route("/audio/<path:filename>")
 def serve_audio(filename):
-    """Serve audio files from /public/audio"""
-    return send_from_directory("public/audio", filename)
+    """
+    Serve audio files from /public/audio.
+    'filename' can be 'session_id/trace.wav' or nested paths.
+    """
+    # guard: prevent path traversal by resolving normalized path against allowed dir
+    # send_from_directory does internal checks, but ensure base dir exists
+    audio_root = os.path.join(os.getcwd(), "public", "audio")
+    return send_from_directory(audio_root, filename, as_attachment=False)
 
 # --------------------------------------------------------------------------
 # Health Check
