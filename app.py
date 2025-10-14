@@ -145,7 +145,13 @@ def redis_status():
 def system_status():
     """Comprehensive system-level diagnostics."""
     try:
-        redis_ok = safe_redis_ping()
+        # --- Redis Check ---
+        try:
+            redis_ok = redis_client.ping() if redis_client else False
+        except Exception:
+            redis_ok = False
+
+        # --- R2 Check ---
         r2_ok = False
         r2_bucket = None
         try:
@@ -153,15 +159,18 @@ def system_status():
             if isinstance(r2_status, dict):
                 r2_ok = r2_status.get("status") == "ok"
                 r2_bucket = r2_status.get("bucket")
-        except Exception:
+        except Exception as e:
+            log_event(service="api", event="r2_check_error", status="error", message=str(e))
             r2_ok = False
 
+        # --- Environment Snapshot ---
         env_snapshot = {
             "mode": os.getenv("ENV_MODE", "unknown"),
             "service": "sara-ai-core-app",
             "version": "1.0.0",
         }
 
+        # --- Final Response ---
         return jsonify({
             "status": "ok" if redis_ok and r2_ok else "degraded",
             "redis": "connected" if redis_ok else "unreachable",
@@ -169,9 +178,12 @@ def system_status():
             "r2_bucket": r2_bucket,
             "env": env_snapshot,
         }), 200
+
     except Exception as e:
         log_event(service="api", event="system_status_error", status="error", message=str(e))
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+
