@@ -1,7 +1,15 @@
 """
-app.py — Sara AI Core (Phase 10F)
+app.py — Sara AI Core (Phase 10G-ready)
 Flask API with Redis-backed sessions, trace propagation,
 conversation endpoints, and outbound initialization.
+
+Notes:
+- /tts_test supports inline QA mode:
+    POST /tts_test  { "text": "...", "inline": true }
+  or /tts_test?inline=true
+  This calls run_tts(payload, inline=True) so the Flask process performs the TTS
+  and writes the audio to the same container filesystem (public/audio/...).
+- All existing calls that use run_tts.delay(...) remain supported.
 """
 
 import os
@@ -9,8 +17,12 @@ import uuid
 import redis
 import json as _json
 import shutil
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, abort
 from logging_utils import log_event
+
+# Import 'run_tts' proxy object from tasks. It supports both:
+#   run_tts.delay(payload)    -> async Celery enqueue (existing behaviour)
+#   run_tts(payload, inline=True) -> synchronous inline run (QA mode)
 from tasks import run_tts
 
 # --------------------------------------------------------------------------
@@ -231,6 +243,7 @@ def conversation_input():
 
     # Optional TTS enqueue:
     payload = {"session_id": session_id, "sara_text": sara_response, "trace_id": trace_id, "provider": "deepgram"}
+    # Keep existing behavior: enqueue to Celery asynchronously
     run_tts.delay(payload)
 
     return jsonify({"sara_text": sara_response, "action": action, "hot_lead": hot_lead, "trace_id": trace_id})
@@ -268,14 +281,39 @@ def outbound_call():
     })
 
 # --------------------------------------------------------------------------
-# QA Endpoint: TTS Smoke Test (Phase 10F)
+# QA Endpoint: TTS Smoke Test (Phase 10G)
 # --------------------------------------------------------------------------
 @app.route("/tts_test", methods=["POST"])
 def tts_test():
+    """
+    TTS smoke test endpoint.
+
+    Behavior:
+      - If `inline=true` is present in query params or JSON body contains {"inline": true}
+        then we run TTS synchronously in the Flask process by calling:
+            run_tts(payload, inline=True)
+        This writes the audio file into the Flask container's filesystem (public/audio/...),
+        which allows immediate verification via the /audio/... route.
+
+      - Otherwise we enqueue to Celery (existing behavior) via run_tts.delay(payload).
+
+    Response:
+      - When inline: returns the run result including audio_url and status.
+      - When queued: returns the expected public URL (same as before) and "queued".
+    """
     data = request.get_json() or {}
     text = data.get("text", "Hello from Sara AI test sequence.")
-    trace_id = get_trace()
+    inline_body = data.get("inline", None)
 
+    # query param override
+    inline_qs = request.args.get("inline")
+    inline = False
+    if inline_qs is not None:
+        inline = inline_qs.lower() in ("1", "true", "yes", "y")
+    elif inline_body is not None:
+        inline = bool(inline_body)
+
+    trace_id = get_trace()
     session_id = f"tts_test_{trace_id}"
     output_folder = os.path.join("public", "audio", session_id)
     os.makedirs(output_folder, exist_ok=True)
@@ -287,14 +325,27 @@ def tts_test():
         trace_id=trace_id,
         text=text,
         output_folder=output_folder,
+        inline=inline,
     )
 
     payload = {"session_id": session_id, "sara_text": text, "trace_id": trace_id, "provider": "deepgram"}
-    run_tts.delay(payload)
 
-    # Return the expected public URL (Flask will serve from /audio/<session>/<file>.wav)
-    file_url = f"https://{os.environ.get('PRIMARY_DOMAIN','sara-ai-core-app.onrender.com')}/audio/{session_id}/{trace_id}.wav"
-    return jsonify({"status": "queued", "trace_id": trace_id, "file_url": file_url, "text": text})
+    if inline:
+        # Run synchronously in Flask process for QA verification
+        try:
+            result = run_tts(payload, inline=True)
+            # result is expected to be a dict containing audio_url on success
+            return jsonify({"status": "done", "result": result})
+        except Exception as e:
+            log_event(SERVICE_NAME, "tts_test_inline_failed", level="ERROR", message=str(e), trace_id=trace_id)
+            return jsonify({"status": "error", "error": str(e)}), 500
+    else:
+        # Existing behavior: enqueue to Celery
+        run_tts.delay(payload)
+        # Return the expected public URL (Flask will serve from /audio/<session>/<file>.wav)
+        primary = os.environ.get("PRIMARY_DOMAIN", "sara-ai-core-app.onrender.com")
+        file_url = f"https://{primary}/audio/{session_id}/{trace_id}.wav"
+        return jsonify({"status": "queued", "trace_id": trace_id, "file_url": file_url, "text": text})
 
 # --------------------------------------------------------------------------
 # Cleanup Endpoint

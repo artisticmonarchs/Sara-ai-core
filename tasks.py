@@ -1,14 +1,16 @@
 """
-sara_ai/tasks.py — Robust TTS pipeline (Phase 10F)
-- Recursive text extraction (extract_text)
-- kwargs-based Celery enqueue for stability
-- Celery autoretry on transient errors
-- Deepgram API-key guard at startup
-- Text length limit (MAX_TTS_TEXT_LEN)
-- Atomic audio writes (tmp -> rename)
-- Failure & success metrics in Redis
-- Diagnostic payload logging
-- Public URL generation (PUBLIC_AUDIO_HOST optional)
+sara_ai/tasks.py — Robust TTS pipeline (Phase 10G / 10H-ready)
+
+Changes & features:
+- The Celery task remains registered as "sara_ai.tasks.run_tts" so existing
+  enqueueing works unchanged.
+- A proxy object `run_tts` is exported which:
+    - preserves `.delay(...)` / `.apply_async(...)` for async enqueueing
+    - supports direct synchronous calls: run_tts(payload, inline=True)
+- Core TTS logic is factored into `perform_tts_core(payload)` so both
+  the Celery task and the inline path reuse the same code.
+- Keep existing Deepgram REST flow and atomic file writes.
+- Public URL behavior continues to be controlled by env vars.
 """
 
 import os
@@ -61,7 +63,7 @@ if not DG_API_KEY:
     logger.warning("DEEPGRAM_API_KEY not set. TTS will fail until configured.")
 
 # --------------------------------------------------------------------------
-# Helpers
+# Helpers (same as before, factored)
 # --------------------------------------------------------------------------
 def get_trace():
     return str(uuid.uuid4())
@@ -158,6 +160,9 @@ def tts_error_response(code: str, message: str, trace_id: str, session_id: str):
 
 def deepgram_tts_rest(text: str) -> bytes:
     """Call Deepgram REST TTS endpoint with timeout and error handling."""
+
+    # TODO: if you already have a Deepgram helper, replace this implementation
+    # with your existing call. This implementation uses REST speak endpoint.
     if not DG_API_KEY:
         raise RuntimeError("Missing Deepgram API key")
 
@@ -183,7 +188,149 @@ def deepgram_tts_rest(text: str) -> bytes:
     return response.content
 
 # --------------------------------------------------------------------------
-# Inference Task
+# Core TTS implementation (factored out so both inline and the Celery task reuse it)
+# --------------------------------------------------------------------------
+def perform_tts_core(payload):
+    """
+    Core synchronous TTS logic.
+    Accepts payload dict-like. Returns dict with audio_url or error payload.
+    """
+    # Diagnostic raw payload logging
+    try:
+        log_event(
+            service="tasks",
+            event="tts_debug_raw_payload",
+            status="ok",
+            message=f"RAW PAYLOAD RECEIVED: type={type(payload)} value={repr(payload)[:500]}",
+        )
+    except Exception:
+        logger.exception("Failed to emit tts_debug_raw_payload")
+
+    payload = normalize_payload(payload)
+    trace_id = payload.get("trace_id") or get_trace()
+    session_id = payload.get("session_id") or str(uuid.uuid4())
+    text = extract_text(payload)
+
+    if text and len(text) > MAX_TTS_TEXT_LEN:
+        original_len = len(text)
+        text = text[:MAX_TTS_TEXT_LEN]
+        log_event(
+            service="tasks",
+            event="tts_text_truncated",
+            status="warn",
+            message=f"Truncated text from {original_len} to {len(text)} chars",
+            trace_id=trace_id,
+            session_id=session_id,
+            extra={"original_len": original_len, "trimmed_to": len(text)},
+        )
+
+    log_event(
+        service="tasks",
+        event="tts_start",
+        status="ok",
+        message=f"TTS task started for {len(text)} chars",
+        trace_id=trace_id,
+        session_id=session_id,
+    )
+
+    if not text:
+        return tts_error_response("NO_TEXT", "No text provided for TTS", trace_id, session_id)
+
+    start_time = time.time()
+    try:
+        audio_bytes = deepgram_tts_rest(text)
+        audio_path = save_audio_file_atomic(session_id, trace_id, audio_bytes)
+        duration = round(time.time() - start_time, 2)
+        public_url = make_public_url(session_id, trace_id)
+
+        # Success metric
+        try:
+            redis_client.hincrby("metrics:tts", "files_generated", 1)
+        except Exception:
+            logger.exception("Failed to increment tts files_generated metric")
+
+        log_event(
+            service="tasks",
+            event="tts_done",
+            status="ok",
+            message=f"TTS audio generated ({len(text)} chars, {duration}s)",
+            trace_id=trace_id,
+            session_id=session_id,
+            extra={"audio_path": audio_path, "duration_s": duration, "public_url": public_url},
+        )
+
+        return {"trace_id": trace_id, "session_id": session_id, "audio_url": public_url, "audio_path": audio_path}
+
+    except Exception as e:
+        # Log and increment failure metric & return standardized error payload
+        err_msg = traceback.format_exc()
+        try:
+            redis_client.hincrby("metrics:tts", "failures", 1)
+        except Exception:
+            logger.exception("Failed to increment tts failures metric")
+
+        log_event(
+            service="tasks",
+            event="tts_exception",
+            status="error",
+            message=err_msg,
+            trace_id=trace_id,
+            session_id=session_id,
+            extra={"exception": str(e)},
+        )
+
+        return tts_error_response("TTS_FAILURE", str(e), trace_id, session_id)
+
+# --------------------------------------------------------------------------
+# Celery task wrapper (keeps the legacy task name)
+# --------------------------------------------------------------------------
+@celery.task(
+    name="sara_ai.tasks.run_tts",
+    bind=True,
+    autoretry_for=(requests.RequestException, RuntimeError),
+    retry_backoff=True,
+    retry_backoff_max=CELERY_RETRY_BACKOFF_MAX,
+    retry_kwargs={"max_retries": CELERY_RETRY_MAX},
+)
+def _run_tts_task(self, payload=None):
+    """
+    This is the Celery task entrypoint. It simply calls the core synchronous
+    implementation so both codepaths stay identical.
+    """
+    # Celery will handle retries per the decorator settings.
+    return perform_tts_core(payload)
+
+# --------------------------------------------------------------------------
+# Proxy object: preserves .delay(...) behavior for existing code while allowing
+# inline synchronous calls run_tts(payload, inline=True)
+# --------------------------------------------------------------------------
+class RunTTSProxy:
+    def __init__(self, celery_task):
+        self._task = celery_task
+
+    def __call__(self, payload=None, inline=False):
+        """
+        If inline=True, run synchronously and return the result dict.
+        If inline=False, enqueue to Celery (returns AsyncResult).
+        """
+        if inline:
+            return perform_tts_core(payload)
+        # Default async enqueue via kwargs to avoid arg-wrapping inconsistencies
+        return self._task.apply_async(kwargs={"payload": payload})
+
+    # preserve .delay for compatibility
+    def delay(self, payload=None):
+        return self._task.apply_async(kwargs={"payload": payload})
+
+    # preserve apply_async for compatibility
+    def apply_async(self, *args, **kwargs):
+        return self._task.apply_async(*args, **kwargs)
+
+# instantiate proxy and export as run_tts
+run_tts = RunTTSProxy(_run_tts_task)
+
+# --------------------------------------------------------------------------
+# Inference task (left unchanged, still sends tasks by name)
 # --------------------------------------------------------------------------
 @celery.task(name="sara_ai.tasks.run_inference", bind=True)
 def run_inference(self, payload):
@@ -207,7 +354,6 @@ def run_inference(self, payload):
         reply_text = generate_reply(transcript, trace_id=trace_id)
 
         # Enqueue TTS using kwargs to avoid args-wrapping across brokers/serializers
-        # Use apply_async with kwargs or send_task with kwargs; here we use send_task with kwargs.
         celery.send_task(
             "sara_ai.tasks.run_tts",
             kwargs={"payload": {"text": reply_text, "trace_id": trace_id, "session_id": session_id}},
@@ -237,127 +383,3 @@ def run_inference(self, payload):
             session_id=session_id,
         )
         raise
-
-# --------------------------------------------------------------------------
-# TTS Task
-# --------------------------------------------------------------------------
-@celery.task(
-    name="sara_ai.tasks.run_tts",
-    bind=True,
-    autoretry_for=(requests.RequestException, RuntimeError),
-    retry_backoff=True,
-    retry_backoff_max=CELERY_RETRY_BACKOFF_MAX,
-    retry_kwargs={"max_retries": CELERY_RETRY_MAX},
-)
-def run_tts(self, payload=None):
-    """
-    TTS worker task: accepts payload (dict or compatible). Attempts retries on transient errors.
-    """
-
-    # Diagnostic: raw payload logging (safe)
-    try:
-        log_event(
-            service="tasks",
-            event="tts_debug_raw_payload",
-            status="ok",
-            message=f"RAW PAYLOAD RECEIVED: type={type(payload)} value={repr(payload)[:500]}",
-        )
-    except Exception as e:
-        logging.exception("Failed to emit tts_debug_raw_payload: %s", e)
-
-    # Normalize payload into dict
-    payload = normalize_payload(payload)
-
-    trace_id = payload.get("trace_id") or get_trace()
-    session_id = payload.get("session_id") or str(uuid.uuid4())
-
-    # Extract text recursively
-    text = extract_text(payload)
-
-    # Enforce max length
-    if text and len(text) > MAX_TTS_TEXT_LEN:
-        original_len = len(text)
-        text = text[:MAX_TTS_TEXT_LEN]
-        log_event(
-            service="tasks",
-            event="tts_text_truncated",
-            status="warn",
-            message=f"Truncated text from {original_len} to {len(text)} chars",
-            trace_id=trace_id,
-            session_id=session_id,
-            extra={"original_len": original_len, "trimmed_to": len(text)},
-        )
-
-    # Text-check diagnostic
-    log_event(
-        service="tasks",
-        event="tts_text_check",
-        status="ok",
-        message=f"Normalized text length = {len(text) if text else 0}",
-        trace_id=trace_id,
-        session_id=session_id,
-    )
-
-    trace_id = log_event(
-        service="tasks",
-        event="tts_start",
-        status="ok",
-        message=f"TTS task started for {len(text)} chars",
-        trace_id=trace_id,
-        session_id=session_id,
-    )
-
-    if not text:
-        return tts_error_response("NO_TEXT", "No text provided for TTS", trace_id, session_id)
-
-    start_time = time.time()
-    try:
-        # Generate audio bytes (may raise RuntimeError / RequestException)
-        audio_bytes = deepgram_tts_rest(text)
-
-        # Save atomically
-        audio_path = save_audio_file_atomic(session_id, trace_id, audio_bytes)
-
-        duration = round(time.time() - start_time, 2)
-        public_url = make_public_url(session_id, trace_id)
-
-        # Success metric
-        try:
-            redis_client.hincrby("metrics:tts", "files_generated", 1)
-        except Exception:
-            logger.exception("Failed to increment tts files_generated metric")
-
-        log_event(
-            service="tasks",
-            event="tts_done",
-            status="ok",
-            message=f"TTS audio generated ({len(text)} chars, {duration}s)",
-            trace_id=trace_id,
-            session_id=session_id,
-            extra={"audio_path": audio_path, "duration_s": duration, "public_url": public_url},
-        )
-
-        return {"trace_id": trace_id, "session_id": session_id, "audio_url": public_url}
-
-    except Exception as e:
-        # Log and increment failure metric
-        err_msg = traceback.format_exc()
-        try:
-            redis_client.hincrby("metrics:tts", "failures", 1)
-        except Exception:
-            logger.exception("Failed to increment tts failures metric")
-
-        log_event(
-            service="tasks",
-            event="tts_exception",
-            status="error",
-            message=err_msg,
-            trace_id=trace_id,
-            session_id=session_id,
-            extra={"exception": str(e)},
-        )
-
-        # Reraise for Celery autoretry to catch certain exceptions OR return standardized error
-        # If the exception type is one of autoretry_for, Celery will retry automatically.
-        # For safety, return standardized error payload.
-        return tts_error_response("TTS_FAILURE", str(e), trace_id, session_id)
