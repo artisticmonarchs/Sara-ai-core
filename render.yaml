@@ -1,5 +1,5 @@
 # ==========================
-# Render Configuration — Phase 10H
+# Render Configuration — Phase 10I
 # ==========================
 volumes:
   - name: shared-audio
@@ -41,9 +41,27 @@ services:
         value: Sara Hayes
       - key: SARA_ROLE
         value: Senior Growth Consultant at Noblecom Solutions
+
+      # 🔹 Cloudflare R2 (for app + worker + streaming consistency)
+      - key: R2_BUCKET_NAME
+        value: sara-ai-audio
+      - key: R2_ACCOUNT_ID
+        value: 6970388a67efe7f4ca9feed97b7838b6
+      - key: R2_REGION
+        value: auto
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: PUBLIC_AUDIO_HOST
+        value: https://pub-dc4b36bcc13f45a3aa77dc092e3b2cd4.r2.dev
+      - key: PUBLIC_AUDIO_INCLUDE_BUCKET
+        value: "true"
+
     volumes:
       - name: shared-audio
         mountPath: /opt/render/project/src/public/audio
+
 
   # ==========================
   # 2️⃣ Celery Worker Service
@@ -72,9 +90,27 @@ services:
         value: nova-3
       - key: OPENAI_API_KEY
         sync: false
+
+      # 🔹 Cloudflare R2 configuration
+      - key: R2_BUCKET_NAME
+        value: sara-ai-audio
+      - key: R2_ACCOUNT_ID
+        value: 6970388a67efe7f4ca9feed97b7838b6
+      - key: R2_REGION
+        value: auto
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: PUBLIC_AUDIO_HOST
+        value: https://pub-dc4b36bcc13f45a3aa77dc092e3b2cd4.r2.dev
+      - key: PUBLIC_AUDIO_INCLUDE_BUCKET
+        value: "true"
+
     volumes:
       - name: shared-audio
         mountPath: /opt/render/project/src/public/audio
+
 
   # ==========================
   # 3️⃣ Streaming Service
@@ -106,6 +142,23 @@ services:
         sync: false
       - key: DEEPGRAM_LISTEN_MODEL
         value: nova-3
+
+      # 🔹 Cloudflare R2 credentials for audio upload
+      - key: R2_BUCKET_NAME
+        value: sara-ai-audio
+      - key: R2_ACCOUNT_ID
+        value: 6970388a67efe7f4ca9feed97b7838b6
+      - key: R2_REGION
+        value: auto
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: PUBLIC_AUDIO_HOST
+        value: https://pub-dc4b36bcc13f45a3aa77dc092e3b2cd4.r2.dev
+      - key: PUBLIC_AUDIO_INCLUDE_BUCKET
+        value: "true"
+
     volumes:
       - name: shared-audio
         mountPath: /opt/render/project/src/public/audio
