@@ -110,6 +110,68 @@ def healthz():
     """Lightweight health probe."""
     return jsonify({"status": "ok", "service": "Sara AI Core"}), 200
 
+# -----------------------------------------------------------------------------
+# Diagnostic Endpoints (Phase 10J)
+# -----------------------------------------------------------------------------
+
+import time
+from r2_client import check_r2_connection  # Ensure this helper exists in your R2 util
+
+@app.route("/redis_status", methods=["GET"])
+def redis_status():
+    """Check Redis latency and basic metrics."""
+    if not redis_client:
+        return jsonify({"status": "error", "message": "Redis not initialized"}), 500
+
+    try:
+        start = time.time()
+        pong = redis_client.ping()
+        latency_ms = round((time.time() - start) * 1000, 2)
+
+        metrics = {
+            "files_generated": int(redis_client.hget("metrics:tts", "files_generated") or 0),
+            "uploads": int(redis_client.hget("metrics:tts", "uploads") or 0),
+            "bytes_uploaded": int(redis_client.hget("metrics:tts", "bytes_uploaded") or 0),
+        }
+
+        status = "ok" if pong else "degraded"
+        return jsonify({"status": status, "latency_ms": latency_ms, "metrics": metrics}), 200
+    except Exception as e:
+        log_event(service="api", event="redis_status_error", status="error", message=str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/system_status", methods=["GET"])
+def system_status():
+    """Comprehensive system-level diagnostics."""
+    try:
+        redis_ok = safe_redis_ping()
+        r2_ok = False
+        r2_bucket = None
+        try:
+            r2_status = check_r2_connection()
+            if isinstance(r2_status, dict):
+                r2_ok = r2_status.get("status") == "ok"
+                r2_bucket = r2_status.get("bucket")
+        except Exception:
+            r2_ok = False
+
+        env_snapshot = {
+            "mode": os.getenv("ENV_MODE", "unknown"),
+            "service": "sara-ai-core-app",
+            "version": "1.0.0",
+        }
+
+        return jsonify({
+            "status": "ok" if redis_ok and r2_ok else "degraded",
+            "redis": "connected" if redis_ok else "unreachable",
+            "r2": "ok" if r2_ok else "unavailable",
+            "r2_bucket": r2_bucket,
+            "env": env_snapshot,
+        }), 200
+    except Exception as e:
+        log_event(service="api", event="system_status_error", status="error", message=str(e))
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
