@@ -1,90 +1,86 @@
+"""
+app.py — Production Flask Entry Point for Sara AI Core
+------------------------------------------------------
+Features:
+- Flask API endpoints for health, TTS testing, and task orchestration
+- Celery-backed async processing
+- Integration with Deepgram TTS and Cloudflare R2 via tasks.py
+- Logging and Redis metrics
+"""
+
 import os
 import json
-import uuid
-import time
+import traceback
 from flask import Flask, request, jsonify
-from tasks import run_tts
+from redis import Redis
+from tasks import run_tts, run_inference
 from logging_utils import log_event
 
+# --------------------------------------------------------------------------
+# Flask App Setup
+# --------------------------------------------------------------------------
 app = Flask(__name__)
+app.config["JSON_SORT_KEYS"] = False
 
-PUBLIC_AUDIO_HOST = os.getenv("PUBLIC_AUDIO_HOST", "")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-ENV = os.getenv("ENV", "development")
+redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
+
+# --------------------------------------------------------------------------
+# Routes
+# --------------------------------------------------------------------------
 
 @app.route("/", methods=["GET"])
 def index():
+    """Root endpoint for quick info."""
     return jsonify({
-        "status": "ok",
         "service": "Sara AI Core",
-        "env": ENV,
-        "public_audio_host": PUBLIC_AUDIO_HOST,
-        "message": "TTS & inference pipeline online"
-    })
+        "status": "online",
+        "version": "1.0.0",
+        "endpoints": ["/healthz", "/tts_test", "/run_inference"]
+    }), 200
+
+
+@app.route("/healthz", methods=["GET"])
+def healthz():
+    """Health check endpoint (used by Render/Fly/Kubernetes)."""
+    return jsonify({"status": "healthy", "service": "Sara AI Core"}), 200
+
 
 @app.route("/tts_test", methods=["POST"])
 def tts_test():
-    """
-    Simple endpoint for testing the TTS task pipeline.
-    Accepts JSON {"text": "..."} and returns audio_url.
-    """
-    data = request.get_json(force=True)
-    text = data.get("text", "").strip()
-    if not text:
-        return jsonify({"error": "No text provided"}), 400
-
-    session_id = str(uuid.uuid4())
-    trace_id = str(uuid.uuid4())
-
-    payload = {"text": text, "session_id": session_id, "trace_id": trace_id}
-    log_event(
-        service="app",
-        event="tts_test_start",
-        status="ok",
-        message=f"Received TTS test request for {len(text)} chars",
-        trace_id=trace_id,
-        session_id=session_id,
-    )
-
-    start = time.time()
+    """Inline test for TTS pipeline."""
     try:
+        payload = request.get_json(force=True)
+        log_event(service="api", event="tts_test_received", status="ok", message="Received TTS test request")
+
         result = run_tts(payload, inline=True)
-    except Exception as e:
-        log_event(
-            service="app",
-            event="tts_test_exception",
-            status="error",
-            message=str(e),
-            trace_id=trace_id,
-            session_id=session_id,
-        )
-        return jsonify({"error": "TTS execution failed", "trace_id": trace_id}), 500
+        return jsonify(result), 200
 
-    latency = round((time.time() - start) * 1000, 2)
+    except Exception:
+        err_msg = traceback.format_exc()
+        log_event(service="api", event="tts_test_error", status="error", message=err_msg)
+        return jsonify({"error": "TTS test failed", "details": err_msg}), 500
 
-    if "error_code" in result:
-        return jsonify(result), 500
 
-    return jsonify({
-        "trace_id": result["trace_id"],
-        "session_id": result["session_id"],
-        "audio_url": result["audio_url"],
-        "latency_ms": latency,
-        "status": "ok"
-    })
+@app.route("/run_inference", methods=["POST"])
+def inference():
+    """Main entrypoint for AI inference + TTS pipeline."""
+    try:
+        payload = request.get_json(force=True)
+        log_event(service="api", event="inference_received", status="ok", message="Received inference request")
 
-@app.errorhandler(Exception)
-def handle_exception(e):
-    trace_id = str(uuid.uuid4())
-    log_event(
-        service="app",
-        event="unhandled_exception",
-        status="error",
-        message=str(e),
-        trace_id=trace_id,
-    )
-    return jsonify({"error": "Internal server error", "trace_id": trace_id}), 500
+        task = run_inference.apply_async(kwargs={"payload": payload})
+        return jsonify({"task_id": task.id, "status": "queued"}), 202
 
+    except Exception:
+        err_msg = traceback.format_exc()
+        log_event(service="api", event="inference_error", status="error", message=err_msg)
+        return jsonify({"error": "Inference enqueue failed", "details": err_msg}), 500
+
+
+# --------------------------------------------------------------------------
+# Launch
+# --------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
