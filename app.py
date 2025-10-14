@@ -11,7 +11,7 @@ import redis
 import json as _json
 import shutil
 from datetime import timedelta
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from logging_utils import log_event
 from tasks import run_tts
 
@@ -121,7 +121,6 @@ def get_trace() -> str:
 SARA_ASSETS = {}
 SARA_BRAIN_PATH = os.environ.get("SARA_BRAIN_PATH", "assets")
 
-# ✅ Corrected filenames to match actual files in /assets
 brain_files = [
     "Sara_SystemPrompt_Production.json",
     "Sara_KnowledgeBase.json",
@@ -249,7 +248,6 @@ def conversation_input():
     session["history"].append({"sara": sara_response})
     session["recent_responses"] = (session.get("recent_responses", []) + [sara_response])[-5:]
 
-    # Persist session
     save_session(session_id, session)
 
     trace_id = session.get("trace_id")
@@ -310,7 +308,6 @@ def outbound_call():
 
     sara_opening = f"Hello {lead_name}, this is Sara from BrightReach. How are you today?"
 
-    # Enqueue TTS for async generation
     payload = {"session_id": session_id, "sara_text": sara_opening, "trace_id": trace_id, "provider": "deepgram"}
     run_tts.delay(payload)
 
@@ -361,6 +358,14 @@ def cleanup_session(session_id):
     except Exception as e:
         log_event(SERVICE_NAME, "cleanup_failed", level="ERROR", message="Cleanup failed", error=str(e), session_id=session_id)
         return jsonify({"status": "error", "error": str(e)}), 500
+
+# --------------------------------------------------------------------------
+# Serve Audio Files
+# --------------------------------------------------------------------------
+@app.route("/audio/<path:filename>")
+def serve_audio(filename):
+    """Serve .wav or other audio files from /public/audio."""
+    return send_from_directory("public/audio", filename)
 
 # --------------------------------------------------------------------------
 # Health Check
