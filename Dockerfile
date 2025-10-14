@@ -1,24 +1,46 @@
-# --------------------------------------------------------
-# Dockerfile — Sara AI Core (Phase 6, Production Ready)
-# --------------------------------------------------------
+# ============================================================
+# Dockerfile — Sara AI Core (Phase 10H, Production Ready)
+# ------------------------------------------------------------
+# ✅ Lightweight
+# ✅ Multi-service compatible (API / Worker / Streaming)
+# ✅ Build-cache optimized
+# ✅ Render & Cloud Run ready
+# ============================================================
 
 FROM python:3.11-slim
 
-# Prevent Python from buffering stdout/stderr
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
+# ------------------------------
+# Environment configuration
+# ------------------------------
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH="/usr/local/bin:$PATH" \
+    LANG=C.UTF-8
 
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y build-essential libsndfile1 && rm -rf /var/lib/apt/lists/*
+# ------------------------------
+# System dependencies
+# ------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libsndfile1 \
+ && rm -rf /var/lib/apt/lists/*
 
-# Copy and install Python dependencies
-COPY requirements.txt ./
-RUN pip install --upgrade pip && pip install -r requirements.txt
+# ------------------------------
+# Python dependencies
+# ------------------------------
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
+# ------------------------------
+# Application code
+# ------------------------------
 COPY . .
 
-# Default command (for local testing)
-CMD ["gunicorn", "app:app", "--workers", "2", "--threads", "4", "--bind", "0.0.0.0:5000", "--timeout", "120", "--log-level", "info"]
+# ------------------------------
+# Default command (API service)
+# You can override START_CMD for worker/streaming roles.
+# ------------------------------
+CMD ["sh", "-c", "${START_CMD:-gunicorn app:app --workers 2 --threads 4 --bind 0.0.0.0:5000 --timeout 120 --log-level info}"]

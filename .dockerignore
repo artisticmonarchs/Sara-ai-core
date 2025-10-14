@@ -1,11 +1,47 @@
-venv/
+# ===========================
+# Docker Ignore — Sara AI Core
+# Phase 10H (Production Ready)
+# ===========================
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 *.log
-logs/
-.env*
-.git
+
+# Virtual environments
+venv/
+.env
+.env.local
+.env.dev
+.env.prod
+
+# Caches and temp data
+*.tmp
+*.bak
+*.swp
+*.swo
+*.cache/
+
+# Local-only data
+contacts.csv
+public/audio/
+public/tts/
+static/audio/
+static/tts/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# System and metadata
+.DS_Store
+Thumbs.db
+structure.txt
+.git/
 .gitignore
-README.md
 tests/
-*.md
+notebooks/
+docs/

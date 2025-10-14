@@ -1,8 +1,25 @@
+# ==========================================================
+# Docker Compose — Sara AI Core (Phase 10H, Production Ready)
+# ----------------------------------------------------------
+# Orchestrates all 4 key services:
+#   - web: Flask API (TTS + inference)
+#   - streaming: SSE/Twilio streaming server
+#   - worker: Celery async processing
+#   - redis: state + broker backend
+# ==========================================================
+
 version: "3.9"
+
 services:
+  # -----------------------------
+  # 1️⃣ Web API (Flask + Gunicorn)
+  # -----------------------------
   web:
     build: .
-    command: ["gunicorn", "-b", "0.0.0.0:5000", "app:app", "--workers=2", "--log-level=info"]
+    container_name: sara-ai-core-web
+    command: >
+      sh -c "gunicorn app:app --workers 2 --threads 4 --bind 0.0.0.0:5000
+      --timeout 120 --log-level info"
     ports:
       - "${WEB_PORT:-5000}:5000"
     env_file: .env
@@ -15,9 +32,15 @@ services:
       timeout: 5s
       retries: 3
 
+  # -----------------------------
+  # 2️⃣ Streaming Server
+  # -----------------------------
   streaming:
     build: .
-    command: ["python", "streaming_server.py"]
+    container_name: sara-ai-core-streaming
+    command: >
+      sh -c "gunicorn streaming_server:app --workers 2 --threads 4
+      --bind 0.0.0.0:8765 --timeout 120 --log-level info"
     ports:
       - "${STREAMING_PORT:-8765}:8765"
     env_file: .env
@@ -25,21 +48,30 @@ services:
       - redis
     restart: always
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8765/healthz"]
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
       interval: 20s
       timeout: 5s
       retries: 3
 
+  # -----------------------------
+  # 3️⃣ Celery Worker
+  # -----------------------------
   worker:
     build: .
-    command: ["celery", "-A", "tasks", "worker", "-l", "info"]
+    container_name: sara-ai-core-worker
+    command: >
+      sh -c "celery -A celery_app.celery worker --loglevel=info --concurrency=2"
     env_file: .env
     depends_on:
       - redis
     restart: always
 
+  # -----------------------------
+  # 4️⃣ Redis (Broker + Backend)
+  # -----------------------------
   redis:
     image: redis:7.2-alpine
+    container_name: sara-ai-core-redis
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
@@ -52,5 +84,8 @@ services:
       retries: 5
     restart: always
 
+# -----------------------------
+# Named Volumes
+# -----------------------------
 volumes:
   redis-data:

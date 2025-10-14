@@ -1,11 +1,12 @@
 """
-app.py — Production Flask Entry Point for Sara AI Core
-------------------------------------------------------
+app.py — Production Flask Entry Point for Sara AI Core (Phase 10H)
+-----------------------------------------------------------------
 Features:
-- Flask API endpoints for health, TTS testing, and task orchestration
+- Core API for Sara AI inference and TTS orchestration
+- Integrated with Deepgram + Cloudflare R2 via tasks.py
 - Celery-backed async processing
-- Integration with Deepgram TTS and Cloudflare R2 via tasks.py
-- Logging and Redis metrics
+- Health and metrics endpoints for platform checks
+- Structured logging to Redis via log_event
 """
 
 import os
@@ -25,37 +26,61 @@ app.config["JSON_SORT_KEYS"] = False
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
 
+
 # --------------------------------------------------------------------------
 # Routes
 # --------------------------------------------------------------------------
-
 @app.route("/", methods=["GET"])
 def index():
-    """Root endpoint for quick info."""
+    """Root endpoint for info and quick status."""
     return jsonify({
         "service": "Sara AI Core",
         "status": "online",
         "version": "1.0.0",
-        "endpoints": ["/healthz", "/tts_test", "/run_inference"]
+        "endpoints": [
+            "/healthz",
+            "/metrics",
+            "/tts_test",
+            "/run_inference"
+        ],
     }), 200
 
 
 @app.route("/healthz", methods=["GET"])
 def healthz():
-    """Health check endpoint (used by Render/Fly/Kubernetes)."""
-    return jsonify({"status": "healthy", "service": "Sara AI Core"}), 200
+    """Render-compatible health check."""
+    try:
+        redis_client.ping()
+        return jsonify({"status": "ok", "redis": "connected"}), 200
+    except Exception:
+        return jsonify({"status": "degraded", "redis": "unreachable"}), 503
+
+
+@app.route("/metrics", methods=["GET"])
+def metrics():
+    """Lightweight endpoint for uptime and monitoring."""
+    try:
+        total_tts = redis_client.hget("metrics:tts", "files_generated") or 0
+        total_failures = redis_client.hget("metrics:tts", "failures") or 0
+        return jsonify({
+            "service": "Sara AI Core",
+            "tts_generated": int(total_tts),
+            "tts_failures": int(total_failures),
+            "status": "ok",
+        }), 200
+    except Exception:
+        return jsonify({"status": "error", "message": "Failed to fetch metrics"}), 500
 
 
 @app.route("/tts_test", methods=["POST"])
 def tts_test():
-    """Inline test for TTS pipeline."""
+    """Inline test for TTS generation (Deepgram + R2)."""
     try:
         payload = request.get_json(force=True)
         log_event(service="api", event="tts_test_received", status="ok", message="Received TTS test request")
 
         result = run_tts(payload, inline=True)
         return jsonify(result), 200
-
     except Exception:
         err_msg = traceback.format_exc()
         log_event(service="api", event="tts_test_error", status="error", message=err_msg)
@@ -71,7 +96,6 @@ def inference():
 
         task = run_inference.apply_async(kwargs={"payload": payload})
         return jsonify({"task_id": task.id, "status": "queued"}), 202
-
     except Exception:
         err_msg = traceback.format_exc()
         log_event(service="api", event="inference_error", status="error", message=err_msg)
@@ -79,8 +103,8 @@ def inference():
 
 
 # --------------------------------------------------------------------------
-# Launch
+# Launch Entrypoint
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port, threaded=True)
