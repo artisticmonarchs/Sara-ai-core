@@ -39,6 +39,7 @@ def index():
         "version": "1.0.0",
         "endpoints": [
             "/healthz",
+            "/health",
             "/metrics",
             "/tts_test",
             "/run_inference"
@@ -54,6 +55,12 @@ def healthz():
         return jsonify({"status": "ok", "redis": "connected"}), 200
     except Exception:
         return jsonify({"status": "degraded", "redis": "unreachable"}), 503
+
+
+@app.route("/health", methods=["GET"])
+def health_alias():
+    """Alias for Render health checks (maps to /healthz)."""
+    return healthz()
 
 
 @app.route("/metrics", methods=["GET"])
