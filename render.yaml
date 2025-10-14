@@ -1,5 +1,5 @@
 # ==========================
-# Render Configuration
+# Render Configuration — Phase 10H
 # ==========================
 volumes:
   - name: shared-audio
@@ -15,6 +15,7 @@ services:
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --workers 2 --threads 4 --bind 0.0.0.0:$PORT --timeout 120 --log-level info
+    healthCheckPath: /healthz
     envVars:
       - key: ENV_MODE
         value: render
@@ -83,6 +84,7 @@ services:
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn streaming_server:app --workers 2 --threads 4 --bind 0.0.0.0:$PORT --timeout 120 --log-level info
+    healthCheckPath: /healthz
     envVars:
       - key: ENV_MODE
         value: render
