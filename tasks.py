@@ -1,7 +1,8 @@
 """
-tasks.py — Sara AI Core (Phase 10D++: Toby Review Integration)
+tasks.py — Sara AI Core (Phase 10E: Payload Diagnostic – Toby PM Check)
 Enhanced with Deepgram config consistency, standardized error handling,
 payload sanity logging, and REST timeout safety.
+Includes diagnostic log for Celery → Worker payload verification.
 """
 
 import os
@@ -42,9 +43,14 @@ def tts_error_response(code: str, message: str, trace_id: str, session_id: str):
         message=message,
         trace_id=trace_id,
         session_id=session_id,
-        extra={"code": code}
+        extra={"code": code},
     )
-    return {"error_code": code, "error_message": message, "trace_id": trace_id, "session_id": session_id}
+    return {
+        "error_code": code,
+        "error_message": message,
+        "trace_id": trace_id,
+        "session_id": session_id,
+    }
 
 
 def save_audio_file(session_id: str, trace_id: str, audio_bytes: bytes) -> str:
@@ -62,7 +68,7 @@ def deepgram_tts_rest(text: str) -> bytes:
 
     headers = {
         "Authorization": f"Token {DG_API_KEY}",
-        "Content-Type": "text/plain"
+        "Content-Type": "text/plain",
     }
 
     try:
@@ -124,11 +130,15 @@ def run_inference(self, payload):
     try:
         reply_text = generate_reply(transcript, trace_id=trace_id)
 
-        celery.send_task("sara_ai.tasks.run_tts", args=[{
-            "text": reply_text,
-            "trace_id": trace_id,
-            "session_id": session_id
-        }])
+        # Enqueue TTS task (diagnostic under review)
+        celery.send_task(
+            "sara_ai.tasks.run_tts",
+            args=[{
+                "text": reply_text,
+                "trace_id": trace_id,
+                "session_id": session_id,
+            }],
+        )
 
         latency_ms = round((time.time() - start_time) * 1000, 2)
         log_event(
@@ -160,6 +170,22 @@ def run_inference(self, payload):
 # --------------------------------------------------------------------------
 @celery.task(name="sara_ai.tasks.run_tts", bind=True)
 def run_tts(self, payload):
+    # ------------------------------------------------------------------
+    # Phase 10E Diagnostic: Log raw payload exactly as received from Celery
+    # ------------------------------------------------------------------
+    try:
+        log_event(
+            service="tasks",
+            event="tts_debug_raw_payload",
+            status="ok",
+            message=f"RAW PAYLOAD RECEIVED: type={type(payload)} value={repr(payload)[:300]}",
+        )
+    except Exception as e:
+        # Safety: diagnostic log must never block execution
+        import logging
+        logging.exception("Failed to emit tts_debug_raw_payload: %s", e)
+    # ------------------------------------------------------------------
+
     payload = normalize_payload(payload)
 
     trace_id = payload.get("trace_id") or get_trace()
