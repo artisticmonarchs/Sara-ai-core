@@ -5,7 +5,7 @@ import boto3
 from flask import Flask, jsonify, request
 from botocore.exceptions import BotoCoreError, ClientError
 
-from utils import log_event
+from logging_utils import log_event
 from redis_client import redis_client
 from tasks import run_tts
 
