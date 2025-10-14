@@ -25,9 +25,9 @@ services:
       - key: CELERY_RESULT_BACKEND
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
       - key: SERVER_URL
-        value: https://sara-ai-bot.onrender.com
+        value: https://sara-ai-core-app.onrender.com
       - key: PUBLIC_STREAMING_URL
-        value: wss://sara-ai-streaming.onrender.com/ws
+        value: wss://sara-ai-core-streaming.onrender.com/ws
       - key: DEEPGRAM_API_KEY
         sync: false
       - key: DEEPGRAM_SPEAK_MODEL
@@ -93,7 +93,7 @@ services:
       - key: CELERY_RESULT_BACKEND
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
       - key: PUBLIC_STREAMING_URL
-        value: wss://sara-ai-streaming.onrender.com/ws
+        value: wss://sara-ai-core-streaming.onrender.com/ws
       - key: TWILIO_ACCOUNT_SID
         sync: false
       - key: TWILIO_AUTH_TOKEN
