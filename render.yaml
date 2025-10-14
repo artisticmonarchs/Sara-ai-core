@@ -1,3 +1,10 @@
+# ==========================
+# Render Configuration
+# ==========================
+volumes:
+  - name: shared-audio
+    mountPath: /opt/render/project/src/public/audio
+
 services:
 
   # ==========================
@@ -21,26 +28,33 @@ services:
         value: https://sara-ai-bot.onrender.com
       - key: PUBLIC_STREAMING_URL
         value: wss://sara-ai-streaming.onrender.com/ws
-      - key: ELEVENLABS_API_KEY
-        value: <your_api_key_here>
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: DEEPGRAM_SPEAK_MODEL
+        value: aura-2-asteria-en
+      - key: DEEPGRAM_LISTEN_MODEL
+        value: nova-3
       - key: OPENAI_API_KEY
-        value: <your_openai_key_here>
+        sync: false
       - key: SARA_NAME
         value: Sara Hayes
       - key: SARA_ROLE
         value: Senior Growth Consultant at Noblecom Solutions
+    volumes:
+      - name: shared-audio
+        mountPath: /opt/render/project/src/public/audio
 
   # ==========================
-  # 2️⃣ Celery Worker Service (Updated to `web`)
+  # 2️⃣ Celery Worker Service
   # ==========================
-  - type: web                      # ✅ changed from `worker` to `web`
+  - type: web
     name: sara-ai-core-worker
     env: python
     buildCommand: pip install -r requirements.txt
     startCommand: celery -A celery_app.celery worker --loglevel=info --concurrency=1
     envVars:
       - key: PORT
-        value: 10002               # ✅ assign a dummy port so Render keeps it alive
+        value: 10002
       - key: ENV_MODE
         value: render
       - key: REDIS_URL
@@ -49,10 +63,17 @@ services:
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
       - key: CELERY_RESULT_BACKEND
         value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
-      - key: ELEVENLABS_API_KEY
-        value: <your_api_key_here>
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: DEEPGRAM_SPEAK_MODEL
+        value: aura-2-asteria-en
+      - key: DEEPGRAM_LISTEN_MODEL
+        value: nova-3
       - key: OPENAI_API_KEY
-        value: <your_openai_key_here>
+        sync: false
+    volumes:
+      - name: shared-audio
+        mountPath: /opt/render/project/src/public/audio
 
   # ==========================
   # 3️⃣ Streaming Service
@@ -74,8 +95,15 @@ services:
       - key: PUBLIC_STREAMING_URL
         value: wss://sara-ai-streaming.onrender.com/ws
       - key: TWILIO_ACCOUNT_SID
-        value: <your_twilio_sid_here>
+        sync: false
       - key: TWILIO_AUTH_TOKEN
-        value: <your_twilio_auth_token_here>
+        sync: false
       - key: TWILIO_PHONE_NUMBER
         value: +13094502249
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: DEEPGRAM_LISTEN_MODEL
+        value: nova-3
+    volumes:
+      - name: shared-audio
+        mountPath: /opt/render/project/src/public/audio
