@@ -1,5 +1,5 @@
 """
-app.py — Sara AI Core (Phase 10D)
+app.py — Sara AI Core (Phase 10F)
 Flask API with Redis-backed sessions, trace propagation,
 conversation endpoints, and outbound initialization.
 """
@@ -21,9 +21,11 @@ from tasks import run_tts
 app = Flask(__name__, static_folder="public", static_url_path="/public")
 SERVICE_NAME = "flask_app"
 
-# Session & Redis Config
+# --------------------------------------------------------------------------
+# Redis / Session Config
+# --------------------------------------------------------------------------
 REDIS_URL = os.environ.get("REDIS_URL")
-SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", 60 * 60 * 24))  # 24h default
+SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", 60 * 60 * 24))  # 24h
 redis_client = None
 USE_REDIS = False
 
@@ -42,13 +44,12 @@ if REDIS_URL:
             SERVICE_NAME,
             "redis_init_failed",
             level="WARNING",
-            message="Redis connection failed, falling back to in-memory sessions",
+            message="Redis connection failed — using in-memory sessions",
             error=str(e),
         )
 else:
     log_event(SERVICE_NAME, "redis_missing", level="WARNING", message="REDIS_URL not set; using in-memory sessions")
 
-# In-memory fallback if Redis unavailable
 SESSIONS = {} if not USE_REDIS else None
 
 # --------------------------------------------------------------------------
@@ -65,14 +66,7 @@ def save_session(session_id: str, data: dict):
             redis_client.set(_session_key(session_id), payload, ex=SESSION_TTL_SECONDS)
             return True
         except Exception as e:
-            log_event(
-                SERVICE_NAME,
-                "redis_set_failed",
-                level="ERROR",
-                message="Failed to set session in Redis",
-                error=str(e),
-            )
-    # fallback
+            log_event(SERVICE_NAME, "redis_set_failed", level="ERROR", message="Redis SET failed", error=str(e))
     SESSIONS[session_id] = data
     return True
 
@@ -81,17 +75,9 @@ def get_session(session_id: str) -> dict:
     if USE_REDIS and redis_client:
         try:
             raw = redis_client.get(_session_key(session_id))
-            if raw:
-                return _json.loads(raw)
-            return None
+            return _json.loads(raw) if raw else None
         except Exception as e:
-            log_event(
-                SERVICE_NAME,
-                "redis_get_failed",
-                level="WARNING",
-                message="Redis GET failed",
-                error=str(e),
-            )
+            log_event(SERVICE_NAME, "redis_get_failed", level="WARNING", message="Redis GET failed", error=str(e))
     return SESSIONS.get(session_id) if SESSIONS is not None else None
 
 
@@ -100,13 +86,7 @@ def delete_session(session_id: str):
         try:
             redis_client.delete(_session_key(session_id))
         except Exception as e:
-            log_event(
-                SERVICE_NAME,
-                "redis_delete_failed",
-                level="WARNING",
-                message="Redis DELETE failed",
-                error=str(e),
-            )
+            log_event(SERVICE_NAME, "redis_delete_failed", level="WARNING", message="Redis DELETE failed", error=str(e))
     if SESSIONS is not None and session_id in SESSIONS:
         del SESSIONS[session_id]
     return True
@@ -116,7 +96,7 @@ def get_trace() -> str:
     return str(uuid.uuid4())
 
 # --------------------------------------------------------------------------
-# Load Sara’s brains (JSON knowledge modules)
+# Load Sara’s Brains
 # --------------------------------------------------------------------------
 SARA_ASSETS = {}
 SARA_BRAIN_PATH = os.environ.get("SARA_BRAIN_PATH", "assets")
@@ -131,7 +111,6 @@ brain_files = [
 ]
 
 loaded_files = []
-
 for filename in brain_files:
     path = os.path.join(SARA_BRAIN_PATH, filename)
     try:
@@ -141,11 +120,11 @@ for filename in brain_files:
                 SARA_ASSETS[key] = _json.load(f)
                 loaded_files.append(filename)
         else:
-            log_event(SERVICE_NAME, "missing_brain_file", level="WARNING", message=f"File not found: {path}")
+            log_event(SERVICE_NAME, "missing_brain_file", level="WARNING", message=f"Missing: {path}")
     except Exception as e:
-        log_event(SERVICE_NAME, "brain_load_error", level="ERROR", message=f"Failed to load {filename}", error=str(e))
+        log_event(SERVICE_NAME, "brain_load_error", level="ERROR", message=f"Error loading {filename}", error=str(e))
 
-log_event(SERVICE_NAME, "brain_load_summary", message=f"Loaded brain files: {', '.join(loaded_files)}")
+log_event(SERVICE_NAME, "brain_load_summary", message=f"Loaded: {', '.join(loaded_files)}")
 
 # --------------------------------------------------------------------------
 # Conversation Endpoints
@@ -157,42 +136,25 @@ def start_conversation():
     industry = data.get("industry", "General")
 
     session_id = str(uuid.uuid4())
-    supplied_trace = data.get("trace_id")
-    trace_id = supplied_trace or get_trace()
+    trace_id = data.get("trace_id") or get_trace()
 
-    log_event(
-        SERVICE_NAME,
-        "conversation_start",
-        message=f"New session for {lead_name}",
-        lead_name=lead_name,
-        industry=industry,
-        trace_id=trace_id,
-    )
+    log_event(SERVICE_NAME, "conversation_start", message=f"New session for {lead_name}", lead_name=lead_name, industry=industry, trace_id=trace_id)
 
-    session_obj = {
-        "lead_name": lead_name,
-        "industry": industry,
-        "history": [],
-        "callflow_step": "start",
-        "trace_id": trace_id,
-    }
-
+    session_obj = {"lead_name": lead_name, "industry": industry, "history": [], "callflow_step": "start", "trace_id": trace_id}
     save_session(session_id, session_obj)
 
     opening_data = SARA_ASSETS.get("sara_opening", {})
     if "openers" in opening_data and isinstance(opening_data["openers"], list) and opening_data["openers"]:
         sara_text = opening_data["openers"][0].replace("{lead_name}", lead_name)
     else:
-        sara_text = f"Hello {lead_name}, this is Sara from BrightReach — how are you today?"
+        sara_text = f"Hello {lead_name}, this is Sara from Noblecom Solutions — how are you today?"
 
-    return jsonify(
-        {
-            "session_id": session_id,
-            "trace_id": trace_id,
-            "sara_text": sara_text,
-            "prompt_preview": f"Lead: {lead_name}\nIndustry: {industry}\nContext: Starting new call.",
-        }
-    )
+    return jsonify({
+        "session_id": session_id,
+        "trace_id": trace_id,
+        "sara_text": sara_text,
+        "prompt_preview": f"Lead: {lead_name}\nIndustry: {industry}\nContext: Starting new call.",
+    })
 
 
 @app.route("/conv/input", methods=["POST"])
@@ -202,13 +164,13 @@ def conversation_input():
     user_text = data.get("user_text", "")
 
     if not session_id:
-        return jsonify({"error": "Invalid or missing session_id"}), 400
+        return jsonify({"error": "Missing session_id"}), 400
 
     session = get_session(session_id)
     if not session:
-        return jsonify({"error": "session not found"}), 404
+        return jsonify({"error": "Session not found"}), 404
 
-    # Append user text
+    # Update session
     history = session.get("history", [])
     history.append({"user": user_text})
     session["history"] = history
@@ -217,61 +179,20 @@ def conversation_input():
     current_step = session.get("callflow_step", "start")
     next_step_data = callflow.get(current_step, {})
 
-    sara_response = next_step_data.get("response")
+    sara_response = next_step_data.get("response") or f"Thanks for your message: '{user_text}'. Let's continue."
     next_step = next_step_data.get("next_step", current_step)
-
-    # Playbook fallback
-    if not sara_response:
-        playbook = SARA_ASSETS.get("sara_objections", {})
-        for rule in playbook.get("rules", []):
-            triggers = rule.get("triggers", [])
-            if any(t.lower() in user_text.lower() for t in triggers):
-                sara_response = rule.get("response")
-                break
-
-    if not sara_response:
-        sara_response = f"Thanks for your message: '{user_text}'. Let's continue."
-
-    # QA tagging
-    action = "log_only"
-    hot_lead = False
-    text = user_text.lower()
-    if any(k in text for k in ["book", "meeting", "tuesday"]):
-        action = "book"
-    elif any(k in text for k in ["callback", "call me later"]):
-        action = "callback"
-    elif any(k in text for k in ["urgent", "today"]):
-        action = "book"
-        hot_lead = True
 
     session["callflow_step"] = next_step
     session["history"].append({"sara": sara_response})
-    session["recent_responses"] = (session.get("recent_responses", []) + [sara_response])[-5:]
-
     save_session(session_id, session)
 
     trace_id = session.get("trace_id")
-    log_event(
-        SERVICE_NAME,
-        "conversation_step",
-        message=f"Processed input for session {session_id}",
-        action=action,
-        hot_lead=hot_lead,
-        trace_id=trace_id,
-    )
+    log_event(SERVICE_NAME, "conversation_step", message=f"Processed input for session {session_id}", trace_id=trace_id)
 
-    # Optional TTS enqueue:
     payload = {"session_id": session_id, "sara_text": sara_response, "trace_id": trace_id, "provider": "deepgram"}
     run_tts.delay(payload)
 
-    return jsonify(
-        {
-            "sara_text": sara_response,
-            "action": action,
-            "hot_lead": hot_lead,
-            "trace_id": trace_id,
-        }
-    )
+    return jsonify({"sara_text": sara_response, "trace_id": trace_id})
 
 # --------------------------------------------------------------------------
 # Outbound Initialization
@@ -287,43 +208,26 @@ def outbound_call():
 
     session_id = str(uuid.uuid4())
     trace_id = get_trace()
-
-    session_obj = {
-        "lead_name": lead_name,
-        "to_number": to_number,
-        "history": [],
-        "callflow_step": "start",
-        "trace_id": trace_id,
-    }
-
+    session_obj = {"lead_name": lead_name, "to_number": to_number, "history": [], "callflow_step": "start", "trace_id": trace_id}
     save_session(session_id, session_obj)
 
-    log_event(
-        SERVICE_NAME,
-        "outbound_call_init",
-        message=f"Outbound call initiated for {lead_name}",
-        to_number=to_number,
-        trace_id=trace_id,
-    )
+    log_event(SERVICE_NAME, "outbound_call_init", message=f"Outbound call for {lead_name}", to_number=to_number, trace_id=trace_id)
 
-    sara_opening = f"Hello {lead_name}, this is Sara from BrightReach. How are you today?"
-
+    sara_opening = f"Hello {lead_name}, this is Sara from Noblecom Solutions. How are you today?"
     payload = {"session_id": session_id, "sara_text": sara_opening, "trace_id": trace_id, "provider": "deepgram"}
     run_tts.delay(payload)
 
-    return jsonify(
-        {
-            "status": "initiated",
-            "to": to_number,
-            "lead_name": lead_name,
-            "trace_id": trace_id,
-            "session_id": session_id,
-            "sara_opening": sara_opening,
-        }
-    )
+    return jsonify({
+        "status": "initiated",
+        "to": to_number,
+        "lead_name": lead_name,
+        "trace_id": trace_id,
+        "session_id": session_id,
+        "sara_opening": sara_opening,
+    })
 
 # --------------------------------------------------------------------------
-# QA Endpoint: TTS Smoke Test
+# QA Endpoint: TTS Smoke Test (Phase 10F)
 # --------------------------------------------------------------------------
 @app.route("/tts_test", methods=["POST"])
 def tts_test():
@@ -331,17 +235,24 @@ def tts_test():
     text = data.get("text", "Hello from Sara AI test sequence.")
     trace_id = get_trace()
 
-    log_event(SERVICE_NAME, "tts_test_start", message="Triggered TTS smoke test", trace_id=trace_id, text=text)
+    session_id = f"tts_test_{trace_id}"
+    output_folder = os.path.join("public", "audio", session_id)
+    os.makedirs(output_folder, exist_ok=True)
 
-    payload = {
-        "session_id": f"tts_test_{uuid.uuid4()}",
-        "sara_text": text,
-        "trace_id": trace_id,
-        "provider": "deepgram",
-    }
+    log_event(
+        SERVICE_NAME,
+        "tts_test_start",
+        message="Triggered TTS smoke test",
+        trace_id=trace_id,
+        text=text,
+        output_folder=output_folder,
+    )
 
+    payload = {"session_id": session_id, "sara_text": text, "trace_id": trace_id, "provider": "deepgram"}
     run_tts.delay(payload)
-    return jsonify({"status": "queued", "trace_id": trace_id, "text": text})
+
+    file_url = f"https://sara-ai-core-app.onrender.com/audio/{session_id}/{trace_id}.wav"
+    return jsonify({"status": "queued", "trace_id": trace_id, "file_url": file_url, "text": text})
 
 # --------------------------------------------------------------------------
 # Cleanup Endpoint
@@ -364,7 +275,7 @@ def cleanup_session(session_id):
 # --------------------------------------------------------------------------
 @app.route("/audio/<path:filename>")
 def serve_audio(filename):
-    """Serve .wav or other audio files from /public/audio."""
+    """Serve audio files from /public/audio"""
     return send_from_directory("public/audio", filename)
 
 # --------------------------------------------------------------------------
