@@ -120,24 +120,33 @@ def get_trace() -> str:
 # --------------------------------------------------------------------------
 SARA_ASSETS = {}
 SARA_BRAIN_PATH = os.environ.get("SARA_BRAIN_PATH", "assets")
-for filename in [
-    "Sara_SystemPrompt.json",
-    "Sara_Knowledgebase.json",
-    "Sara_Flow.json",
-    "Sara_MasterPrompt.json",
-    "Sara_Objections_Playbook_Full.json",
+
+# ✅ Corrected filenames to match actual files in /assets
+brain_files = [
+    "Sara_SystemPrompt_Production.json",
+    "Sara_KnowledgeBase.json",
+    "Sara_CallFlow.json",
+    "Sara_Playbook.json",
+    "Sara_Objections.json",
     "Sara_Opening.json",
-]:
+]
+
+loaded_files = []
+
+for filename in brain_files:
     path = os.path.join(SARA_BRAIN_PATH, filename)
     try:
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
                 key = filename.replace(".json", "").lower()
                 SARA_ASSETS[key] = _json.load(f)
+                loaded_files.append(filename)
         else:
             log_event(SERVICE_NAME, "missing_brain_file", level="WARNING", message=f"File not found: {path}")
     except Exception as e:
         log_event(SERVICE_NAME, "brain_load_error", level="ERROR", message=f"Failed to load {filename}", error=str(e))
+
+log_event(SERVICE_NAME, "brain_load_summary", message=f"Loaded brain files: {', '.join(loaded_files)}")
 
 # --------------------------------------------------------------------------
 # Conversation Endpoints
@@ -205,7 +214,7 @@ def conversation_input():
     history.append({"user": user_text})
     session["history"] = history
 
-    callflow = SARA_ASSETS.get("sara_flow", {})
+    callflow = SARA_ASSETS.get("sara_callflow", {})
     current_step = session.get("callflow_step", "start")
     next_step_data = callflow.get(current_step, {})
 
@@ -214,7 +223,7 @@ def conversation_input():
 
     # Playbook fallback
     if not sara_response:
-        playbook = SARA_ASSETS.get("sara_objections_playbook_full", {})
+        playbook = SARA_ASSETS.get("sara_objections", {})
         for rule in playbook.get("rules", []):
             triggers = rule.get("triggers", [])
             if any(t.lower() in user_text.lower() for t in triggers):
