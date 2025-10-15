@@ -1,10 +1,10 @@
 """
-streaming_server.py — Phase 11-B (Shared Prometheus Registry, Updated Imports)
+streaming_server.py — Phase 11-C (Streaming Diagnostics & Global Metrics Parity)
 Sara AI Core — Streaming Service
 
 - Integrates global Prometheus export via metrics_collector.export_prometheus()
-- Uses export_prometheus() and get_snapshot() from metrics_collector
-- Adds /metrics (Prometheus text) and /metrics_snapshot (JSON)
+- Adds /metrics and /metrics_snapshot endpoints
+- Adds /system_status endpoint (Phase 11-C) for Redis + R2 connectivity
 - Retains structured logging, SSE streaming, and Twilio webhook endpoints
 """
 
@@ -28,6 +28,9 @@ from metrics_collector import (
     get_snapshot,
 )
 from prometheus_client import CONTENT_TYPE_LATEST
+
+# Phase 11-C: Import diagnostic helpers for parity with app.py
+from core.utils import check_redis_status, check_r2_connectivity
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -95,12 +98,7 @@ def safe_redis_ping(trace_id: Optional[str] = None, session_id: Optional[str] = 
 def metrics_endpoint():
     """Expose Prometheus metrics via the unified exporter."""
     try:
-        # increment a simple request counter (global)
-        try:
-            increment_metric("streaming_metrics_requests_total")
-        except Exception:
-            pass
-
+        increment_metric("streaming_metrics_requests_total")
         payload = export_prometheus()
         return Response(payload, mimetype=CONTENT_TYPE_LATEST), 200
     except Exception as e:
@@ -172,21 +170,39 @@ def health():
         return jsonify({"status": "degraded", "redis": "error"}), 503
 
 # --------------------------------------------------------------------------
+# Phase 11-C: System Status Endpoint
+# --------------------------------------------------------------------------
+@app.route("/system_status", methods=["GET"])
+async def system_status():
+    """Returns JSON status of Redis and R2 connectivity for streaming service."""
+    try:
+        redis_status = "not_applicable_in_streaming"
+        r2_status = await check_r2_connectivity()
+        return jsonify({
+            "status": "ok",
+            "service": "streaming",
+            "redis_status": redis_status,
+            "r2_status": r2_status,
+        }), 200
+    except Exception as e:
+        log_event(
+            service="streaming_server",
+            event="system_status_failed",
+            status="error",
+            message="Failed to check system status",
+            extra={"error": str(e), "stack": traceback.format_exc()},
+        )
+        return jsonify({
+            "status": "error",
+            "service": "streaming",
+            "message": str(e),
+        }), 500
+
+# --------------------------------------------------------------------------
 # SSE Streaming Endpoint
 # --------------------------------------------------------------------------
 @app.route("/stream", methods=["POST"])
 def stream():
-    """
-    Accepts JSON payload:
-      { "session_id": "...", "trace_id": "...", "text": "..." }
-
-    Returns an SSE stream with events:
-      - status (received)
-      - reply_text
-      - audio_ready
-      - complete
-      - error
-    """
     trace_id = None
     session_id = None
 
