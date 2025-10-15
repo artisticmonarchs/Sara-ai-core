@@ -16,3 +16,4 @@ twilio==9.8.0
 uvicorn==0.30.0
 websockets==12.0
 boto3>=1.34.0
+prometheus-client==0.20.0
