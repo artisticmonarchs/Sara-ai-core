@@ -1,6 +1,6 @@
 """
 tasks.py — Phase 10I (R2 Validation & Observability Upgrade)
-
+Upgraded with Phase 10J: Redis TTS Cache + Deepgram retry + safe redis fallback
 Key updates:
 - PUBLIC_AUDIO_HOST treated as full base path (no bucket) by default
 - Optional PUBLIC_AUDIO_INCLUDE_BUCKET env to include /<bucket>/ segment
@@ -8,16 +8,18 @@ Key updates:
 - Tracks upload duration, size_bytes, Redis metrics (uploads, bytes_uploaded)
 - make_public_url() simplified with robust join handling
 - Added R2UploadError subclass for clearer Celery retry filtering
+- Added Redis-based TTS cache (Phase 10J) with safe fallback
+- Deepgram TTS REST now retries twice on transient failures
 """
 
 import os
-import io
 import time
 import uuid
 import json
 import traceback
 import logging
-from typing import Any, Dict
+import hashlib
+from typing import Any, Dict, Optional
 
 import requests
 import boto3
@@ -27,6 +29,14 @@ from redis import Redis
 from celery_app import celery
 from gpt_client import generate_reply
 from logging_utils import log_event
+
+# Try to import a preconfigured redis_client from redis_client.py if present.
+# This is optional — we'll fallback to a locally-initialized Redis client if import fails.
+try:
+    # If redis_client.py provides a global Redis client, import it as external_redis_client
+    from redis_client import redis_client as external_redis_client
+except Exception:
+    external_redis_client = None
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -55,15 +65,18 @@ CELERY_RETRY_MAX = int(os.getenv("CELERY_RETRY_MAX", "5"))
 CELERY_RETRY_BACKOFF_MAX = int(os.getenv("CELERY_RETRY_BACKOFF_MAX", "600"))
 
 # --------------------------------------------------------------------------
-# Redis & boto3 clients
+# Redis & boto3 clients (module-local)
 # --------------------------------------------------------------------------
 try:
+    # local Redis client (used if external_redis_client not available)
     redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
 except Exception:
     redis_client = None
     LOG.exception("Failed to initialize Redis client at import time")
 
 _s3_client = None
+
+
 def _get_s3_client():
     """Lazily create a boto3 S3 client for Cloudflare R2."""
     global _s3_client
@@ -88,23 +101,83 @@ def _get_s3_client():
         LOG.exception("Failed to create R2 boto3 client")
         return None
 
+
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
 class R2UploadError(RuntimeError):
     """Raised when an R2 upload fails."""
 
+
 def get_trace() -> str:
     return str(uuid.uuid4())
 
+
 def _safe_redis_hincr(key: str, field: str, amount: int = 1):
-    if not redis_client:
+    """
+    Safely increment a Redis hash field metric. Uses either external_redis_client or
+    module-local redis_client as available.
+    """
+    client = external_redis_client or redis_client
+    if not client:
         return
     try:
-        redis_client.hincrby(key, field, amount)
+        client.hincrby(key, field, amount)
     except Exception:
         LOG.exception("Failed to increment redis metric %s.%s", key, field)
 
+
+# ---------------------------------------------------------------------
+# Redis-based TTS Cache  (Phase 10J)
+# ---------------------------------------------------------------------
+def _tts_cache_key(session_id: str, text: str) -> str:
+    """Generate deterministic cache key based on session and text hash."""
+    # Use SHA1 to create compact deterministic key for arbitrary-length text.
+    text_hash = hashlib.sha1((text or "").encode("utf-8")).hexdigest()
+    return f"tts_cache:{session_id}:{text_hash}"
+
+
+def get_tts_cache(session_id: str, text: str) -> Optional[str]:
+    """
+    Return cached audio URL if present.
+    Safe fallback: uses external_redis_client (imported) first, then module-local redis_client.
+    Returns None on error or if cache miss.
+    """
+    key = _tts_cache_key(session_id, text)
+    client = external_redis_client or redis_client
+    if not client:
+        return None
+    try:
+        val = client.get(key)
+        # decode if bytes (some Redis clients return bytes)
+        if isinstance(val, bytes):
+            return val.decode("utf-8")
+        return val
+    except Exception:
+        LOG.exception("Failed to get TTS cache for key %s", key)
+        return None
+
+
+def set_tts_cache(session_id: str, text: str, audio_url: str, ttl: int = 300):
+    """
+    Store audio URL in cache with TTL (default 5 minutes).
+    Uses external_redis_client if available, otherwise module-local redis_client.
+    Silently returns if no client available.
+    """
+    key = _tts_cache_key(session_id, text)
+    client = external_redis_client or redis_client
+    if not client:
+        return
+    try:
+        # Prefer setex to set TTL with value atomically
+        client.setex(key, ttl, audio_url)
+    except Exception:
+        LOG.exception("Failed to set TTS cache for key %s", key)
+
+
+# --------------------------------------------------------------------------
+# Payload utilities
+# --------------------------------------------------------------------------
 def normalize_payload(payload) -> Dict[str, Any]:
     if isinstance(payload, (list, tuple)) and payload:
         payload = payload[0]
@@ -116,6 +189,7 @@ def normalize_payload(payload) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         payload = {}
     return payload
+
 
 def extract_text(payload) -> str:
     if not payload:
@@ -137,6 +211,7 @@ def extract_text(payload) -> str:
             if nested:
                 return nested
     return ""
+
 
 def make_public_url(bucket: str, key: str) -> str:
     """
@@ -161,6 +236,7 @@ def make_public_url(bucket: str, key: str) -> str:
             LOG.exception("Failed to generate presigned URL for %s/%s", bucket, key)
     LOG.warning("PUBLIC_AUDIO_HOST unset and presign failed; returning key path only.")
     return f"/{key}"
+
 
 # --------------------------------------------------------------------------
 # Upload to R2
@@ -231,18 +307,42 @@ def upload_to_r2(session_id: str, trace_id: str, audio_bytes: bytes) -> str:
         )
         raise R2UploadError("Unexpected R2 upload error") from e
 
+
 # --------------------------------------------------------------------------
-# Deepgram TTS
+# Deepgram TTS (with small retry)
 # --------------------------------------------------------------------------
 def deepgram_tts_rest(text: str, timeout: int = 30) -> bytes:
+    """
+    Call Deepgram TTS REST endpoint and return audio bytes.
+    Implements a small retry (2 attempts) with 0.5s backoff to smooth transient errors.
+    """
     if not DG_API_KEY:
         raise RuntimeError("Missing Deepgram API key")
+
     url = f"https://api.deepgram.com/v1/speak?model={DG_SPEAK_MODEL}&encoding=linear16&container=wav"
     headers = {"Authorization": f"Token {DG_API_KEY}", "Content-Type": "text/plain"}
-    resp = requests.post(url, headers=headers, data=text.encode("utf-8"), timeout=timeout)
-    if resp.status_code != 200:
-        raise RuntimeError(f"Deepgram returned {resp.status_code}: {resp.text[:200]}")
-    return resp.content
+
+    last_resp = None
+    for attempt in range(2):
+        try:
+            resp = requests.post(url, headers=headers, data=text.encode("utf-8"), timeout=timeout)
+            last_resp = resp
+            if resp.status_code == 200:
+                return resp.content
+            # transient non-200: sleep and retry a single time
+            time.sleep(0.5)
+        except requests.RequestException as e:
+            # on final attempt, re-raise as RuntimeError to allow caller to handle/retry
+            if attempt == 1:
+                LOG.exception("Deepgram TTS failed on retry: %s", e)
+                raise RuntimeError(f"Deepgram TTS failed after retries: {e}") from e
+            time.sleep(0.5)
+
+    # If we reach here, attempts exhausted
+    if last_resp is not None:
+        raise RuntimeError(f"Deepgram returned {last_resp.status_code}: {last_resp.text[:200]}")
+    raise RuntimeError("Deepgram TTS failed with no response")
+
 
 # --------------------------------------------------------------------------
 # Core TTS logic
@@ -262,6 +362,20 @@ def perform_tts_core(payload: Any, raise_on_error: bool = True) -> Dict[str, Any
                   message=f"TTS text truncated to {MAX_TTS_TEXT_LEN} chars",
                   trace_id=trace_id, session_id=session_id)
 
+    # --- Phase 10J: Cache Lookup ---
+    try:
+        cached_url = get_tts_cache(session_id, text)
+    except Exception:
+        # get_tts_cache already logs exceptions; treat as miss on error
+        cached_url = None
+
+    if cached_url:
+        # increment cache hit metric and return cached URL immediately
+        _safe_redis_hincr("metrics:tts", "cache_hits", 1)
+        log_event(service="tts", event="cache_hit", status="ok",
+                  message=f"Using cached TTS for session {session_id}")
+        return {"audio_url": cached_url, "cached": True, "trace_id": trace_id, "session_id": session_id}
+
     log_event(service="tasks", event="tts_start", status="ok",
               message="TTS started", trace_id=trace_id, session_id=session_id)
 
@@ -272,6 +386,15 @@ def perform_tts_core(payload: Any, raise_on_error: bool = True) -> Dict[str, Any
         total_ms = round((time.time() - t0) * 1000, 2)
 
         _safe_redis_hincr("metrics:tts", "files_generated", 1)
+
+        # --- Phase 10J: Cache Store ---
+        try:
+            set_tts_cache(session_id, text, upload_url)
+            log_event(service="tts", event="cache_store", status="ok",
+                      message=f"Cached TTS for session {session_id}")
+        except Exception as e:
+            log_event(service="tts", event="cache_store_error", status="error",
+                      message=str(e))
 
         log_event(
             service="tasks",
@@ -296,6 +419,7 @@ def perform_tts_core(payload: Any, raise_on_error: bool = True) -> Dict[str, Any
             raise
         return {"error": str(e), "trace_id": trace_id}
 
+
 # --------------------------------------------------------------------------
 # Celery Task & Proxy
 # --------------------------------------------------------------------------
@@ -310,19 +434,25 @@ def perform_tts_core(payload: Any, raise_on_error: bool = True) -> Dict[str, Any
 def _run_tts_task(self, payload=None):
     return perform_tts_core(payload, raise_on_error=True)
 
+
 class RunTTSProxy:
     def __init__(self, celery_task):
         self._task = celery_task
+
     def __call__(self, payload=None, inline: bool = False):
         if inline:
             return perform_tts_core(payload, raise_on_error=False)
         return self._task.apply_async(kwargs={"payload": payload})
+
     def delay(self, payload=None):
         return self._task.apply_async(kwargs={"payload": payload})
+
     def apply_async(self, *args, **kwargs):
         return self._task.apply_async(*args, **kwargs)
 
+
 run_tts = RunTTSProxy(_run_tts_task)
+
 
 # --------------------------------------------------------------------------
 # GPT + TTS inference
