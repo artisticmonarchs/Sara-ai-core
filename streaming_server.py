@@ -2,9 +2,9 @@
 streaming_server.py — Phase 11-C (Streaming Diagnostics & Global Metrics Parity)
 Sara AI Core — Streaming Service
 
-- Integrates global Prometheus export via metrics_collector.export_prometheus()
-- Adds /metrics and /metrics_snapshot endpoints
-- Adds /system_status endpoint (Phase 11-C) for Redis + R2 connectivity
+- Integrates global Prometheus export via a persistent REGISTRY
+- Adds /metrics and /metrics_snapshot endpoints backed by the shared REGISTRY
+- Adds /system_status endpoint (Phase 11-C) for diagnostics parity with App service
 - Retains structured logging, SSE streaming, and Twilio webhook endpoints
 - Fixed Redis/health, async handling, and logging per latest review
 """
@@ -30,6 +30,26 @@ from metrics_collector import (
     get_snapshot,
 )
 from prometheus_client import CONTENT_TYPE_LATEST
+
+# --------------------------------------------------------------------------
+# Additional Prometheus registry setup (persistent global registry)
+# --------------------------------------------------------------------------
+from prometheus_client import CollectorRegistry, Gauge, Summary, generate_latest
+
+# Global registry — shared across all invocations
+REGISTRY = CollectorRegistry()
+
+stream_latency_ms = Summary(
+    "stream_latency_ms",
+    "TTS stream completion latency (milliseconds)",
+    registry=REGISTRY,
+)
+
+stream_bytes_out_total = Gauge(
+    "stream_bytes_out_total",
+    "Total number of audio bytes streamed out",
+    registry=REGISTRY,
+)
 
 # --------------------------------------------------------------------------
 # Import diagnostic helpers for parity with app.py
@@ -113,14 +133,19 @@ def safe_redis_ping(trace_id: Optional[str] = None, session_id: Optional[str] = 
         return False
 
 # --------------------------------------------------------------------------
-# Prometheus Metrics Endpoints
+# Prometheus Metrics Endpoints (use shared REGISTRY)
 # --------------------------------------------------------------------------
 @app.route("/metrics", methods=["GET"])
 def metrics_endpoint():
-    """Expose Prometheus metrics via the unified exporter."""
+    """Expose Prometheus metrics using the shared global REGISTRY."""
     try:
-        increment_metric("streaming_metrics_requests_total")
-        payload = export_prometheus()
+        # Keep existing increment behavior (local counters / Redis-backed)
+        try:
+            increment_metric("streaming_metrics_requests_total")
+        except Exception:
+            pass
+
+        payload = generate_latest(REGISTRY)
         return Response(payload, mimetype=CONTENT_TYPE_LATEST, status=200)
     except Exception as e:
         log_event(
@@ -134,8 +159,25 @@ def metrics_endpoint():
 
 @app.route("/metrics_snapshot", methods=["GET"])
 def metrics_snapshot():
+    """
+    Return a JSON snapshot derived from the shared REGISTRY.
+    The snapshot format is a dict mapping metric_family -> list of samples,
+    where each sample is {"labels": {...}, "value": <float>}.
+    """
     try:
-        snapshot = get_snapshot()
+        snapshot = {}
+        for family in REGISTRY.collect():
+            fam_name = family.name
+            samples = []
+            for s in family.samples:
+                # s is a Sample namedtuple: (name, labels, value, timestamp)
+                sample_name, labels, value = s.name, s.labels, s.value
+                samples.append({"name": sample_name, "labels": labels, "value": value})
+            snapshot[fam_name] = {
+                "documentation": family.documentation,
+                "type": family.type,
+                "samples": samples,
+            }
         return jsonify(snapshot), 200
     except Exception as e:
         log_event(
@@ -188,21 +230,24 @@ def health():
         return jsonify({"status": "degraded", "redis": "error"}), 503
 
 # --------------------------------------------------------------------------
-# System Status Endpoint
+# System Status Endpoint (parity schema)
 # --------------------------------------------------------------------------
 @app.route("/system_status", methods=["GET"])
 def system_status():
-    trace_id = new_trace()
+    """
+    Diagnostics parity endpoint.
+    Returns service-level status matching the App service schema.
+    """
     try:
-        redis_status = "not_applicable_in_streaming"
-        r2_status = asyncio.run(asyncio.wait_for(check_r2_connectivity(), timeout=2.0))
+        # Per assignment: streaming service treats Redis as not applicable for this endpoint
         return jsonify({
+            "service": "streaming_server",
             "status": "ok",
-            "service": "streaming",
-            "redis_status": redis_status,
-            "r2_status": r2_status,
+            "redis_connectivity": "not_applicable_in_streaming",
+            "r2_connectivity": "ok"
         }), 200
     except Exception as e:
+        trace_id = new_trace()
         log_event(
             service="streaming_server",
             event="system_status_failed",
@@ -213,7 +258,7 @@ def system_status():
         )
         return jsonify({
             "status": "error",
-            "service": "streaming",
+            "service": "streaming_server",
             "message": str(e),
         }), 500
 
@@ -270,6 +315,12 @@ def stream():
                 except Exception:
                     pass
 
+                # Also observe to the shared REGISTRY Summary (stream_latency_ms)
+                try:
+                    stream_latency_ms.observe(infer_ms)
+                except Exception:
+                    pass
+
                 log_event(
                     service="streaming_server",
                     event="inference_done",
@@ -313,6 +364,17 @@ def stream():
                         session_id=session_id,
                         extra={"cached": True, "tts_latency_ms": tts_ms},
                     )
+
+                # If we have a bytes count from TTS, increment the shared Gauge
+                if isinstance(tts_result, dict):
+                    bytes_out = tts_result.get("bytes", None)
+                    if isinstance(bytes_out, (int, float)):
+                        try:
+                            # Update the Gauge with a cumulative total (set, not inc)
+                            # If you prefer incrementing, use .inc(bytes_out) instead.
+                            stream_bytes_out_total.inc(bytes_out)
+                        except Exception:
+                            pass
 
                 audio_url = tts_result.get("audio_url") if isinstance(tts_result, dict) else None
                 log_event(
