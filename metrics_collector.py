@@ -14,6 +14,7 @@ from collections import defaultdict, deque
 from typing import Dict, Deque, List
 import statistics
 import time
+import os
 from logging_utils import log_event
 
 # ------------------------------------------------------------------
@@ -52,9 +53,14 @@ _latency_buckets: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=_DE
 
 REDIS_METRIC_PREFIX = "prometheus:metrics:"
 
+# Service name namespace for Redis keys. Allows per-service keys:
+# prometheus:metrics:<service_name>:<metric_name>
+SERVICE_NAME = os.getenv("SERVICE_NAME", "unknown_service")
+
 
 def _redis_key(metric_name: str) -> str:
-    return f"{REDIS_METRIC_PREFIX}{metric_name}"
+    """Return a Redis key namespaced with the service name."""
+    return f"{REDIS_METRIC_PREFIX}{SERVICE_NAME}:{metric_name}"
 
 
 # ------------------------------------------------------------------
@@ -108,7 +114,7 @@ def increment_metric(metric_name: str, value: int = 1) -> bool:
 
 
 def get_metric_total(metric_name: str) -> int:
-    """Return total (prefers Redis)."""
+    """Return total (prefers Redis for this service's metric key)."""
     try:
         redis_val = 0
         if _redis_client:
@@ -125,6 +131,7 @@ def get_metric_total(metric_name: str) -> int:
                 )
         with _lock:
             local_val = int(_counters.get(metric_name, 0))
+        # prefer Redis value for this service if it exists, otherwise local
         return max(local_val, redis_val)
     except Exception:
         return 0
@@ -190,6 +197,7 @@ def _compute_latency_stats(samples: List[float]) -> Dict[str, float]:
     count = len(samples)
     avg = statistics.mean(samples)
     s_sorted = sorted(samples)
+
     def pct(p: float) -> float:
         if not s_sorted:
             return 0.0
@@ -198,6 +206,7 @@ def _compute_latency_stats(samples: List[float]) -> Dict[str, float]:
         if f == c:
             return s_sorted[int(k)]
         return s_sorted[f] * (c - k) + s_sorted[c] * (k - f)
+
     return {
         "count": count,
         "avg": round(avg, 2),
@@ -223,7 +232,7 @@ def get_snapshot() -> Dict[str, object]:
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
 
-        # Phase 11-A streaming metrics snapshot
+        # Phase 11-A streaming metrics snapshot (per-process registry values)
         snapshot["streaming"] = {
             "tts_active_streams": tts_active_streams._value.get(),
             "stream_bytes_out_total": stream_bytes_out_total._value.get(),
@@ -231,7 +240,15 @@ def get_snapshot() -> Dict[str, object]:
 
         return snapshot
     except Exception as e:
-        log_event("get_snapshot_failed", {"error": str(e)})
+        try:
+            log_event(
+                service="metrics",
+                event="get_snapshot_failed",
+                status="error",
+                message=str(e),
+            )
+        except Exception:
+            pass
         return {"counters": {}, "latencies": {}, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
 
@@ -239,28 +256,38 @@ def get_snapshot() -> Dict[str, object]:
 # Prometheus export (Phase 11-B merged)
 # ------------------------------------------------------------------
 def export_prometheus() -> str:
-    """Render metrics in Prometheus exposition format, merged with client registry."""
+    """Render metrics in Prometheus exposition format, merged with client registry.
+    Also compute Redis global aggregates across services and append *_global metrics.
+    """
     try:
         snap = get_snapshot()
         lines: List[str] = []
 
         metric_names = set(snap.get("counters", {}).keys())
+        # Discover metric names from Redis keys (namespaced as prometheus:metrics:<service>:<metric>)
         if _redis_client:
             try:
-                for k in _redis_client.keys(f"{REDIS_METRIC_PREFIX}*"):
+                # Use scan_iter to avoid blocking the Redis server
+                for k in _redis_client.scan_iter(f"{REDIS_METRIC_PREFIX}*"):
                     if isinstance(k, bytes):
                         k = k.decode("utf-8")
                     if k.startswith(REDIS_METRIC_PREFIX):
-                        metric_names.add(k[len(REDIS_METRIC_PREFIX):])
+                        rest = k[len(REDIS_METRIC_PREFIX) :]  # <service>:<metric_name>
+                        # Extract metric name after first colon (service_name:metric_name)
+                        if ":" in rest:
+                            _, metric = rest.split(":", 1)
+                        else:
+                            metric = rest
+                        metric_names.add(metric)
             except Exception:
                 log_event(
                     service="metrics",
-                    event="redis_keys_failed",
+                    event="redis_key_scan_failed",
                     status="warn",
-                    message="Failed to list redis metric keys (best-effort).",
+                    message="Failed to scan redis metric keys (best-effort).",
                 )
 
-        # Manual counters
+        # Manual counters (per-service totals using get_metric_total which reads service-specific key)
         for name in sorted(metric_names):
             total = get_metric_total(name)
             lines.append(f"# HELP {name} Total count for {name}")
@@ -276,9 +303,84 @@ def export_prometheus() -> str:
             lines.append(f"# TYPE {base}_count gauge")
             lines.append(f"{base}_count {int(stats.get('count', 0))}")
 
+        # Compute Redis global aggregates across services for each metric_name
+        global_totals: Dict[str, int] = {}
+        if _redis_client:
+            try:
+                for name in sorted(metric_names):
+                    # pattern: prometheus:metrics:*:<metric_name>
+                    pattern = f"{REDIS_METRIC_PREFIX}*:{name}"
+                    try:
+                        keys = []
+                        for k in _redis_client.scan_iter(pattern):
+                            keys.append(k)
+                        if not keys:
+                            continue
+                        # Use mget to fetch values in bulk
+                        vals = _redis_client.mget(keys)
+                        s = 0
+                        for v in vals:
+                            try:
+                                if v is None:
+                                    continue
+                                if isinstance(v, bytes):
+                                    v = v.decode("utf-8")
+                                s += int(v)
+                            except Exception:
+                                # skip unparsable values
+                                continue
+                        global_totals[name] = s
+                    except Exception:
+                        # per-name failure should not abort whole export
+                        log_event(
+                            service="metrics",
+                            event="redis_mget_failed",
+                            status="warn",
+                            message=f"Failed to mget/aggregate keys for pattern {pattern}",
+                            extra={"pattern": pattern},
+                        )
+                if global_totals:
+                    # Append global values to lines as gauge metrics with *_global suffix
+                    for name in sorted(global_totals.keys()):
+                        gname = f"{name}_global"
+                        gval = int(global_totals[name])
+                        lines.append(f"# HELP {gname} Global total across all services for {name}")
+                        lines.append(f"# TYPE {gname} gauge")
+                        lines.append(f"{gname} {gval}")
+
+                    # Log aggregation summary
+                    try:
+                        log_event(
+                            service="metrics",
+                            event="redis_global_aggregate",
+                            status="info",
+                            message=f"Aggregated {len(global_totals)} global metrics from Redis",
+                            extra={"metrics": list(global_totals.keys())},
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                log_event(
+                    service="metrics",
+                    event="redis_global_aggregate_failed",
+                    status="warn",
+                    message="Failed during global aggregation (best-effort).",
+                )
+        else:
+            # Redis not available — log and continue
+            try:
+                log_event(
+                    service="metrics",
+                    event="redis_unavailable_for_global_agg",
+                    status="warn",
+                    message="Redis client not configured; skipping global aggregation.",
+                )
+            except Exception:
+                pass
+
         lines.append(f"# timestamp {snap.get('timestamp')}")
 
-        # ---- Phase 11-B addition ----
+        # ---- Phase 11-B addition: merge prometheus_client REGISTRY output ----
         prom_text = []
         try:
             prom_text.append(generate_latest(REGISTRY).decode("utf-8"))
