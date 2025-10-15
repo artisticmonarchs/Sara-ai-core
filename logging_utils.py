@@ -1,16 +1,49 @@
 """
-logging_utils.py — Phase 10K-E
-Structured JSON Logging (Collision-Safe)
+logging_utils.py — Phase 11-B Compatible
+Structured JSON Logging (Self-Contained)
 ----------------------------------------
-Fixes LogRecord overwrite issue from Phase 10K-A.
-All structured fields are now passed under `extra={"structured": payload}`
-to avoid 'message' collisions.
-
-Integrated with logger_json.JsonFormatter (reads record.structured).
+Fixes missing logger_json import (Phase 11-A transition).
+All structured fields are passed under extra={"structured": payload}
+to avoid LogRecord key collisions.
 """
 
+import json
+import logging
+import sys
 import uuid
-from logger_json import get_json_logger
+
+# --------------------------------------------------------------------------
+# Inline JSON Logger Factory (replaces old logger_json.py)
+# --------------------------------------------------------------------------
+def get_json_logger(name: str = "sara-ai-core"):
+    """Return a structured JSON logger compatible with Render and Celery."""
+    logger = logging.getLogger(name)
+    if logger.handlers:
+        return logger  # Avoid duplicate handlers on reloads
+
+    handler = logging.StreamHandler(sys.stdout)
+
+    class JsonFormatter(logging.Formatter):
+        def format(self, record):
+            base = {
+                "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+                "level": record.levelname,
+                "service": name,
+                "message": record.getMessage(),
+            }
+
+            # Merge structured payload if present
+            structured = getattr(record, "structured", None)
+            if isinstance(structured, dict):
+                base.update(structured)
+
+            return json.dumps(base, ensure_ascii=False)
+
+    handler.setFormatter(JsonFormatter())
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    return logger
+
 
 # --------------------------------------------------------------------------
 # Global JSON Logger
@@ -31,15 +64,15 @@ def get_trace_id() -> str:
 # --------------------------------------------------------------------------
 def log_event(
     service: str = "api",
-    event: str = None,
+    event: str | None = None,
     status: str = "ok",
-    message: str = None,
-    trace_id: str = None,
-    session_id: str = None,
+    message: str | None = None,
+    trace_id: str | None = None,
+    session_id: str | None = None,
     extra: dict | None = None,
 ):
     """
-    Unified structured logging wrapper — Phase 10K-E compliant.
+    Unified structured logging wrapper — Phase 11-B compliant.
 
     Emits standardized JSON logs for observability and traceability,
     without colliding with reserved LogRecord fields.
@@ -76,6 +109,6 @@ if __name__ == "__main__":
         message="Structured JSON logging initialized ✅",
         trace_id=tid,
         session_id="demo-session",
-        extra={"phase": "10K-E", "test": True},
+        extra={"phase": "11-B", "test": True},
     )
     print(f"Test log emitted for trace_id={tid}")
