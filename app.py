@@ -1,9 +1,9 @@
 """
-app.py — Phase 10L-Final (Prometheus Primary + Redis Deprecated removed from API surface)
+app.py — Phase 10M-D (Prometheus Global Aggregation)
 
 Sara AI Core API Service
 
-- Prometheus metrics_collector unified system
+- Global Prometheus metrics via metrics_collector (Redis-backed totals)
 - Redis retained only for caching/Celery backend (no metric reads/writes in API)
 - Structured logging via logging_utils.log_event
 - /metrics_snapshot added for developer debugging
@@ -20,9 +20,15 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from logging_utils import log_event
 from tasks import run_tts
-import metrics_collector as metrics  # Phase 10L-Final unified collector
+from metrics_collector import (
+    increment_metric,
+    export_prometheus,
+    observe_latency,
+    get_snapshot,
+)
 
 app = Flask(__name__)
+
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -30,9 +36,6 @@ app = Flask(__name__)
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-# Note: Redis metrics plumbing removed from API surface (Phase 10L-Final).
-# If the runtime requires a redis client for caching/Celery it should be
-# used only in tasks.py or other lower-level modules that manage the cache.
 
 # --------------------------------------------------------------------------
 # R2 connection check
@@ -74,6 +77,7 @@ def check_r2_connection(trace_id=None, session_id=None):
                   message=str(e), trace_id=trace_id, session_id=session_id)
         return {"status": "error", "message": str(e)}
 
+
 # --------------------------------------------------------------------------
 # /metrics endpoint (Prometheus text format)
 # --------------------------------------------------------------------------
@@ -81,8 +85,8 @@ def check_r2_connection(trace_id=None, session_id=None):
 def metrics_endpoint():
     """Expose aggregated metrics in Prometheus plain-text format."""
     try:
-        metrics.inc_metric("api_metrics_requests_total")
-        payload = metrics.export_prometheus()
+        increment_metric("api_metrics_requests_total")
+        payload = export_prometheus()
         return Response(payload, mimetype="text/plain"), 200
     except Exception as e:
         log_event(
@@ -94,6 +98,7 @@ def metrics_endpoint():
         )
         return Response("# metrics_export_error 1\n", mimetype="text/plain"), 500
 
+
 # --------------------------------------------------------------------------
 # /metrics_snapshot (developer JSON view)
 # --------------------------------------------------------------------------
@@ -101,8 +106,8 @@ def metrics_endpoint():
 def metrics_snapshot():
     """Return in-memory metrics as JSON (for internal debug; not Prometheus)."""
     try:
-        snapshot = metrics.get_snapshot()
-        metrics.inc_metric("api_metrics_snapshot_requests_total")
+        snapshot = get_snapshot()
+        increment_metric("api_metrics_snapshot_requests_total")
         return jsonify({"status": "ok", "snapshot": snapshot}), 200
     except Exception as e:
         log_event(
@@ -114,16 +119,18 @@ def metrics_snapshot():
         )
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
 # --------------------------------------------------------------------------
 # /r2_status endpoint
 # --------------------------------------------------------------------------
 @app.route("/r2_status", methods=["GET"])
 def r2_status():
     trace_id = os.urandom(8).hex()
-    metrics.inc_metric("api_r2_status_requests_total")
+    increment_metric("api_r2_status_requests_total")
     result = check_r2_connection(trace_id=trace_id)
     code = 200 if result.get("status") == "ok" else 500
     return jsonify(result), code
+
 
 # --------------------------------------------------------------------------
 # /tts_test endpoint
@@ -133,7 +140,7 @@ def tts_test():
     trace_id = os.urandom(8).hex()
     session_id = request.headers.get("X-Session-ID") or os.urandom(6).hex()
 
-    metrics.inc_metric("api_tts_test_requests_total")
+    increment_metric("api_tts_test_requests_total")
 
     try:
         payload = request.get_json(force=True)
@@ -148,9 +155,12 @@ def tts_test():
         tts_latency_ms = result.get("total_ms") if isinstance(result, dict) else None
 
         if isinstance(result, dict) and "audio_url" in result:
-            metrics.inc_metric("tts_requests_total")
+            increment_metric("tts_requests_total")
             if tts_latency_ms is not None:
-                metrics.observe_latency("tts_latency_ms", float(tts_latency_ms))
+                try:
+                    observe_latency("tts_latency_ms", float(tts_latency_ms))
+                except Exception:
+                    pass
 
             log_event(
                 service="api",
@@ -165,23 +175,25 @@ def tts_test():
 
         log_event(service="api", event="tts_test_failed", status="error",
                   message=str(result), trace_id=trace_id, session_id=session_id)
-        metrics.inc_metric("tts_failures_total")
+        increment_metric("tts_failures_total")
         return jsonify({"error": "TTS generation failed", "details": result}), 500
 
     except Exception:
         err_msg = traceback.format_exc()
         log_event(service="api", event="tts_test_exception", status="error",
                   message=err_msg, trace_id=trace_id, session_id=session_id)
-        metrics.inc_metric("tts_failures_total")
+        increment_metric("tts_failures_total")
         return jsonify({"error": "TTS test failed", "details": err_msg}), 500
+
 
 # --------------------------------------------------------------------------
 # /healthz
 # --------------------------------------------------------------------------
 @app.route("/healthz", methods=["GET"])
 def healthz():
-    metrics.inc_metric("api_healthz_requests_total")
+    increment_metric("api_healthz_requests_total")
     return jsonify({"status": "ok", "service": "Sara AI Core"}), 200
+
 
 # --------------------------------------------------------------------------
 # /system_status
@@ -189,7 +201,7 @@ def healthz():
 @app.route("/system_status", methods=["GET"])
 def system_status():
     trace_id = os.urandom(8).hex()
-    metrics.inc_metric("api_system_status_requests_total")
+    increment_metric("api_system_status_requests_total")
 
     try:
         # Redis is no longer used as a metrics store by the API.
@@ -226,6 +238,7 @@ def system_status():
         log_event(service="api", event="system_status_error", status="error",
                   message=str(e), trace_id=trace_id)
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 # --------------------------------------------------------------------------
 # Entrypoint

@@ -1,13 +1,14 @@
 """
-metrics_collector.py — Phase 10L (Prometheus-only)
+metrics_collector.py — Phase 10M-D (Redis-backed persistence shim)
 
-Lightweight in-memory metrics collector with Prometheus text export.
-
-Phase 10L changes:
-- Redis integration removed (no background sync, no HSET/HINCR to Redis)
-- init_redis_client remains as a backwards-compatible no-op shim that logs a warning.
-- All metrics are kept in-memory and exported via export_prometheus().
-- Thread-safe and fail-safe; uses logging_utils.log_event for errors.
+- Adds optional Redis-backed persistence for global counters (prometheus totals).
+- Backwards-compatible: keeps in-memory counters and latency buckets as primary
+  data sources when Redis is unavailable.
+- New helpers:
+  - increment_metric(metric_name, value=1)
+  - get_metric_total(metric_name) -> int
+  - export_prometheus() now reports redis-merged totals for counters
+- Latency aggregation and snapshot behavior unchanged.
 """
 
 from __future__ import annotations
@@ -20,6 +21,13 @@ import statistics
 import time
 
 from logging_utils import log_event
+
+# Try to import the application redis client (optional)
+try:
+    # expected to expose `redis_client`
+    from redis_client import redis_client as _redis_client  # type: ignore
+except Exception:
+    _redis_client = None
 
 # Configuration
 _DEFAULT_ROLLING_WINDOW = 1000  # keep up to 1000 samples per latency metric
@@ -35,51 +43,136 @@ _latency_buckets: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=_DE
 # -------------------------
 def init_redis_client(*args, **kwargs) -> None:
     """
-    DEPRECATED no-op.
+    DEPRECATED no-op for Phase 10L compatibility.
 
     Previously this function attached a Redis client and started a background
-    sync thread. In Phase 10L we removed Redis synchronization entirely;
-    this shim exists to avoid breaking callers that still call init_redis_client().
-    It logs a warning that Redis-backed metrics are removed.
+    sync thread. In Phase 10M-D we support explicit Redis-backed helpers but
+    this shim remains to avoid breaking callers.
     """
     try:
         log_event(
             service="metrics",
             event="init_redis_client_deprecated",
-            status="warn",
-            message="Redis integration removed from metrics_collector (Phase 10L). "
-                    "Metrics are now in-memory Prometheus-only.",
+            status="info" if _redis_client else "warn",
+            message=(
+                "init_redis_client shim called. In Phase 10M-D metrics support optional "
+                "Redis-backed totals via increment_metric/get_metric_total. "
+                f"redis_client available={bool(_redis_client)}"
+            ),
             extra={},
         )
     except Exception:
-        # Best-effort only; do not raise
         pass
 
 
 # -------------------------
-# Counter API
+# Redis-backed helpers
 # -------------------------
-def inc_metric(name: str, amount: int = 1) -> bool:
+REDIS_METRIC_PREFIX = "prometheus:metrics:"
+
+
+def _redis_key(metric_name: str) -> str:
+    return f"{REDIS_METRIC_PREFIX}{metric_name}"
+
+
+def increment_metric(metric_name: str, value: int = 1) -> bool:
     """
-    Increment a named counter by `amount`. Returns True on success.
-    In-memory only (Prometheus primary).
+    Increment a named counter both in-memory and (if available) in Redis.
+
+    - Updates the in-memory `_counters` for fast local observation.
+    - Attempts to update redis key `_redis_key(metric_name)` with INCRBY.
+    - Returns True on success (in-memory always updated), False only if in-memory fails.
     """
     try:
+        # update local counters under lock
         with _lock:
-            _counters[name] += int(amount)
+            _counters[metric_name] = _counters.get(metric_name, 0) + int(value)
+        # best-effort Redis update
+        if _redis_client:
+            try:
+                # use integer incrby if available
+                _redis_client.incrby(_redis_key(metric_name), int(value))
+            except Exception:
+                # do not fail the overall operation on redis errors
+                try:
+                    log_event(
+                        service="metrics",
+                        event="redis_incr_failed",
+                        status="warn",
+                        message="Failed to incrby redis metric (best-effort).",
+                        extra={"metric": metric_name, "value": value},
+                    )
+                except Exception:
+                    pass
         return True
     except Exception as e:
         try:
             log_event(
                 service="metrics",
-                event="inc_metric_failed",
+                event="increment_metric_failed",
                 status="error",
-                message="Failed to increment metric",
-                extra={"name": name, "amount": amount, "error": str(e)},
+                message="Failed to increment metric.",
+                extra={"metric": metric_name, "value": value, "error": str(e)},
             )
         except Exception:
             pass
         return False
+
+
+def get_metric_total(metric_name: str) -> int:
+    """
+    Return the global total for a metric.
+
+    - If Redis is available, prefer the Redis-stored total (safe-cast to int).
+    - Otherwise, fall back to local in-memory counter.
+    - Returns 0 on error.
+    """
+    try:
+        redis_val = 0
+        if _redis_client:
+            try:
+                raw = _redis_client.get(_redis_key(metric_name))
+                redis_val = int(raw) if raw is not None else 0
+            except Exception:
+                # log and continue with local fallback
+                try:
+                    log_event(
+                        service="metrics",
+                        event="redis_get_failed",
+                        status="warn",
+                        message="Failed to read metric total from Redis (fallback to local).",
+                        extra={"metric": metric_name},
+                    )
+                except Exception:
+                    pass
+                redis_val = 0
+        with _lock:
+            local_val = int(_counters.get(metric_name, 0))
+        # If Redis has larger number, prefer it (aggregate/global); otherwise local
+        return max(local_val, redis_val)
+    except Exception:
+        try:
+            log_event(
+                service="metrics",
+                event="get_metric_total_failed",
+                status="error",
+                message="Failed to compute metric total",
+                extra={"metric": metric_name},
+            )
+        except Exception:
+            pass
+        return 0
+
+
+# -------------------------
+# Counter API (kept for compatibility)
+# -------------------------
+def inc_metric(name: str, amount: int = 1) -> bool:
+    """
+    Backwards-compatible increment. Internally calls increment_metric to ensure
+    Redis-backed persistence when available.
+    """
+    return increment_metric(name, amount)
 
 
 def set_metric(name: str, value: int) -> bool:
@@ -87,6 +180,21 @@ def set_metric(name: str, value: int) -> bool:
     try:
         with _lock:
             _counters[name] = int(value)
+        # best-effort: also set in Redis if available
+        if _redis_client:
+            try:
+                _redis_client.set(_redis_key(name), int(value))
+            except Exception:
+                try:
+                    log_event(
+                        service="metrics",
+                        event="redis_set_failed",
+                        status="warn",
+                        message="Failed to set metric in Redis (best-effort).",
+                        extra={"metric": name, "value": value},
+                    )
+                except Exception:
+                    pass
         return True
     except Exception as e:
         try:
@@ -173,13 +281,9 @@ def _compute_latency_stats(samples: List[float]) -> Dict[str, float]:
 
 def get_snapshot() -> Dict[str, object]:
     """
-    Return a snapshot of counters and latency metrics.
-    Example:
-    {
-      "counters": {"tts_requests_total": 10, ...},
-      "latencies": {"tts_latency_ms": {...stats...}, ...},
-      "timestamp": "..."
-    }
+    Return a snapshot of counters and latency metrics (local in-memory view).
+    Note: counters reflect local counters only; use export_prometheus() for
+    Redis-merged global totals.
     """
     try:
         with _lock:
@@ -214,25 +318,53 @@ def get_snapshot() -> Dict[str, object]:
 def export_prometheus() -> str:
     """
     Render metrics in Prometheus exposition format.
-    Produces HELP/TYPE comments for counters and latency aggregates.
+    For counters we prefer Redis-backed totals when available via get_metric_total.
+    For latencies we export the current aggregated stats computed from in-memory samples.
     """
     try:
-        snap = get_snapshot()
+        snap = get_snapshot()  # local snapshot (counters are local)
         lines: List[str] = []
 
-        counters = snap.get("counters", {})
-        latencies = snap.get("latencies", {})
+        # Build the set of metric names to export:
+        # include local counters keys plus any keys that redis reports (best-effort)
+        metric_names = set(snap.get("counters", {}).keys())
 
-        # Counters
-        for k, v in sorted(counters.items()):
-            name = k
+        # If Redis is available, attempt to list keys with the prefix to include them too.
+        if _redis_client:
+            try:
+                # Note: using KEYS here is acceptable for small sets; if scale grows, replace with SCAN.
+                for k in _redis_client.keys(f"{REDIS_METRIC_PREFIX}*"):
+                    try:
+                        # strip prefix
+                        if isinstance(k, bytes):
+                            k = k.decode("utf-8")
+                        if k.startswith(REDIS_METRIC_PREFIX):
+                            metric_names.add(k[len(REDIS_METRIC_PREFIX):])
+                    except Exception:
+                        continue
+            except Exception:
+                # If Redis key list fails, continue with local metrics only
+                try:
+                    log_event(
+                        service="metrics",
+                        event="redis_keys_failed",
+                        status="warn",
+                        message="Failed to list redis metric keys during export (best-effort).",
+                        extra={},
+                    )
+                except Exception:
+                    pass
+
+        # Counters (use get_metric_total to return merged totals)
+        for name in sorted(metric_names):
+            total = get_metric_total(name)
             lines.append(f"# HELP {name} Total count for {name}")
             lines.append(f"# TYPE {name} counter")
-            lines.append(f"{name} {int(v)}")
+            lines.append(f"{name} {int(total)}")
 
         # Latency aggregates
-        for name, stats in sorted(latencies.items()):
-            base = name
+        latencies = snap.get("latencies", {})
+        for base, stats in sorted(latencies.items()):
             lines.append(f"# HELP {base}_avg Average {base}")
             lines.append(f"# TYPE {base}_avg gauge")
             lines.append(f"{base}_avg {float(stats.get('avg', 0.0))}")

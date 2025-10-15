@@ -1,8 +1,11 @@
 """
-streaming_server.py — Phase 10K-E (Metrics Instrumentation)
-- Emits inference_latency_ms to metrics_collector
-- Emits cache hits to metrics_collector
-- Uses logging_utils.log_event for structured logs
+streaming_server.py — Phase 10M-D (Global Prometheus Aggregation)
+Sara AI Core — Streaming Service
+
+- Global Prometheus metrics shared across all services via Redis
+- Uses increment_metric(), export_prometheus(), observe_latency()
+- Structured logs via logging_utils.log_event
+- SSE endpoint and Twilio webhook fully instrumented
 """
 
 import os
@@ -18,7 +21,7 @@ from redis import Redis, RedisError
 from tasks import run_tts
 from gpt_client import generate_reply
 from logging_utils import log_event
-import metrics_collector as metrics  # Phase 10K-E metrics collector
+from metrics_collector import increment_metric, export_prometheus, observe_latency  # unified 10M-D
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -34,11 +37,17 @@ try:
     redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
 except Exception as e:
     redis_client = None
-    log_event(service="streaming_server", event="redis_init_failed", status="error",
-              message="Failed to initialize Redis client at startup", extra={"error": str(e)})
+    log_event(
+        service="streaming_server",
+        event="redis_init_failed",
+        status="error",
+        message="Failed to initialize Redis client at startup",
+        extra={"error": str(e)},
+    )
 
-
-# Utility helpers ----------------------------------------------------------
+# --------------------------------------------------------------------------
+# Utility helpers
+# --------------------------------------------------------------------------
 def new_trace() -> str:
     return str(uuid.uuid4())
 
@@ -49,7 +58,6 @@ def sse_format(event: Optional[str] = None, data: Optional[dict] = None) -> str:
     if event:
         msg_lines.append(f"event: {event}")
     if data is not None:
-        # data must be a string per SSE spec; encode JSON compactly
         msg_lines.append(f"data: {json.dumps(data, separators=(',', ':'))}")
     msg_lines.append("")  # blank line terminator
     return "\n".join(msg_lines) + "\n"
@@ -74,14 +82,34 @@ def safe_redis_ping(trace_id: Optional[str] = None, session_id: Optional[str] = 
         )
         return False
 
+# --------------------------------------------------------------------------
+# Metrics endpoint (Prometheus text)
+# --------------------------------------------------------------------------
+@app.route("/metrics", methods=["GET"])
+def metrics_endpoint():
+    """Expose global Prometheus metrics."""
+    try:
+        increment_metric("streaming_metrics_requests_total")
+        payload = export_prometheus()
+        return Response(payload, mimetype="text/plain"), 200
+    except Exception as e:
+        log_event(
+            service="streaming_server",
+            event="metrics_export_error",
+            status="error",
+            message="Failed to export metrics",
+            extra={"error": str(e), "stack": traceback.format_exc()},
+        )
+        return Response("# metrics_export_error 1\n", mimetype="text/plain"), 500
 
-# Health endpoints ---------------------------------------------------------
+# --------------------------------------------------------------------------
+# Health endpoints
+# --------------------------------------------------------------------------
 @app.route("/healthz", methods=["GET"])
 def healthz():
     """Lightweight healthcheck for orchestrator/load balancer (fast)."""
-    # lightweight request counter
     try:
-        metrics.inc_metric("streaming_healthz_requests_total")
+        increment_metric("streaming_healthz_requests_total")
     except Exception:
         pass
     return jsonify({"status": "ok", "service": "streaming_server"}), 200
@@ -115,8 +143,9 @@ def health():
         )
         return jsonify({"status": "degraded", "redis": "error"}), 503
 
-
-# SSE Streaming Endpoint ---------------------------------------------------
+# --------------------------------------------------------------------------
+# SSE Streaming Endpoint
+# --------------------------------------------------------------------------
 @app.route("/stream", methods=["POST"])
 def stream():
     """
@@ -133,9 +162,8 @@ def stream():
     trace_id = None
     session_id = None
 
-    # increment stream requests counter
     try:
-        metrics.inc_metric("stream_requests_total")
+        increment_metric("stream_requests_total")
     except Exception:
         pass
 
@@ -154,7 +182,7 @@ def stream():
                 trace_id=trace_id,
                 session_id=session_id,
             )
-            metrics.inc_metric("stream_rejected_total")
+            increment_metric("stream_rejected_total")
             return jsonify({"error": "No input text"}), 400
 
         log_event(
@@ -168,24 +196,14 @@ def stream():
 
         @stream_with_context
         def event_stream() -> Generator[str, None, None]:
-            """
-            Generator sends SSE events. Keep it synchronous (blocking) for simplicity,
-            but protect and log exceptions so client receives a final error event.
-            """
             try:
-                # Acknowledge receipt quickly
                 yield sse_format("status", {"stage": "received", "trace_id": trace_id})
 
                 # Inference
                 start_infer = time.time()
                 reply_text = generate_reply(user_text, trace_id=trace_id)
                 infer_ms = round((time.time() - start_infer) * 1000, 2)
-
-                # observe inference latency in metrics collector
-                try:
-                    metrics.observe_latency("inference_latency_ms", infer_ms)
-                except Exception:
-                    pass
+                observe_latency("inference_latency_ms", infer_ms)
 
                 log_event(
                     service="streaming_server",
@@ -198,7 +216,7 @@ def stream():
                 )
                 yield sse_format("reply_text", {"text": reply_text})
 
-                # TTS generation (synchronous, uses run_tts inline)
+                # TTS generation
                 start_tts = time.time()
                 tts_result = run_tts(
                     {"text": reply_text, "trace_id": trace_id, "session_id": session_id},
@@ -206,9 +224,8 @@ def stream():
                 )
                 tts_ms = round((time.time() - start_tts) * 1000, 2)
 
-                # If run_tts returned a dict with an 'error' key, treat as failure
                 if isinstance(tts_result, dict) and tts_result.get("error"):
-                    metrics.inc_metric("tts_failures_total")
+                    increment_metric("tts_failures_total")
                     log_event(
                         service="streaming_server",
                         event="tts_failed",
@@ -221,12 +238,8 @@ def stream():
                     yield sse_format("error", tts_result)
                     return
 
-                # If cached flag present, emit cache_hit event for observability
                 if isinstance(tts_result, dict) and tts_result.get("cached"):
-                    try:
-                        metrics.inc_metric("tts_cache_hits_total")
-                    except Exception:
-                        pass
+                    increment_metric("tts_cache_hits_total")
                     log_event(
                         service="streaming_server",
                         event="cache_hit",
@@ -238,7 +251,6 @@ def stream():
                     )
 
                 audio_url = tts_result.get("audio_url") if isinstance(tts_result, dict) else None
-
                 log_event(
                     service="streaming_server",
                     event="tts_done",
@@ -250,8 +262,6 @@ def stream():
                 )
 
                 yield sse_format("audio_ready", {"url": audio_url})
-
-                # Complete
                 yield sse_format("complete", {"trace_id": trace_id, "session_id": session_id})
 
             except Exception as exc:
@@ -267,19 +277,15 @@ def stream():
                 )
                 yield sse_format("error", {"message": "Streaming error", "error_id": err_id})
 
-        # Important SSE headers to avoid buffering by proxies/load balancers
         headers = {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
-            # Nginx / some proxies will buffer; this header disables it where supported
             "X-Accel-Buffering": "no",
         }
-
         return Response(event_stream(), headers=headers)
 
     except Exception as e:
-        # fatal route-level error
         trace = trace_id or new_trace()
         log_event(
             service="streaming_server",
@@ -290,34 +296,31 @@ def stream():
             session_id=session_id or "unknown",
             extra={"stack": traceback.format_exc()},
         )
-        metrics.inc_metric("stream_errors_total")
+        increment_metric("stream_errors_total")
         return jsonify({"error": "Internal server error", "trace_id": trace}), 500
 
-
-# Twilio webhook compatibility ----------------------------------------------
+# --------------------------------------------------------------------------
+# Twilio webhook compatibility
+# --------------------------------------------------------------------------
 @app.route("/twilio_tts", methods=["POST"])
 def twilio_tts():
-    """
-    Generate TTS for Twilio webhook calls and return TwiML <Play>.
-    Kept simple and synchronous for Twilio usage.
-    """
+    """Generate TTS for Twilio webhook calls and return TwiML <Play>."""
     from flask import Response as TwilioResponse
 
     trace_id = new_trace()
     session_id = str(uuid.uuid4())
 
-    # metric for twilio requests
     try:
-        metrics.inc_metric("twilio_requests_total")
+        increment_metric("twilio_requests_total")
     except Exception:
         pass
 
     try:
         text = request.form.get("SpeechResult") or request.form.get("text") or "Hello from Sara AI"
-
         tts_result = run_tts({"text": text, "session_id": session_id, "trace_id": trace_id}, inline=True)
+
         if isinstance(tts_result, dict) and tts_result.get("error"):
-            metrics.inc_metric("tts_failures_total")
+            increment_metric("tts_failures_total")
             log_event(
                 service="streaming_server",
                 event="twilio_tts_failed",
@@ -356,15 +359,15 @@ def twilio_tts():
             session_id=session_id,
             extra={"stack": traceback.format_exc()},
         )
-        metrics.inc_metric("twilio_errors_total")
+        increment_metric("twilio_errors_total")
         return TwilioResponse(
             "<Response><Say>Sorry, an internal error occurred.</Say></Response>",
             mimetype="application/xml",
         )
 
-
-# Entrypoint ----------------------------------------------------------------
+# --------------------------------------------------------------------------
+# Entrypoint
+# --------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 7000))
-    # When run directly (not via Gunicorn) enable threaded mode for concurrent SSE clients
     app.run(host="0.0.0.0", port=port, threaded=True)
