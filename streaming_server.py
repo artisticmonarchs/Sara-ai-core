@@ -6,6 +6,7 @@ Sara AI Core — Streaming Service
 - Adds /metrics and /metrics_snapshot endpoints
 - Adds /system_status endpoint (Phase 11-C) for Redis + R2 connectivity
 - Retains structured logging, SSE streaming, and Twilio webhook endpoints
+- Fixed Redis/health, async handling, and logging per latest review
 """
 
 import os
@@ -14,6 +15,7 @@ import time
 import uuid
 import traceback
 from typing import Generator, Optional
+import asyncio
 
 from flask import Flask, request, jsonify, Response, stream_with_context
 from redis import Redis, RedisError
@@ -29,8 +31,24 @@ from metrics_collector import (
 )
 from prometheus_client import CONTENT_TYPE_LATEST
 
-# Phase 11-C: Import diagnostic helpers for parity with app.py
-from core.utils import check_redis_status, check_r2_connectivity
+# --------------------------------------------------------------------------
+# Import diagnostic helpers for parity with app.py
+# --------------------------------------------------------------------------
+try:
+    from core.utils import check_redis_status, check_r2_connectivity
+except ModuleNotFoundError:
+    log_event(
+        service="streaming_server",
+        event="core_utils_missing",
+        status="warn",
+        message="core.utils missing; using local stubs",
+    )
+
+    async def check_r2_connectivity():
+        return "not_available"
+
+    def check_redis_status():
+        return "not_available"
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -60,24 +78,27 @@ except Exception as e:
 def new_trace() -> str:
     return str(uuid.uuid4())
 
-
 def sse_format(event: Optional[str] = None, data: Optional[dict] = None) -> str:
-    """Formats a Server-Sent Events message."""
     msg_lines = []
     if event:
         msg_lines.append(f"event: {event}")
     if data is not None:
         msg_lines.append(f"data: {json.dumps(data, separators=(',', ':'))}")
-    msg_lines.append("")  # blank line terminator
+    msg_lines.append("")
     return "\n".join(msg_lines) + "\n"
-
 
 def safe_redis_ping(trace_id: Optional[str] = None, session_id: Optional[str] = None) -> bool:
     if not redis_client:
         return False
     try:
         return redis_client.ping()
-    except RedisError:
+    except RedisError as re:
+        log_event(
+            service="streaming_server",
+            event="redis_ping_failed",
+            status="warn",
+            message=str(re),
+        )
         return False
     except Exception as e:
         log_event(
@@ -100,7 +121,7 @@ def metrics_endpoint():
     try:
         increment_metric("streaming_metrics_requests_total")
         payload = export_prometheus()
-        return Response(payload, mimetype=CONTENT_TYPE_LATEST), 200
+        return Response(payload, mimetype=CONTENT_TYPE_LATEST, status=200)
     except Exception as e:
         log_event(
             service="streaming_server",
@@ -109,12 +130,10 @@ def metrics_endpoint():
             message="Failed to export Prometheus metrics",
             extra={"error": str(e), "stack": traceback.format_exc()},
         )
-        return Response("# metrics_export_error 1\n", mimetype="text/plain"), 500
-
+        return Response("# metrics_export_error 1\n", mimetype="text/plain", status=500)
 
 @app.route("/metrics_snapshot", methods=["GET"])
 def metrics_snapshot():
-    """Expose live JSON snapshot of key metrics (for API validation)."""
     try:
         snapshot = get_snapshot()
         return jsonify(snapshot), 200
@@ -133,18 +152,17 @@ def metrics_snapshot():
 # --------------------------------------------------------------------------
 @app.route("/healthz", methods=["GET"])
 def healthz():
-    """Lightweight healthcheck for orchestrator/load balancer (fast)."""
     try:
         increment_metric("streaming_healthz_requests_total")
     except Exception:
         pass
     return jsonify({"status": "ok", "service": "streaming_server"}), 200
 
-
 @app.route("/health", methods=["GET"])
 def health():
-    """Detailed health (checks Redis connectivity)."""
     trace_id = new_trace()
+    if redis_client is None:
+        return jsonify({"status": "ok", "redis": "not_applicable"}), 200
     try:
         ok = safe_redis_ping(trace_id=trace_id)
         if ok:
@@ -170,14 +188,14 @@ def health():
         return jsonify({"status": "degraded", "redis": "error"}), 503
 
 # --------------------------------------------------------------------------
-# Phase 11-C: System Status Endpoint
+# System Status Endpoint
 # --------------------------------------------------------------------------
 @app.route("/system_status", methods=["GET"])
-async def system_status():
-    """Returns JSON status of Redis and R2 connectivity for streaming service."""
+def system_status():
+    trace_id = new_trace()
     try:
         redis_status = "not_applicable_in_streaming"
-        r2_status = await check_r2_connectivity()
+        r2_status = asyncio.run(asyncio.wait_for(check_r2_connectivity(), timeout=2.0))
         return jsonify({
             "status": "ok",
             "service": "streaming",
@@ -190,6 +208,7 @@ async def system_status():
             event="system_status_failed",
             status="error",
             message="Failed to check system status",
+            trace_id=trace_id,
             extra={"error": str(e), "stack": traceback.format_exc()},
         )
         return jsonify({
@@ -243,7 +262,6 @@ def stream():
             try:
                 yield sse_format("status", {"stage": "received", "trace_id": trace_id})
 
-                # Inference
                 start_infer = time.time()
                 reply_text = generate_reply(user_text, trace_id=trace_id)
                 infer_ms = round((time.time() - start_infer) * 1000, 2)
@@ -263,7 +281,6 @@ def stream():
                 )
                 yield sse_format("reply_text", {"text": reply_text})
 
-                # TTS generation
                 start_tts = time.time()
                 tts_result = run_tts(
                     {"text": reply_text, "trace_id": trace_id, "session_id": session_id},
@@ -351,7 +368,6 @@ def stream():
 # --------------------------------------------------------------------------
 @app.route("/twilio_tts", methods=["POST"])
 def twilio_tts():
-    """Generate TTS for Twilio webhook calls and return TwiML <Play>."""
     from flask import Response as TwilioResponse
 
     trace_id = new_trace()
