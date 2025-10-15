@@ -2,7 +2,7 @@
 streaming_server.py — Phase 11-B (Shared Prometheus Registry, Updated Imports)
 Sara AI Core — Streaming Service
 
-- Integrates global Prometheus REGISTRY across all services
+- Integrates global Prometheus export via metrics_collector.export_prometheus()
 - Uses export_prometheus() and get_snapshot() from metrics_collector
 - Adds /metrics (Prometheus text) and /metrics_snapshot (JSON)
 - Retains structured logging, SSE streaming, and Twilio webhook endpoints
@@ -92,10 +92,17 @@ def safe_redis_ping(trace_id: Optional[str] = None, session_id: Optional[str] = 
 # Prometheus Metrics Endpoints
 # --------------------------------------------------------------------------
 @app.route("/metrics", methods=["GET"])
-def metrics():
-    """Expose Prometheus metrics via shared export function."""
+def metrics_endpoint():
+    """Expose Prometheus metrics via the unified exporter."""
     try:
-        return Response(export_prometheus(), mimetype=CONTENT_TYPE_LATEST)
+        # increment a simple request counter (global)
+        try:
+            increment_metric("streaming_metrics_requests_total")
+        except Exception:
+            pass
+
+        payload = export_prometheus()
+        return Response(payload, mimetype=CONTENT_TYPE_LATEST), 200
     except Exception as e:
         log_event(
             service="streaming_server",
@@ -111,7 +118,8 @@ def metrics():
 def metrics_snapshot():
     """Expose live JSON snapshot of key metrics (for API validation)."""
     try:
-        return jsonify(get_snapshot()), 200
+        snapshot = get_snapshot()
+        return jsonify(snapshot), 200
     except Exception as e:
         log_event(
             service="streaming_server",
@@ -223,7 +231,10 @@ def stream():
                 start_infer = time.time()
                 reply_text = generate_reply(user_text, trace_id=trace_id)
                 infer_ms = round((time.time() - start_infer) * 1000, 2)
-                observe_latency("inference_latency_ms", infer_ms)
+                try:
+                    observe_latency("inference_latency_ms", infer_ms)
+                except Exception:
+                    pass
 
                 log_event(
                     service="streaming_server",
