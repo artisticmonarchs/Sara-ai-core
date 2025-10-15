@@ -1,8 +1,9 @@
 """
-streaming_server.py — Phase 11-B (Shared Prometheus Registry)
+streaming_server.py — Phase 11-B (Shared Prometheus Registry, Updated Imports)
 Sara AI Core — Streaming Service
 
 - Integrates global Prometheus REGISTRY across all services
+- Uses export_prometheus() and get_snapshot() from metrics_collector
 - Adds /metrics (Prometheus text) and /metrics_snapshot (JSON)
 - Retains structured logging, SSE streaming, and Twilio webhook endpoints
 """
@@ -23,10 +24,10 @@ from logging_utils import log_event
 from metrics_collector import (
     increment_metric,
     observe_latency,
-    REGISTRY,
-    snapshot_metrics,
+    export_prometheus,
+    get_snapshot,
 )
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import CONTENT_TYPE_LATEST
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -92,9 +93,9 @@ def safe_redis_ping(trace_id: Optional[str] = None, session_id: Optional[str] = 
 # --------------------------------------------------------------------------
 @app.route("/metrics", methods=["GET"])
 def metrics():
-    """Expose global Prometheus metrics using shared REGISTRY."""
+    """Expose Prometheus metrics via shared export function."""
     try:
-        return Response(generate_latest(REGISTRY), mimetype=CONTENT_TYPE_LATEST)
+        return Response(export_prometheus(), mimetype=CONTENT_TYPE_LATEST)
     except Exception as e:
         log_event(
             service="streaming_server",
@@ -110,7 +111,7 @@ def metrics():
 def metrics_snapshot():
     """Expose live JSON snapshot of key metrics (for API validation)."""
     try:
-        return jsonify(snapshot_metrics()), 200
+        return jsonify(get_snapshot()), 200
     except Exception as e:
         log_event(
             service="streaming_server",
