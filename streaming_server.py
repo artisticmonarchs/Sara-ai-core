@@ -1,11 +1,10 @@
 """
-streaming_server.py — Phase 10M-D (Global Prometheus Aggregation)
+streaming_server.py — Phase 11-B (Shared Prometheus Registry)
 Sara AI Core — Streaming Service
 
-- Global Prometheus metrics shared across all services via Redis
-- Uses increment_metric(), export_prometheus(), observe_latency()
-- Structured logs via logging_utils.log_event
-- SSE endpoint and Twilio webhook fully instrumented
+- Integrates global Prometheus REGISTRY across all services
+- Adds /metrics (Prometheus text) and /metrics_snapshot (JSON)
+- Retains structured logging, SSE streaming, and Twilio webhook endpoints
 """
 
 import os
@@ -21,7 +20,13 @@ from redis import Redis, RedisError
 from tasks import run_tts
 from gpt_client import generate_reply
 from logging_utils import log_event
-from metrics_collector import increment_metric, export_prometheus, observe_latency  # unified 10M-D
+from metrics_collector import (
+    increment_metric,
+    observe_latency,
+    REGISTRY,
+    snapshot_metrics,
+)
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -83,24 +88,38 @@ def safe_redis_ping(trace_id: Optional[str] = None, session_id: Optional[str] = 
         return False
 
 # --------------------------------------------------------------------------
-# Metrics endpoint (Prometheus text)
+# Prometheus Metrics Endpoints
 # --------------------------------------------------------------------------
 @app.route("/metrics", methods=["GET"])
-def metrics_endpoint():
-    """Expose global Prometheus metrics."""
+def metrics():
+    """Expose global Prometheus metrics using shared REGISTRY."""
     try:
-        increment_metric("streaming_metrics_requests_total")
-        payload = export_prometheus()
-        return Response(payload, mimetype="text/plain"), 200
+        return Response(generate_latest(REGISTRY), mimetype=CONTENT_TYPE_LATEST)
     except Exception as e:
         log_event(
             service="streaming_server",
             event="metrics_export_error",
             status="error",
-            message="Failed to export metrics",
+            message="Failed to export Prometheus metrics",
             extra={"error": str(e), "stack": traceback.format_exc()},
         )
         return Response("# metrics_export_error 1\n", mimetype="text/plain"), 500
+
+
+@app.route("/metrics_snapshot", methods=["GET"])
+def metrics_snapshot():
+    """Expose live JSON snapshot of key metrics (for API validation)."""
+    try:
+        return jsonify(snapshot_metrics()), 200
+    except Exception as e:
+        log_event(
+            service="streaming_server",
+            event="metrics_snapshot_error",
+            status="error",
+            message="Failed to generate metrics snapshot",
+            extra={"error": str(e), "stack": traceback.format_exc()},
+        )
+        return jsonify({"error": "snapshot_failure"}), 500
 
 # --------------------------------------------------------------------------
 # Health endpoints
