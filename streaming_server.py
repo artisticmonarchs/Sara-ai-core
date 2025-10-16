@@ -2,7 +2,7 @@
 streaming_server.py — Phase 11-D (Streaming: Unified Metrics Registry + Redis Snapshot)
 Sara AI Core — Streaming Service
 
-- Uses core.metrics_registry.REGISTRY as the shared Prometheus registry
+- Uses metrics_registry.REGISTRY as the shared Prometheus registry
 - Restores persisted snapshot from Redis into metrics_collector on startup
 - /metrics returns the merged export_prometheus() (Redis global aggregates) plus
   generate_latest(REGISTRY) so both legacy and shared-registry metrics are visible
@@ -37,7 +37,7 @@ from prometheus_client import CONTENT_TYPE_LATEST
 # --------------------------------------------------------------------------
 # Shared registry & registry-backed metrics (Phase 11-D)
 # --------------------------------------------------------------------------
-from core.metrics_registry import (
+from metrics_registry import (
     REGISTRY,
     restore_snapshot_to_collector,
     push_snapshot_from_collector,
@@ -75,13 +75,13 @@ except Exception:
 # Import diagnostic helpers for parity with app.py (fallback stubs)
 # --------------------------------------------------------------------------
 try:
-    from core.utils import check_redis_status, check_r2_connectivity
+    from utils import check_redis_status, check_r2_connectivity
 except ModuleNotFoundError:
     log_event(
         service="streaming_server",
         event="core_utils_missing",
         status="warn",
-        message="core.utils missing; using local stubs",
+        message="utils missing; using local stubs",
     )
 
     async def check_r2_connectivity():

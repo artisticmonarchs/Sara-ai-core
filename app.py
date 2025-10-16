@@ -2,8 +2,8 @@
 app.py — Phase 11-D (Unified Prometheus Registry + Redis Snapshot)
 Sara AI Core API Service
 
-- Uses a centralized Prometheus REGISTRY (core.metrics_registry.REGISTRY)
-- Persists metrics_collector snapshots to Redis via core.metrics_registry helpers
+- Uses a centralized Prometheus REGISTRY (metrics_registry.REGISTRY)
+- Persists metrics_collector snapshots to Redis via metrics_registry helpers
 - Restores persisted metrics on startup and starts the global metrics sync engine
 - Keeps existing endpoints and behavior (R2 checks, TTS, health, logging)
 """
@@ -20,7 +20,7 @@ from logging_utils import log_event
 from tasks import run_tts
 
 # Use the centralized metrics_collector module (so we can restore into it)
-import core.metrics_collector as metrics  # type: ignore
+import metrics_collector as metrics  # type: ignore
 from metrics_collector import (
     increment_metric,
     export_prometheus,
@@ -28,7 +28,7 @@ from metrics_collector import (
     get_snapshot,
 )
 # Phase 11-D: unified registry + snapshot persistence helpers & registry
-from core.metrics_registry import REGISTRY, push_snapshot_from_collector, save_metrics_snapshot, restore_snapshot_to_collector  # type: ignore
+from metrics_registry import REGISTRY, push_snapshot_from_collector, save_metrics_snapshot, restore_snapshot_to_collector  # type: ignore
 from prometheus_client import generate_latest
 
 app = Flask(__name__)
@@ -48,14 +48,14 @@ try:
                   message="Failed to restore metrics snapshot at startup",
                   extra={"error": str(e), "stack": traceback.format_exc()})
 except Exception:
-    # Fail silently if core.metrics_registry not available (maintain backward compatibility)
+    # Fail silently if metrics_registry not available (maintain backward compatibility)
     pass
 
 # --------------------------------------------------------------------------
 # Start background global metrics sync (Phase 11-D) — best-effort, non-blocking
 # --------------------------------------------------------------------------
 try:
-    from core.global_metrics_store import start_background_sync  # type: ignore
+    from global_metrics_store import start_background_sync  # type: ignore
     try:
         start_background_sync(service_name="app")
         log_event(service="api", event="global_metrics_sync_started", status="ok",
@@ -67,7 +67,7 @@ try:
 except Exception:
     # If global_metrics_store not present, continue — metrics still work locally
     log_event(service="api", event="global_metrics_sync_unavailable", status="warn",
-              message="core.global_metrics_store not available; global sync disabled")
+              message="global_metrics_store not available; global sync disabled")
 
 
 # --------------------------------------------------------------------------
@@ -153,7 +153,7 @@ def metrics_snapshot():
     Return an enriched JSON snapshot:
       - metrics_collector.get_snapshot() (counters + latencies)
       - textual REGISTRY output (generate_latest(REGISTRY))
-    Persist the snapshot to Redis via core.metrics_registry.push_snapshot_from_collector
+    Persist the snapshot to Redis via metrics_registry.push_snapshot_from_collector
     and save a combined payload via save_metrics_snapshot for cross-service restore.
     """
     try:
@@ -384,7 +384,7 @@ if __name__ == "__main__":
             service="api",
             event="metrics_init",
             status="ok",
-            message="Unified metrics registry ready (core.metrics_registry.REGISTRY)."
+            message="Unified metrics registry ready (metrics_registry.REGISTRY)."
         )
     except Exception as e:
         log_event(service="api", event="metrics_init_error", status="warn",
