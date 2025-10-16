@@ -1,7 +1,7 @@
 """
 tasks.py — Phase 11-D (Unified Metrics Registry + Redis-persistent metrics + Global Sync)
 
-- Uses core.metrics_collector for all metric operations (shared REGISTRY).
+- Uses metrics_collector for all metric operations (shared REGISTRY).
 - Restores persisted metrics from Redis on startup via metrics_registry.
 - Starts background metrics sync (global_metrics_store.start_background_sync).
 - Redis is used for TTS caching only (metrics are persisted via metrics_collector).
@@ -29,7 +29,7 @@ from logging_utils import log_event
 # --------------------------------------------------------------------------
 # Metrics integration
 # --------------------------------------------------------------------------
-import core.metrics_collector as metrics  # type: ignore
+import metrics_collector as metrics  # type: ignore
 
 # optional external redis client (for cache)
 try:
@@ -49,7 +49,7 @@ except Exception:
 # Metrics restore and global sync startup
 # --------------------------------------------------------------------------
 try:
-    from core.metrics_registry import restore_snapshot_to_collector  # type: ignore
+    from metrics_registry import restore_snapshot_to_collector  # type: ignore
     try:
         restored_ok = restore_snapshot_to_collector(metrics)
         if restored_ok:
@@ -66,7 +66,7 @@ except Exception:
 # Global Metrics Sync Startup (Phase 11-D)
 # --------------------------------------------------------------------------
 try:
-    from core.global_metrics_store import start_background_sync  # type: ignore
+    from global_metrics_store import start_background_sync  # type: ignore
     start_background_sync(service_name="tasks")
     log_event(service="tasks", event="global_metrics_sync_started", status="ok",
               message="Background global metrics sync started for tasks service")
