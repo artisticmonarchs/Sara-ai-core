@@ -1,0 +1,27 @@
+{
+  "phase": "10M-B",
+  "start_time": "2025-10-15T15:06:24.676504Z",
+  "duration_s": 38.26421670000127,
+  "concurrency": 12,
+  "requests_per_worker": 5,
+  "total_requests": 60,
+  "successful_requests": 51,
+  "errors": 9,
+  "latency_ms": {
+    "median": 8531.78,
+    "mean": 7723.95
+  },
+  "tts_latency_ms_summary": {
+    "median": 3322.16,
+    "mean": 3662.48
+  },
+  "r2_latency_ms_summary": {
+    "median": null,
+    "mean": null
+  },
+  "prometheus_deltas": {
+    "tts_requests_total_delta": 0.0,
+    "tts_failures_total_delta": 0.0
+  },
+  "raw_results_csv": "load_results_1760540823.csv"
+}

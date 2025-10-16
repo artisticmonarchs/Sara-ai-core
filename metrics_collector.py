@@ -1,140 +1,136 @@
 """
-metrics_collector.py — Phase 11-B (Prometheus Registry Merge)
+metrics_collector.py — Phase 11-D (Unified Registry + Redis persistence, fixed)
 
-Includes:
-- Phase 10M-D Redis-backed persistence shim (global counters)
-- Phase 11-A streaming-specific Prometheus metrics (gauges + summaries)
-- Phase 11-B Prometheus REGISTRY merge in export_prometheus()
+Key fixes (Phase 11-D):
+ - get_metric_total() now returns authoritative Redis-summed global total when Redis is present.
+ - export_prometheus() now exposes a single canonical metric per logical metric name:
+     - uses a temporary CollectorRegistry and registers Gauges with the merged/global values.
+     - exposes latency <name>_count and <name>_sum (sum in seconds) merged from Redis.
+ - observe_latency persists counts & sums to Redis so global latencies are available.
+ - Adds metric index (SADD) for discovery and TTL refresh on writes.
+ - Adds rate-limited Redis error logging.
 """
 
 from __future__ import annotations
 import threading
 import math
 from collections import defaultdict, deque
-from typing import Dict, Deque, List
+from typing import Dict, Deque, List, Any, Optional, Tuple
 import statistics
 import time
 import os
+import json
+import traceback
+
 from logging_utils import log_event
 
-# ------------------------------------------------------------------
-# Phase 11-A: Streaming-specific Prometheus metrics
-# ------------------------------------------------------------------
-from prometheus_client import Gauge, Summary, generate_latest, REGISTRY
+# Shared REGISTRY import (we no longer use local REGISTRY for generate_latest here)
+from core.metrics_registry import REGISTRY  # type: ignore
 
-# --- Streaming Metrics ---
-tts_active_streams = Gauge(
-    "tts_active_streams",
-    "Current number of active TTS streams",
-)
+# Prometheus client imports for temp registry construction & exposition
+from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
-stream_latency_ms = Summary(
-    "stream_latency_ms",
-    "TTS stream completion latency (milliseconds)",
-)
-
-stream_bytes_out_total = Gauge(
-    "stream_bytes_out_total",
-    "Total number of audio bytes streamed out",
-)
-
-# ------------------------------------------------------------------
-# Redis (optional legacy persistence shim)
-# ------------------------------------------------------------------
+# Redis client (centralized)
 try:
     from redis_client import redis_client as _redis_client  # type: ignore
 except Exception:
     _redis_client = None
 
+# ------------------------------------------------------------------
+# In-process counters & latency buckets (thread-safe)
+# ------------------------------------------------------------------
 _DEFAULT_ROLLING_WINDOW = 1000  # samples per latency metric
 _lock = threading.Lock()
 _counters: Dict[str, int] = defaultdict(int)
 _latency_buckets: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=_DEFAULT_ROLLING_WINDOW))
 
-REDIS_METRIC_PREFIX = "prometheus:metrics:"
+# Redis naming / index
+REDIS_METRIC_PREFIX = "prometheus:metrics:"  # prometheus:metrics:<service>:<metric>
+LATENCY_SUBPREFIX = "latency"               # prometheus:metrics:<service>:latency:<name>:count|sum
+REDIS_INDEX_KEY = "prometheus:metrics:index"  # set of metric names for quick discovery
 
-# Service name namespace for Redis keys. Allows per-service keys:
-# prometheus:metrics:<service_name>:<metric_name>
 SERVICE_NAME = os.getenv("SERVICE_NAME", "unknown_service")
+
+# TTL for metric keys (days -> seconds)
+REDIS_METRIC_TTL_DAYS = int(os.getenv("REDIS_METRIC_TTL_DAYS", "30"))
+REDIS_METRIC_TTL = REDIS_METRIC_TTL_DAYS * 24 * 3600
+
+# Snapshot key (kept for compatibility)
+REDIS_METRIC_SNAPSHOT_KEY = os.getenv("REDIS_METRIC_SNAPSHOT_KEY", "global_metrics_snapshot")
+
+# Simple rate-limited Redis error logging (per-error-type)
+_redis_error_timestamps: Dict[str, float] = {}
+_REDIS_LOG_RATE_LIMIT_SEC = int(os.getenv("REDIS_LOG_RATE_LIMIT_SEC", "60"))
+
+
+def _rate_limited_redis_log(event: str, level: str = "warn", **kwargs):
+    """Log Redis-related issues but rate-limit repeated messages per event."""
+    now = time.time()
+    last = _redis_error_timestamps.get(event, 0.0)
+    if now - last > _REDIS_LOG_RATE_LIMIT_SEC:
+        _redis_error_timestamps[event] = now
+        try:
+            log_event(service="metrics", event=event, status=level, **kwargs)
+        except Exception:
+            # fallback print to avoid silent failures
+            try:
+                print(f"[metrics][{event}] {kwargs}")
+            except Exception:
+                pass
 
 
 def _redis_key(metric_name: str) -> str:
-    """Return a Redis key namespaced with the service name."""
+    """Return a Redis key namespaced with the service name (legacy per-service totals)."""
     return f"{REDIS_METRIC_PREFIX}{SERVICE_NAME}:{metric_name}"
 
 
+def _redis_latency_keys(metric_name: str) -> Tuple[str, str]:
+    """Return (count_key, sum_key) for a latency metric for this service."""
+    # e.g. prometheus:metrics:<service>:latency:<name>:count
+    base = f"{REDIS_METRIC_PREFIX}{SERVICE_NAME}:{LATENCY_SUBPREFIX}:{metric_name}"
+    return (f"{base}:count", f"{base}:sum")
+
+
 # ------------------------------------------------------------------
-# Backward-compatible shim
+# Backwards-compatible console shim
 # ------------------------------------------------------------------
 def init_redis_client(*args, **kwargs) -> None:
-    """DEPRECATED no-op for Phase 10L compatibility."""
     try:
-        log_event(
-            service="metrics",
-            event="init_redis_client_deprecated",
-            status="info" if _redis_client else "warn",
-            message=(
-                "init_redis_client shim called. In Phase 10M-D metrics support optional "
-                f"Redis-backed totals via increment_metric/get_metric_total. redis_client={bool(_redis_client)}"
-            ),
-        )
+        log_event(service="metrics", event="init_redis_client_deprecated",
+                  status="info" if _redis_client else "warn",
+                  message=f"init_redis_client called; redis_present={bool(_redis_client)}")
     except Exception:
         pass
 
 
 # ------------------------------------------------------------------
-# Redis-backed helpers
+# Counter helpers
 # ------------------------------------------------------------------
 def increment_metric(metric_name: str, value: int = 1) -> bool:
-    """Increment counter in memory + Redis (if available)."""
+    """Increment local counter and write per-service Redis total (best-effort).
+    Also ensure metric index contains the metric_name and key TTL refreshed.
+    """
     try:
         with _lock:
             _counters[metric_name] += int(value)
-        if _redis_client:
-            try:
-                _redis_client.incrby(_redis_key(metric_name), int(value))
-            except Exception:
-                log_event(
-                    service="metrics",
-                    event="redis_incr_failed",
-                    status="warn",
-                    message="Failed to incrby Redis metric (best-effort).",
-                    extra={"metric": metric_name, "value": value},
-                )
-        return True
     except Exception as e:
-        log_event(
-            service="metrics",
-            event="increment_metric_failed",
-            status="error",
-            message=str(e),
-            extra={"metric": metric_name, "value": value},
-        )
-        return False
+        _rate_limited_redis_log("increment_local_failed", "error", message=str(e), stack=traceback.format_exc())
+        # continue to try Redis writes even if local fails
 
-
-def get_metric_total(metric_name: str) -> int:
-    """Return total (prefers Redis for this service's metric key)."""
-    try:
-        redis_val = 0
-        if _redis_client:
-            try:
-                raw = _redis_client.get(_redis_key(metric_name))
-                redis_val = int(raw) if raw else 0
-            except Exception:
-                log_event(
-                    service="metrics",
-                    event="redis_get_failed",
-                    status="warn",
-                    message="Failed to get Redis metric total.",
-                    extra={"metric": metric_name},
-                )
-        with _lock:
-            local_val = int(_counters.get(metric_name, 0))
-        # prefer Redis value for this service if it exists, otherwise local
-        return max(local_val, redis_val)
-    except Exception:
-        return 0
+    if _redis_client:
+        try:
+            pipe = _redis_client.pipeline()
+            key = _redis_key(metric_name)
+            pipe.incrby(key, int(value))
+            # refresh TTL & add to index
+            pipe.expire(key, REDIS_METRIC_TTL)
+            pipe.sadd(REDIS_INDEX_KEY, metric_name)
+            pipe.execute()
+        except Exception as e:
+            _rate_limited_redis_log("redis_incr_failed", "warn",
+                                    message="Failed to incrby Redis metric (best-effort)",
+                                    extra={"metric": metric_name, "value": value, "error": str(e)})
+    return True
 
 
 def inc_metric(name: str, amount: int = 1) -> bool:
@@ -142,50 +138,110 @@ def inc_metric(name: str, amount: int = 1) -> bool:
 
 
 def set_metric(name: str, value: int) -> bool:
+    """Overwrite local and per-service Redis metric (best-effort)."""
     try:
         with _lock:
             _counters[name] = int(value)
-        if _redis_client:
-            try:
-                _redis_client.set(_redis_key(name), int(value))
-            except Exception:
-                log_event(
-                    service="metrics",
-                    event="redis_set_failed",
-                    status="warn",
-                    message="Failed to set metric in Redis.",
-                    extra={"metric": name, "value": value},
-                )
-        return True
     except Exception as e:
-        log_event(
-            service="metrics",
-            event="set_metric_failed",
-            status="error",
-            message=str(e),
-            extra={"name": name, "value": value},
-        )
-        return False
+        _rate_limited_redis_log("set_local_failed", "error", message=str(e), stack=traceback.format_exc())
+
+    if _redis_client:
+        try:
+            pipe = _redis_client.pipeline()
+            pipe.set(_redis_key(name), int(value))
+            pipe.expire(_redis_key(name), REDIS_METRIC_TTL)
+            pipe.sadd(REDIS_INDEX_KEY, name)
+            pipe.execute()
+        except Exception as e:
+            _rate_limited_redis_log("redis_set_failed", "warn",
+                                    message="Failed to set metric in Redis (best-effort)",
+                                    extra={"metric": name, "value": value, "error": str(e)})
+    return True
+
+
+def get_metric_total(metric_name: str) -> int:
+    """
+    Return the authoritative global total for metric_name.
+    If Redis is available, sum across all services: pattern prometheus:metrics:*:<metric_name>.
+    Otherwise fall back to local in-memory counter.
+    """
+    if _redis_client:
+        try:
+            # Use SCAN to find keys matching pattern and mget them in bulk
+            pattern = f"{REDIS_METRIC_PREFIX}*:{metric_name}"
+            keys = []
+            for k in _redis_client.scan_iter(match=pattern):
+                keys.append(k)
+            if not keys:
+                # No Redis keys (maybe first time) -> fallback to local
+                with _lock:
+                    return int(_counters.get(metric_name, 0))
+            vals = _redis_client.mget(keys)
+            s = 0
+            for v in vals:
+                try:
+                    if v is None:
+                        continue
+                    if isinstance(v, bytes):
+                        v = v.decode("utf-8")
+                    s += int(v)
+                except Exception:
+                    # skip unparsable values
+                    continue
+            return int(s)
+        except Exception as e:
+            _rate_limited_redis_log("redis_get_total_failed", "warn",
+                                    message="Failed to sum Redis metric keys; falling back to local",
+                                    extra={"metric": metric_name, "error": str(e)})
+            with _lock:
+                return int(_counters.get(metric_name, 0))
+    else:
+        with _lock:
+            return int(_counters.get(metric_name, 0))
 
 
 # ------------------------------------------------------------------
-# Latency handling
+# Latency handling (local + persisted aggregates)
 # ------------------------------------------------------------------
 def observe_latency(name: str, value_ms: float) -> bool:
+    """
+    Record latency sample locally and persist aggregated count & sum to Redis (best-effort).
+    Redis keys per service:
+      prometheus:metrics:<service>:latency:<name>:count  (integer)
+      prometheus:metrics:<service>:latency:<name>:sum    (float ms stored)
+    TTL refreshed on writes.
+    """
     try:
         val = float(value_ms)
         with _lock:
             _latency_buckets[name].append(val)
-        return True
     except Exception as e:
-        log_event(
-            service="metrics",
-            event="observe_latency_failed",
-            status="error",
-            message=str(e),
-            extra={"name": name, "value_ms": value_ms},
-        )
-        return False
+        _rate_limited_redis_log("observe_local_failed", "error", message=str(e), stack=traceback.format_exc())
+        # continue to persist to redis if possible
+
+    if _redis_client:
+        try:
+            count_key, sum_key = _redis_latency_keys(name)
+            pipe = _redis_client.pipeline()
+            pipe.incrby(count_key, 1)
+            # Use INCRBYFLOAT if available to add fractional ms; fallback to incrby with int(ms)
+            try:
+                pipe.incrbyfloat(sum_key, float(val))
+            except Exception:
+                # older redis-py may not have incrbyfloat; fallback to get+set approach
+                cur = _redis_client.get(sum_key)
+                curf = float(cur) if cur else 0.0
+                pipe.set(sum_key, curf + float(val))
+            pipe.expire(count_key, REDIS_METRIC_TTL)
+            pipe.expire(sum_key, REDIS_METRIC_TTL)
+            # add latency metric name to index for discovery
+            pipe.sadd(REDIS_INDEX_KEY, f"{LATENCY_SUBPREFIX}:{name}")
+            pipe.execute()
+        except Exception as e:
+            _rate_limited_redis_log("redis_latency_write_failed", "warn",
+                                    message="Failed to persist latency aggregates (best-effort)",
+                                    extra={"latency": name, "value_ms": value_ms, "error": str(e)})
+    return True
 
 
 # ------------------------------------------------------------------
@@ -218,7 +274,7 @@ def _compute_latency_stats(samples: List[float]) -> Dict[str, float]:
     }
 
 
-def get_snapshot() -> Dict[str, object]:
+def get_snapshot() -> Dict[str, Any]:
     try:
         with _lock:
             counters_copy = dict(_counters)
@@ -226,97 +282,150 @@ def get_snapshot() -> Dict[str, object]:
 
         latencies_stats = {n: _compute_latency_stats(v) for n, v in latencies_copy.items()}
 
+        # Avoid touching private internals of Prometheus objects; just report None if not available.
+        streaming_info: Dict[str, Any] = {}
+        try:
+            streaming_info["tts_active_streams"] = None
+            streaming_info["stream_bytes_out_total"] = None
+        except Exception:
+            streaming_info = {}
+
         snapshot = {
             "counters": counters_copy,
             "latencies": latencies_stats,
+            "streaming": streaming_info,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-
-        # Phase 11-A streaming metrics snapshot (per-process registry values)
-        snapshot["streaming"] = {
-            "tts_active_streams": tts_active_streams._value.get(),
-            "stream_bytes_out_total": stream_bytes_out_total._value.get(),
-        }
-
         return snapshot
     except Exception as e:
         try:
-            log_event(
-                service="metrics",
-                event="get_snapshot_failed",
-                status="error",
-                message=str(e),
-            )
+            log_event(service="metrics", event="get_snapshot_failed", status="error",
+                      message=str(e), extra={"stack": traceback.format_exc()})
         except Exception:
             pass
-        return {"counters": {}, "latencies": {}, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        return {"counters": {}, "latencies": {}, "streaming": {}, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
 
 # ------------------------------------------------------------------
-# Prometheus export (Phase 11-B merged)
+# Prometheus export (single canonical exposition using temporary registry)
 # ------------------------------------------------------------------
 def export_prometheus() -> str:
-    """Render metrics in Prometheus exposition format, merged with client registry.
-    Also compute Redis global aggregates across services and append *_global metrics.
+    """
+    Produce a consistent Prometheus exposition representing global totals.
+    Approach:
+      - Discover metric names via Redis index (preferred) or local counters.
+      - For each metric name, compute the global total via Redis aggregation if available,
+        otherwise use local counter.
+      - For latency metrics, compute global count & sum from Redis (if available), expose <name>_count and <name>_sum (seconds).
+      - Register these as Gauges in a temporary CollectorRegistry and return generate_latest(temp_registry).
+    Note: We intentionally DO NOT append generate_latest(REGISTRY) to avoid duplicate/conflicting metrics.
     """
     try:
-        snap = get_snapshot()
-        lines: List[str] = []
+        temp_registry = CollectorRegistry()
+        metric_names = set()
 
-        metric_names = set(snap.get("counters", {}).keys())
-        # Discover metric names from Redis keys (namespaced as prometheus:metrics:<service>:<metric>)
+        # 1) Discover names from Redis index if available
         if _redis_client:
             try:
-                # Use scan_iter to avoid blocking the Redis server
-                for k in _redis_client.scan_iter(f"{REDIS_METRIC_PREFIX}*"):
-                    if isinstance(k, bytes):
-                        k = k.decode("utf-8")
-                    if k.startswith(REDIS_METRIC_PREFIX):
-                        rest = k[len(REDIS_METRIC_PREFIX) :]  # <service>:<metric_name>
-                        # Extract metric name after first colon (service_name:metric_name)
-                        if ":" in rest:
-                            _, metric = rest.split(":", 1)
+                members = _redis_client.smembers(REDIS_INDEX_KEY)
+                if members:
+                    for m in members:
+                        if isinstance(m, bytes):
+                            m = m.decode("utf-8")
+                        # index may contain latency:<name> entries; normalize
+                        if isinstance(m, str) and m.startswith(f"{LATENCY_SUBPREFIX}:"):
+                            # latency entries stored as latency:<name>; ensure we track base name separately
+                            metric_names.add(m)  # keep as latency:name sentinel
                         else:
-                            metric = rest
-                        metric_names.add(metric)
-            except Exception:
-                log_event(
-                    service="metrics",
-                    event="redis_key_scan_failed",
-                    status="warn",
-                    message="Failed to scan redis metric keys (best-effort).",
-                )
+                            metric_names.add(m)
+            except Exception as e:
+                _rate_limited_redis_log("redis_index_read_failed", "warn",
+                                        message="Failed to read Redis metric index (falling back to local keys)",
+                                        extra={"error": str(e)})
+        # 2) If index empty, fallback to local counters keys
+        with _lock:
+            for k in _counters.keys():
+                metric_names.add(k)
 
-        # Manual counters (per-service totals using get_metric_total which reads service-specific key)
-        for name in sorted(metric_names):
-            total = get_metric_total(name)
-            lines.append(f"# HELP {name} Total count for {name}")
-            lines.append(f"# TYPE {name} counter")
-            lines.append(f"{name} {int(total)}")
-
-        # Manual latency summaries
-        for base, stats in sorted(snap.get("latencies", {}).items()):
-            lines.append(f"# HELP {base}_avg Average {base}")
-            lines.append(f"# TYPE {base}_avg gauge")
-            lines.append(f"{base}_avg {float(stats.get('avg', 0.0))}")
-            lines.append(f"# HELP {base}_count Count of {base} observations")
-            lines.append(f"# TYPE {base}_count gauge")
-            lines.append(f"{base}_count {int(stats.get('count', 0))}")
-
-        # Compute Redis global aggregates across services for each metric_name
-        global_totals: Dict[str, int] = {}
-        if _redis_client:
-            try:
-                for name in sorted(metric_names):
-                    # pattern: prometheus:metrics:*:<metric_name>
-                    pattern = f"{REDIS_METRIC_PREFIX}*:{name}"
+        # Build consolidated numeric metrics in the temp registry
+        for entry in sorted(metric_names):
+            # detect latency sentinel entries ("latency:<name>")
+            if isinstance(entry, str) and entry.startswith(f"{LATENCY_SUBPREFIX}:"):
+                # latency metric name
+                _, latency_name = entry.split(":", 1)
+                # Aggregate counts and sums across services from Redis if possible
+                total_count = 0
+                total_sum_ms = 0.0
+                if _redis_client:
                     try:
-                        keys = []
-                        for k in _redis_client.scan_iter(pattern):
-                            keys.append(k)
-                        if not keys:
-                            continue
-                        # Use mget to fetch values in bulk
+                        # pattern: prometheus:metrics:*:latency:<name>:count  and ...:sum
+                        count_pattern = f"{REDIS_METRIC_PREFIX}*:{LATENCY_SUBPREFIX}:{latency_name}:count"
+                        sum_pattern = f"{REDIS_METRIC_PREFIX}*:{LATENCY_SUBPREFIX}:{latency_name}:sum"
+
+                        # gather keys and mget
+                        ckeys = [k for k in _redis_client.scan_iter(match=count_pattern)]
+                        if ckeys:
+                            cvals = _redis_client.mget(ckeys)
+                            for v in cvals:
+                                try:
+                                    if v is None:
+                                        continue
+                                    if isinstance(v, bytes):
+                                        v = v.decode("utf-8")
+                                    total_count += int(float(v))
+                                except Exception:
+                                    continue
+                        skeys = [k for k in _redis_client.scan_iter(match=sum_pattern)]
+                        if skeys:
+                            svals = _redis_client.mget(skeys)
+                            for v in svals:
+                                try:
+                                    if v is None:
+                                        continue
+                                    if isinstance(v, bytes):
+                                        v = v.decode("utf-8")
+                                    total_sum_ms += float(v)
+                                except Exception:
+                                    continue
+                    except Exception as e:
+                        _rate_limited_redis_log("redis_latency_aggregate_failed", "warn",
+                                                message="Failed to aggregate latency keys from Redis",
+                                                extra={"latency": latency_name, "error": str(e)})
+                        # fallback: use local latency samples aggregate
+                        with _lock:
+                            local_samples = list(_latency_buckets.get(latency_name, []))
+                        local_stats = _compute_latency_stats(local_samples)
+                        total_count = int(local_stats.get("count", 0))
+                        total_sum_ms = float(local_stats.get("sum", 0.0))
+                else:
+                    # No Redis -> use local samples
+                    with _lock:
+                        local_samples = list(_latency_buckets.get(latency_name, []))
+                    local_stats = _compute_latency_stats(local_samples)
+                    total_count = int(local_stats.get("count", 0))
+                    total_sum_ms = float(local_stats.get("sum", 0.0))
+
+                # Expose count (integer) and sum (in seconds)
+                try:
+                    g_count = Gauge(f"{latency_name}_count", f"Count of {latency_name} observations (global)", registry=temp_registry)
+                    g_count.set(int(total_count))
+                    g_sum = Gauge(f"{latency_name}_sum", f"Sum of {latency_name} in seconds (global)", registry=temp_registry)
+                    g_sum.set(float(total_sum_ms) / 1000.0)  # convert ms -> s
+                except Exception as e:
+                    _rate_limited_redis_log("temp_registry_latency_register_failed", "warn",
+                                            message="Failed to register latency gauges in temp registry",
+                                            extra={"latency": latency_name, "error": str(e)})
+                continue
+
+            # Regular (counter-like) metric
+            metric = entry
+            # Compute global total via Redis aggregation if available
+            total = 0
+            if _redis_client:
+                try:
+                    pattern = f"{REDIS_METRIC_PREFIX}*:{metric}"
+                    keys = [k for k in _redis_client.scan_iter(match=pattern)]
+                    if keys:
                         vals = _redis_client.mget(keys)
                         s = 0
                         for v in vals:
@@ -325,83 +434,91 @@ def export_prometheus() -> str:
                                     continue
                                 if isinstance(v, bytes):
                                     v = v.decode("utf-8")
-                                s += int(v)
+                                s += int(float(v))
                             except Exception:
-                                # skip unparsable values
                                 continue
-                        global_totals[name] = s
-                    except Exception:
-                        # per-name failure should not abort whole export
-                        log_event(
-                            service="metrics",
-                            event="redis_mget_failed",
-                            status="warn",
-                            message=f"Failed to mget/aggregate keys for pattern {pattern}",
-                            extra={"pattern": pattern},
-                        )
-                if global_totals:
-                    # Append global values to lines as gauge metrics with *_global suffix
-                    for name in sorted(global_totals.keys()):
-                        gname = f"{name}_global"
-                        gval = int(global_totals[name])
-                        lines.append(f"# HELP {gname} Global total across all services for {name}")
-                        lines.append(f"# TYPE {gname} gauge")
-                        lines.append(f"{gname} {gval}")
+                        total = int(s)
+                    else:
+                        # no redis keys -> fallback to local counter
+                        with _lock:
+                            total = int(_counters.get(metric, 0))
+                except Exception as e:
+                    _rate_limited_redis_log("redis_metric_aggregate_failed", "warn",
+                                            message="Failed to aggregate metric from Redis (fallback to local)",
+                                            extra={"metric": metric, "error": str(e)})
+                    with _lock:
+                        total = int(_counters.get(metric, 0))
+            else:
+                with _lock:
+                    total = int(_counters.get(metric, 0))
 
-                    # Log aggregation summary
-                    try:
-                        log_event(
-                            service="metrics",
-                            event="redis_global_aggregate",
-                            status="info",
-                            message=f"Aggregated {len(global_totals)} global metrics from Redis",
-                            extra={"metrics": list(global_totals.keys())},
-                        )
-                    except Exception:
-                        pass
-            except Exception:
-                log_event(
-                    service="metrics",
-                    event="redis_global_aggregate_failed",
-                    status="warn",
-                    message="Failed during global aggregation (best-effort).",
-                )
-        else:
-            # Redis not available — log and continue
+            # Register a Gauge with the canonical metric name and set the merged value
             try:
-                log_event(
-                    service="metrics",
-                    event="redis_unavailable_for_global_agg",
-                    status="warn",
-                    message="Redis client not configured; skipping global aggregation.",
-                )
-            except Exception:
-                pass
+                g = Gauge(metric, f"Global total for {metric} (aggregated across services)", registry=temp_registry)
+                g.set(int(total))
+            except Exception as e:
+                _rate_limited_redis_log("temp_registry_metric_register_failed", "warn",
+                                        message="Failed to register metric in temp registry",
+                                        extra={"metric": metric, "error": str(e)})
+                continue
 
-        lines.append(f"# timestamp {snap.get('timestamp')}")
-
-        # ---- Phase 11-B addition: merge prometheus_client REGISTRY output ----
-        prom_text = []
+        # Also expose a timestamp of the snapshot for debugging
         try:
-            prom_text.append(generate_latest(REGISTRY).decode("utf-8"))
-        except Exception as e:
-            log_event(
-                service="metrics",
-                event="prometheus_export_error",
-                status="error",
-                message=f"Failed to merge REGISTRY: {e}",
-            )
+            ts_g = Gauge("_metrics_snapshot_timestamp_seconds", "Snapshot timestamp (epoch seconds)", registry=temp_registry)
+            ts_g.set(float(time.time()))
+        except Exception:
+            pass
 
-        combined = "\n".join(lines) + "\n" + "\n".join(prom_text)
-        return combined
+        # Return Prometheus text exposition of the temp registry
+        try:
+            text = generate_latest(temp_registry).decode("utf-8")
+            return text
+        except Exception as e:
+            log_event(service="metrics", event="generate_latest_temp_failed", status="error",
+                      message="Failed to generate exposition from temp registry", extra={"error": str(e), "stack": traceback.format_exc()})
+            return "# metrics_export_error 1\n"
     except Exception as e:
-        log_event(
-            service="metrics",
-            event="export_prometheus_error",
-            status="error",
-            message=f"Failed to export metrics: {e}",
-        )
+        log_event(service="metrics", event="export_prometheus_unhandled", status="error",
+                  message="Unhandled error in export_prometheus", extra={"error": str(e), "stack": traceback.format_exc()})
         return "# metrics_export_error 1\n"
+
+
+# ------------------------------------------------------------------
+# Redis snapshot push/pull helpers (compat)
+# ------------------------------------------------------------------
+def push_metrics_snapshot_to_redis(snapshot: dict) -> bool:
+    """Store the latest metrics snapshot in Redis as JSON under REDIS_METRIC_SNAPSHOT_KEY."""
+    if not _redis_client:
+        _rate_limited_redis_log("redis_unavailable_snapshot_save", "warn", message="Redis not configured; snapshot not saved.")
+        return False
+    try:
+        payload = json.dumps(snapshot)
+        _redis_client.set(REDIS_METRIC_SNAPSHOT_KEY, payload)
+        _redis_client.expire(REDIS_METRIC_SNAPSHOT_KEY, REDIS_METRIC_TTL)
+        log_event(service="metrics", event="snapshot_saved", status="info", message="Metrics snapshot saved")
+        return True
+    except Exception as e:
+        _rate_limited_redis_log("snapshot_save_failed", "error", message=str(e), stack=traceback.format_exc())
+        return False
+
+
+def pull_metrics_snapshot_from_redis() -> dict:
+    """Retrieve the latest metrics snapshot from Redis. Returns empty dict if missing/error."""
+    if not _redis_client:
+        _rate_limited_redis_log("redis_unavailable_snapshot_load", "warn", message="Redis not configured; cannot load snapshot.")
+        return {}
+    try:
+        raw = _redis_client.get(REDIS_METRIC_SNAPSHOT_KEY)
+        if not raw:
+            return {}
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        data = json.loads(raw)
+        log_event(service="metrics", event="snapshot_loaded", status="info", message="Metrics snapshot loaded")
+        return data
+    except Exception as e:
+        _rate_limited_redis_log("snapshot_load_failed", "warn", message=str(e), stack=traceback.format_exc())
+        return {}
 
 
 # ------------------------------------------------------------------

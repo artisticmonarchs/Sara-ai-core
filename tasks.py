@@ -1,11 +1,15 @@
 """
-tasks.py — Phase 10L-Final (Prometheus-Only Metrics)
-- Removes all Redis metric writes; Redis retained only for TTS cache and Celery
-- Uses metrics_collector for all counters/latencies
-- Preserves cache TTL logic, structured logging, and trace propagation
-- Version: 10L-Final
+tasks.py — Phase 11-D (Unified Metrics Registry + Redis-persistent metrics + Global Sync)
+
+- Uses core.metrics_collector for all metric operations (shared REGISTRY).
+- Restores persisted metrics from Redis on startup via metrics_registry.
+- Starts background metrics sync (global_metrics_store.start_background_sync).
+- Redis is used for TTS caching only (metrics are persisted via metrics_collector).
+- Preserves all Deepgram TTS, R2 upload, and Celery behavior.
+- Structured logging via logging_utils.log_event.
 """
 
+from __future__ import annotations
 import os
 import time
 import uuid
@@ -21,13 +25,55 @@ import botocore.exceptions
 from celery_app import celery
 from gpt_client import generate_reply
 from logging_utils import log_event
-import metrics_collector as metrics
+
+# --------------------------------------------------------------------------
+# Metrics integration
+# --------------------------------------------------------------------------
+import core.metrics_collector as metrics  # type: ignore
 
 # optional external redis client (for cache)
 try:
-    from redis_client import redis_client
+    from redis_client import get_client as _get_redis_client, redis_client as redis_client_singleton  # type: ignore
+    def _redis() -> Optional[object]:
+        try:
+            return _get_redis_client()
+        except Exception:
+            return redis_client_singleton
 except Exception:
-    redis_client = None
+    _get_redis_client = lambda: None  # type: ignore
+    redis_client_singleton = None  # type: ignore
+    def _redis() -> Optional[object]:
+        return None
+
+# --------------------------------------------------------------------------
+# Metrics restore and global sync startup
+# --------------------------------------------------------------------------
+try:
+    from core.metrics_registry import restore_snapshot_to_collector  # type: ignore
+    try:
+        restored_ok = restore_snapshot_to_collector(metrics)
+        if restored_ok:
+            log_event(service="tasks", event="metrics_restored_on_startup", status="info",
+                      message="Restored persisted metrics into metrics_collector at worker startup")
+    except Exception as e:
+        log_event(service="tasks", event="metrics_restore_failed", status="warn",
+                  message="Failed to restore metrics snapshot at worker startup",
+                  extra={"error": str(e), "stack": traceback.format_exc()})
+except Exception:
+    pass
+
+# --------------------------------------------------------------------------
+# Global Metrics Sync Startup (Phase 11-D)
+# --------------------------------------------------------------------------
+try:
+    from core.global_metrics_store import start_background_sync  # type: ignore
+    start_background_sync(service_name="tasks")
+    log_event(service="tasks", event="global_metrics_sync_started", status="ok",
+              message="Background global metrics sync started for tasks service")
+except Exception as e:
+    log_event(service="tasks", event="global_metrics_sync_failed", status="error",
+              message="Failed to start background metrics sync",
+              extra={"error": str(e), "stack": traceback.format_exc()})
 
 # --------------------------------------------------------------------------
 # Configuration
@@ -54,7 +100,6 @@ CELERY_RETRY_BACKOFF_MAX = int(os.getenv("CELERY_RETRY_BACKOFF_MAX", "600"))
 # R2 / S3 client setup
 # --------------------------------------------------------------------------
 _s3_client = None
-
 
 def _get_s3_client():
     """Lazily create a boto3 S3 client for Cloudflare R2."""
@@ -85,32 +130,29 @@ def _get_s3_client():
                   extra={"error": str(e), "stack": traceback.format_exc()})
         return None
 
-
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
 class R2UploadError(RuntimeError):
     pass
 
-
 def get_trace() -> str:
     return str(uuid.uuid4())
 
-
 # --------------------------------------------------------------------------
-# Redis-based TTS Cache  (unchanged)
+# Redis-based TTS Cache
 # --------------------------------------------------------------------------
 def _tts_cache_key(session_id: str, text: str) -> str:
     text_hash = hashlib.sha1((text or "").encode("utf-8")).hexdigest()
     return f"tts_cache:{session_id}:{text_hash}"
 
-
 def get_tts_cache(session_id: str, text: str) -> Optional[str]:
-    if not redis_client:
+    client = _redis()
+    if not client:
         return None
     key = _tts_cache_key(session_id, text)
     try:
-        val = redis_client.get(key)
+        val = client.get(key)
         if isinstance(val, bytes):
             return val.decode("utf-8")
         return val
@@ -120,20 +162,19 @@ def get_tts_cache(session_id: str, text: str) -> Optional[str]:
                   extra={"key": key, "error": str(e), "stack": traceback.format_exc()})
         return None
 
-
 def set_tts_cache(session_id: str, text: str, audio_url: str, ttl: int = 300):
-    if not redis_client:
+    client = _redis()
+    if not client:
         log_event(service="tasks", event="tts_cache_set_skipped", status="warn",
                   message="Redis not available for TTS cache")
         return
     key = _tts_cache_key(session_id, text)
     try:
-        redis_client.setex(key, ttl, audio_url)
+        client.setex(key, ttl, audio_url)
     except Exception as e:
         log_event(service="tasks", event="tts_cache_set_failed", status="error",
                   message="Failed to set TTS cache",
                   extra={"key": key, "error": str(e), "stack": traceback.format_exc()})
-
 
 # --------------------------------------------------------------------------
 # Payload utilities
@@ -149,7 +190,6 @@ def normalize_payload(payload) -> Dict[str, Any]:
     if not isinstance(payload, dict):
         payload = {}
     return payload
-
 
 def extract_text(payload) -> str:
     if not payload:
@@ -172,7 +212,6 @@ def extract_text(payload) -> str:
                 return nested
     return ""
 
-
 def make_public_url(bucket: str, key: str) -> str:
     if PUBLIC_AUDIO_HOST:
         if PUBLIC_AUDIO_INCLUDE_BUCKET:
@@ -194,9 +233,8 @@ def make_public_url(bucket: str, key: str) -> str:
               message="No PUBLIC_AUDIO_HOST; presign failed")
     return f"/{key}"
 
-
 # --------------------------------------------------------------------------
-# Upload to R2 (Prometheus metrics only)
+# Upload to R2
 # --------------------------------------------------------------------------
 def upload_to_r2(session_id: str, trace_id: str, audio_bytes: bytes) -> Tuple[str, float]:
     s3 = _get_s3_client()
@@ -241,7 +279,6 @@ def upload_to_r2(session_id: str, trace_id: str, audio_bytes: bytes) -> Tuple[st
                   extra={"error": str(e), "stack": traceback.format_exc()})
         raise R2UploadError(str(e)) from e
 
-
 # --------------------------------------------------------------------------
 # Deepgram TTS
 # --------------------------------------------------------------------------
@@ -277,7 +314,6 @@ def deepgram_tts_rest(text: str, timeout: int = 30) -> Tuple[bytes, float]:
 
     metrics.inc_metric("tts_failures_total")
     raise RuntimeError("Deepgram TTS failed with no successful response")
-
 
 # --------------------------------------------------------------------------
 # Core TTS logic
@@ -352,7 +388,6 @@ def perform_tts_core(payload: Any, raise_on_error: bool = True) -> Dict[str, Any
             raise
         return {"error": str(e), "trace_id": trace_id}
 
-
 # --------------------------------------------------------------------------
 # Celery Task & Proxy
 # --------------------------------------------------------------------------
@@ -367,7 +402,6 @@ def perform_tts_core(payload: Any, raise_on_error: bool = True) -> Dict[str, Any
 )
 def _run_tts_task(self, payload=None):
     return perform_tts_core(payload, raise_on_error=True)
-
 
 class RunTTSProxy:
     def __init__(self, celery_task):
@@ -384,9 +418,7 @@ class RunTTSProxy:
     def apply_async(self, *args, **kwargs):
         return self._task.apply_async(*args, **kwargs)
 
-
 run_tts = RunTTSProxy(_run_tts_task)
-
 
 # --------------------------------------------------------------------------
 # GPT + TTS Inference
@@ -413,11 +445,11 @@ def run_inference(self, payload):
                   message="Inference complete, TTS enqueued",
                   trace_id=trace_id, session_id=session_id,
                   extra={"latency_ms": latency_ms})
-        return {"trace_id": trace_id, "session_id": session_id, "reply": reply_text}
-
+        return {"reply": reply_text, "latency_ms": latency_ms, "trace_id": trace_id}
     except Exception as e:
+        metrics.inc_metric("inference_failures_total")
         log_event(service="tasks", event="inference_error", status="error",
                   message="Inference failed",
                   trace_id=trace_id, session_id=session_id,
-                  extra={"stack": traceback.format_exc()})
-        raise
+                  extra={"error": str(e), "stack": traceback.format_exc()})
+        return {"error": str(e), "trace_id": trace_id}

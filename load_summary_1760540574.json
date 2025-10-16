@@ -1,0 +1,31 @@
+{
+  "start_time": "2025-10-15T15:03:09.011671Z",
+  "duration_s": 14.158385992050171,
+  "concurrency": 12,
+  "requests_per_worker": 5,
+  "total_requests": 60,
+  "successful_requests": 58,
+  "errors": 2,
+  "latency_ms": {
+    "min": 203.48787307739258,
+    "max": 8348.89531135559,
+    "median": 1983.4649562835693,
+    "mean": 2397.999326388041,
+    "p95": 6509.561777114868
+  },
+  "cache": {
+    "samples": 40,
+    "cache_hits": 40,
+    "cache_misses": 0,
+    "cache_hit_ratio_percent": 100.0
+  },
+  "tts_latency_ms_summary": {
+    "median": 4058.52,
+    "mean": 3801.1788888888887
+  },
+  "r2_latency_ms_summary": {
+    "median": null,
+    "mean": null
+  },
+  "raw_csv": "load_results_1760540574.csv"
+}

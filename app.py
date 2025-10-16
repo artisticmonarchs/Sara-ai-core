@@ -1,13 +1,11 @@
 """
-app.py — Phase 10M-D (Prometheus Global Aggregation)
-
+app.py — Phase 11-D (Unified Prometheus Registry + Redis Snapshot)
 Sara AI Core API Service
 
-- Global Prometheus metrics via metrics_collector (Redis-backed totals)
-- Redis retained only for caching/Celery backend (no metric reads/writes in API)
-- Structured logging via logging_utils.log_event
-- /metrics_snapshot added for developer debugging
-- Grafana permanently excluded from observability stack
+- Uses a centralized Prometheus REGISTRY (core.metrics_registry.REGISTRY)
+- Persists metrics_collector snapshots to Redis via core.metrics_registry helpers
+- Restores persisted metrics on startup and starts the global metrics sync engine
+- Keeps existing endpoints and behavior (R2 checks, TTS, health, logging)
 """
 
 import os
@@ -20,14 +18,56 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from logging_utils import log_event
 from tasks import run_tts
+
+# Use the centralized metrics_collector module (so we can restore into it)
+import core.metrics_collector as metrics  # type: ignore
 from metrics_collector import (
     increment_metric,
     export_prometheus,
     observe_latency,
     get_snapshot,
 )
+# Phase 11-D: unified registry + snapshot persistence helpers & registry
+from core.metrics_registry import REGISTRY, push_snapshot_from_collector, save_metrics_snapshot, restore_snapshot_to_collector  # type: ignore
+from prometheus_client import generate_latest
 
 app = Flask(__name__)
+app.config["JSON_SORT_KEYS"] = False
+
+# --------------------------------------------------------------------------
+# Restore persisted metrics into metrics_collector (best-effort)
+# --------------------------------------------------------------------------
+try:
+    try:
+        restored_ok = restore_snapshot_to_collector(metrics)
+        if restored_ok:
+            log_event(service="api", event="metrics_restored_on_startup", status="info",
+                      message="Restored persisted metrics into metrics_collector at startup")
+    except Exception as e:
+        log_event(service="api", event="metrics_restore_failed", status="warn",
+                  message="Failed to restore metrics snapshot at startup",
+                  extra={"error": str(e), "stack": traceback.format_exc()})
+except Exception:
+    # Fail silently if core.metrics_registry not available (maintain backward compatibility)
+    pass
+
+# --------------------------------------------------------------------------
+# Start background global metrics sync (Phase 11-D) — best-effort, non-blocking
+# --------------------------------------------------------------------------
+try:
+    from core.global_metrics_store import start_background_sync  # type: ignore
+    try:
+        start_background_sync(service_name="app")
+        log_event(service="api", event="global_metrics_sync_started", status="ok",
+                  message="Background global metrics sync started for app service")
+    except Exception as e:
+        log_event(service="api", event="global_metrics_sync_failed", status="error",
+                  message="Failed to start background metrics sync",
+                  extra={"error": str(e), "stack": traceback.format_exc()})
+except Exception:
+    # If global_metrics_store not present, continue — metrics still work locally
+    log_event(service="api", event="global_metrics_sync_unavailable", status="warn",
+              message="core.global_metrics_store not available; global sync disabled")
 
 
 # --------------------------------------------------------------------------
@@ -85,7 +125,12 @@ def check_r2_connection(trace_id=None, session_id=None):
 def metrics_endpoint():
     """Expose aggregated metrics in Prometheus plain-text format."""
     try:
-        increment_metric("api_metrics_requests_total")
+        try:
+            increment_metric("api_metrics_requests_total")
+        except Exception:
+            pass
+
+        # export_prometheus now returns a canonical global exposition (Phase 11-D)
         payload = export_prometheus()
         return Response(payload, mimetype="text/plain"), 200
     except Exception as e:
@@ -100,15 +145,84 @@ def metrics_endpoint():
 
 
 # --------------------------------------------------------------------------
-# /metrics_snapshot (developer JSON view)
+# /metrics_snapshot (developer JSON view) + persist to Redis (Phase 11-D)
 # --------------------------------------------------------------------------
 @app.route("/metrics_snapshot", methods=["GET"])
 def metrics_snapshot():
-    """Return in-memory metrics as JSON (for internal debug; not Prometheus)."""
+    """
+    Return an enriched JSON snapshot:
+      - metrics_collector.get_snapshot() (counters + latencies)
+      - textual REGISTRY output (generate_latest(REGISTRY))
+    Persist the snapshot to Redis via core.metrics_registry.push_snapshot_from_collector
+    and save a combined payload via save_metrics_snapshot for cross-service restore.
+    """
     try:
-        snapshot = get_snapshot()
-        increment_metric("api_metrics_snapshot_requests_total")
-        return jsonify({"status": "ok", "snapshot": snapshot}), 200
+        try:
+            increment_metric("api_metrics_snapshot_requests_total")
+        except Exception:
+            pass
+
+        # Collector snapshot (counters + latencies) — best-effort
+        collector_snap = {}
+        try:
+            collector_snap = get_snapshot()
+        except Exception as e:
+            log_event(
+                service="api",
+                event="collector_snapshot_failed",
+                status="warn",
+                message="metrics_collector.get_snapshot() failed",
+                extra={"error": str(e)},
+            )
+
+        # REGISTRY textual dump for debugging (prometheus text format)
+        registry_text = ""
+        try:
+            registry_text = generate_latest(REGISTRY).decode("utf-8")
+        except Exception as e:
+            log_event(
+                service="api",
+                event="registry_generate_failed",
+                status="warn",
+                message="Failed to generate REGISTRY text output",
+                extra={"error": str(e)},
+            )
+
+        # Combined snapshot payload
+        payload = {
+            "service": "sara-ai-core-app",
+            "timestamp": _now_iso(),
+            "collector_snapshot": collector_snap,
+            "registry_text": registry_text,
+        }
+
+        # Persist using helper that expects metrics_collector.get_snapshot
+        try:
+            pushed = push_snapshot_from_collector(get_snapshot)
+            if not pushed:
+                log_event(
+                    service="api",
+                    event="push_snapshot_warn",
+                    status="warn",
+                    message="push_snapshot_from_collector reported False (not saved).",
+                )
+        except Exception as e:
+            log_event(
+                service="api",
+                event="push_snapshot_failed",
+                status="error",
+                message="Failed to push snapshot from collector to Redis",
+                extra={"error": str(e), "stack": traceback.format_exc()},
+            )
+
+        # Also save the combined payload as a convenience (fallback)
+        try:
+            save_metrics_snapshot(payload)
+        except Exception:
+            # save_metrics_snapshot logs internally; don't escalate here
+            pass
+
+        return jsonify({"status": "ok", "snapshot": payload}), 200
     except Exception as e:
         log_event(
             service="api",
@@ -126,7 +240,10 @@ def metrics_snapshot():
 @app.route("/r2_status", methods=["GET"])
 def r2_status():
     trace_id = os.urandom(8).hex()
-    increment_metric("api_r2_status_requests_total")
+    try:
+        increment_metric("api_r2_status_requests_total")
+    except Exception:
+        pass
     result = check_r2_connection(trace_id=trace_id)
     code = 200 if result.get("status") == "ok" else 500
     return jsonify(result), code
@@ -140,7 +257,10 @@ def tts_test():
     trace_id = os.urandom(8).hex()
     session_id = request.headers.get("X-Session-ID") or os.urandom(6).hex()
 
-    increment_metric("api_tts_test_requests_total")
+    try:
+        increment_metric("api_tts_test_requests_total")
+    except Exception:
+        pass
 
     try:
         payload = request.get_json(force=True)
@@ -155,7 +275,11 @@ def tts_test():
         tts_latency_ms = result.get("total_ms") if isinstance(result, dict) else None
 
         if isinstance(result, dict) and "audio_url" in result:
-            increment_metric("tts_requests_total")
+            try:
+                increment_metric("tts_requests_total")
+            except Exception:
+                pass
+
             if tts_latency_ms is not None:
                 try:
                     observe_latency("tts_latency_ms", float(tts_latency_ms))
@@ -175,14 +299,20 @@ def tts_test():
 
         log_event(service="api", event="tts_test_failed", status="error",
                   message=str(result), trace_id=trace_id, session_id=session_id)
-        increment_metric("tts_failures_total")
+        try:
+            increment_metric("tts_failures_total")
+        except Exception:
+            pass
         return jsonify({"error": "TTS generation failed", "details": result}), 500
 
     except Exception:
         err_msg = traceback.format_exc()
         log_event(service="api", event="tts_test_exception", status="error",
                   message=err_msg, trace_id=trace_id, session_id=session_id)
-        increment_metric("tts_failures_total")
+        try:
+            increment_metric("tts_failures_total")
+        except Exception:
+            pass
         return jsonify({"error": "TTS test failed", "details": err_msg}), 500
 
 
@@ -191,7 +321,10 @@ def tts_test():
 # --------------------------------------------------------------------------
 @app.route("/healthz", methods=["GET"])
 def healthz():
-    increment_metric("api_healthz_requests_total")
+    try:
+        increment_metric("api_healthz_requests_total")
+    except Exception:
+        pass
     return jsonify({"status": "ok", "service": "Sara AI Core"}), 200
 
 
@@ -201,18 +334,19 @@ def healthz():
 @app.route("/system_status", methods=["GET"])
 def system_status():
     trace_id = os.urandom(8).hex()
-    increment_metric("api_system_status_requests_total")
+    try:
+        increment_metric("api_system_status_requests_total")
+    except Exception:
+        pass
 
     try:
-        # Redis is no longer used as a metrics store by the API.
-        # Any cache/Celery-level redis checks should be performed in lower-level modules.
         r2_status = check_r2_connection(trace_id=trace_id)
         r2_ok = r2_status.get("status") == "ok"
 
         env_snapshot = {
             "mode": os.getenv("ENV_MODE", "unknown"),
             "service": "sara-ai-core-app",
-            "version": "10L-Final",
+            "version": "11-D",
         }
 
         log_event(
@@ -229,7 +363,7 @@ def system_status():
 
         return jsonify({
             "status": "ok" if r2_ok else "degraded",
-            "redis": "not_applicable_in_api",  # Redis metrics removed from API surface
+            "redis": "not_applicable_in_api",
             "r2": "ok" if r2_ok else "unavailable",
             "r2_bucket": r2_status.get("bucket"),
             "env": env_snapshot,
@@ -246,15 +380,11 @@ def system_status():
 if __name__ == "__main__":
     # Initialize unified metrics system (Prometheus primary).
     try:
-        # NOTE: metrics.init_redis_client(redis_client) removed.
-        # The metrics collector still supports a Redis-sync shim internally
-        # for backward compat; initialization of that shim should happen
-        # from the module that owns the redis client (tasks.py) if needed.
         log_event(
             service="api",
             event="metrics_init",
             status="ok",
-            message="Metrics system initialized (Prometheus primary)."
+            message="Unified metrics registry ready (core.metrics_registry.REGISTRY)."
         )
     except Exception as e:
         log_event(service="api", event="metrics_init_error", status="warn",
