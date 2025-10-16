@@ -19,7 +19,7 @@ import json
 import time
 from typing import Dict, Any
 from prometheus_client import CollectorRegistry
-from logging_utils import log_event
+from structured_logger import log_event
 
 # ------------------------------------------------------------------
 # Phase 11-D: Unified Prometheus Registry
