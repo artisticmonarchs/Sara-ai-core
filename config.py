@@ -50,3 +50,12 @@ class Config:
     
     # Environment Mode
     SARA_ENV = os.getenv("SARA_ENV", "development")
+    
+    # Phase 11-D: Logging Configuration
+    LOG_BUFFER_SIZE = int(os.getenv("LOG_BUFFER_SIZE", "1000"))
+    LOG_FLUSH_INTERVAL = int(os.getenv("LOG_FLUSH_INTERVAL", "30"))
+    ENABLE_STRUCTURED_LOGGING = os.getenv("ENABLE_STRUCTURED_LOGGING", "true").lower() == "true"
+    ENABLE_LOG_BUFFERING = os.getenv("ENABLE_LOG_BUFFERING", "true").lower() == "true"
+    
+    # Backward compatibility alias
+    log_buffer_size = LOG_BUFFER_SIZE
