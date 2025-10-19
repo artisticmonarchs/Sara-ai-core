@@ -52,8 +52,13 @@ except ImportError:
             "enable_endpoint": config.METRICS_ENDPOINT_ENABLED,
         }
 
-# Shared REGISTRY import (we no longer use local REGISTRY for generate_latest here)
-from core.metrics_registry import REGISTRY  # type: ignore
+# FIXED: Corrected import path - changed from core.metrics_registry to direct import
+try:
+    from metrics_registry import REGISTRY  # type: ignore
+except ImportError:
+    # Fallback: create minimal REGISTRY if metrics_registry doesn't exist
+    from prometheus_client import CollectorRegistry
+    REGISTRY = CollectorRegistry(auto_describe=True)
 
 # Prometheus client imports for temp registry construction & exposition
 from prometheus_client import CollectorRegistry, Gauge, generate_latest, Counter, Histogram
