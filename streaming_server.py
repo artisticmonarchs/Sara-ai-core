@@ -1,12 +1,13 @@
 """
-streaming_server.py — Phase 11-D (Streaming: Unified Metrics Registry + Redis Snapshot)
+streaming_server.py — Phase 11-D (Unified Metrics Registry + Global Sync)
 Sara AI Core — Streaming Service
 
-- Uses metrics_registry.REGISTRY as the shared Prometheus registry
+- Uses unified metrics_registry.REGISTRY as the shared Prometheus registry
 - Restores persisted snapshot from Redis into metrics_collector on startup
-- /metrics returns the merged export_prometheus() (Redis global aggregates) plus
-  generate_latest(REGISTRY) so both legacy and shared-registry metrics are visible
+- Starts background metrics sync for global aggregation
+- /metrics returns generate_latest(REGISTRY) for unified metrics
 - /metrics_snapshot persists combined snapshot to Redis for cross-service restore
+- Adds RedisCircuitBreaker to isolate Redis outages
 - Retains SSE streaming, Twilio webhook, health endpoints, and structured logging
 """
 
@@ -15,24 +16,23 @@ import json
 import time
 import uuid
 import traceback
-from typing import Generator, Optional
 import asyncio
+import threading
+from typing import Generator, Optional, Dict, Any
 
 from flask import Flask, request, jsonify, Response, stream_with_context
-from redis import RedisError
+import redis  # for typed redis exceptions and client behaviors
 
 # Local modules
 from tasks import run_tts
 from gpt_client import generate_reply
 from logging_utils import log_event
-import metrics_collector as metrics_collector  # imported as module for restore hooks
+import metrics_collector as metrics_collector  # used by restore hooks
 from metrics_collector import (
     increment_metric,
     observe_latency,
-    export_prometheus,
     get_snapshot,
 )
-from prometheus_client import CONTENT_TYPE_LATEST
 
 # --------------------------------------------------------------------------
 # Shared registry & registry-backed metrics (Phase 11-D)
@@ -42,9 +42,9 @@ from metrics_registry import (
     restore_snapshot_to_collector,
     push_snapshot_from_collector,
     save_metrics_snapshot,
-    load_metrics_snapshot,
 )
-from prometheus_client import Summary, Gauge, generate_latest
+from global_metrics_store import start_background_sync
+from prometheus_client import Summary, Gauge, Counter, generate_latest, CONTENT_TYPE_LATEST
 
 # Register streaming-specific metrics to the shared REGISTRY
 stream_latency_ms = Summary(
@@ -59,31 +59,340 @@ stream_bytes_out_total = Gauge(
     registry=REGISTRY,
 )
 
+# Phase 11-D Unified Metrics Schema
+stream_events_total = Counter(
+    "stream_events_total",
+    "Total stream events processed",
+    ["event_type"],
+    registry=REGISTRY,
+)
+
+stream_errors_total = Counter(
+    "stream_errors_total", 
+    "Total stream errors",
+    ["error_type"],
+    registry=REGISTRY,
+)
+
+latency_seconds = Summary(
+    "latency_seconds",
+    "Stream processing latency in seconds",
+    ["stage"],
+    registry=REGISTRY,
+)
+
+redis_retries_total = Counter(
+    "redis_retries_total",
+    "Total Redis operation retries",
+    registry=REGISTRY,
+)
+
 # --------------------------------------------------------------------------
 # Redis client (use centralized redis_client module)
 # --------------------------------------------------------------------------
+# Unified import pattern required by Sean:
+from redis_client import get_client
+get_redis_client = get_client
+# instantiate local singleton (may return None if module returns None)
 try:
-    # redis_client.py provides `get_client()` and `redis_client` singleton
-    from redis_client import get_client as get_redis_client, redis_client as redis_client_singleton
-    # initialize local alias
-    redis_client = redis_client_singleton
-except Exception:
+    redis_client = get_redis_client()
+except Exception as e:
     redis_client = None
-    get_redis_client = lambda: None
+    log_event(
+        service="streaming_server",
+        event="redis_client_init_failed",
+        status="warn",
+        message="get_client() raised during init",
+        extra={"error": str(e), "stack": traceback.format_exc()},
+    )
+
+# --------------------------------------------------------------------------
+# Phase 11-D Redis Circuit Breaker (Standardized)
+# --------------------------------------------------------------------------
+import time as _time
+from functools import wraps
+
+class RedisCircuitBreaker:
+    def __init__(self, failure_threshold=3, recovery_time=30, timeout=5):
+        self.failures = 0
+        self.failure_threshold = failure_threshold
+        self.last_failure_time = 0
+        self.recovery_time = recovery_time
+        self.timeout = timeout
+        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+
+    def __call__(self, func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            return self.call(func, *args, **kwargs)
+        return wrapper
+
+    def call(self, func, *args, **kwargs):
+        now = _time.time()
+        
+        # Check if circuit is OPEN
+        if self.state == "OPEN":
+            if now - self.last_failure_time < self.recovery_time:
+                log_event(
+                    service="streaming_server",
+                    event="redis_circuit_open",
+                    status="warning",
+                    message="Circuit breaker OPEN - skipping Redis call",
+                    extra={
+                        "failures": self.failures,
+                        "time_since_last_failure": now - self.last_failure_time
+                    },
+                )
+                redis_retries_total.inc()
+                return None
+            else:
+                # Transition to HALF_OPEN for trial
+                self.state = "HALF_OPEN"
+                log_event(
+                    service="streaming_server",
+                    event="redis_circuit_half_open",
+                    status="info",
+                    message="Circuit breaker HALF_OPEN - testing recovery",
+                )
+
+        try:
+            # Execute with timeout protection
+            result = func(*args, **kwargs)
+            
+            # Success - reset circuit
+            self.failures = 0
+            if self.state == "HALF_OPEN":
+                self.state = "CLOSED"
+                log_event(
+                    service="streaming_server",
+                    event="redis_circuit_closed",
+                    status="info",
+                    message="Circuit breaker CLOSED - Redis recovered",
+                )
+            return result
+            
+        except (redis.exceptions.RedisError, redis.exceptions.TimeoutError) as e:
+            self.failures += 1
+            self.last_failure_time = _time.time()
+            
+            if self.failures >= self.failure_threshold:
+                self.state = "OPEN"
+                log_event(
+                    service="streaming_server",
+                    event="redis_circuit_opened",
+                    status="error",
+                    message="Circuit breaker OPENED due to Redis failures",
+                    extra={
+                        "failures": self.failures,
+                        "error": str(e),
+                        "recovery_time_seconds": self.recovery_time
+                    },
+                )
+            
+            redis_retries_total.inc()
+            stream_errors_total.labels(error_type="redis").inc()
+            
+            log_event(
+                service="streaming_server",
+                event="redis_call_failed",
+                status="error",
+                message=f"Redis operation failed: {e}",
+                extra={
+                    "failures": self.failures,
+                    "state": self.state,
+                    "stack": traceback.format_exc()
+                },
+            )
+            return None
+            
+        except Exception as e:
+            # Non-Redis exceptions don't trip the circuit breaker
+            log_event(
+                service="streaming_server",
+                event="redis_call_failed_nonredis",
+                status="error",
+                message=f"Non-Redis exception in circuit breaker: {e}",
+                extra={"stack": traceback.format_exc()},
+            )
+            return None
+
+# instantiate circuit breaker with conservative defaults
+redis_cb = RedisCircuitBreaker(failure_threshold=3, recovery_time=30, timeout=5)
+
+# --------------------------------------------------------------------------
+# Stream State Management for Recovery Checkpoints
+# --------------------------------------------------------------------------
+class StreamStateManager:
+    def __init__(self):
+        self.active_streams: Dict[str, Dict[str, Any]] = {}
+        self.checkpoint_interval = 30  # seconds
+        
+    def create_checkpoint(self, stream_id: str, state: Dict[str, Any]):
+        """Store stream state checkpoint in Redis"""
+        try:
+            checkpoint = {
+                "stream_id": stream_id,
+                "state": state,
+                "timestamp": time.time(),
+                "service": "streaming_server"
+            }
+            
+            @redis_cb
+            def _save_checkpoint():
+                client = get_redis_client()
+                if client:
+                    key = f"stream_checkpoint:{stream_id}"
+                    client.setex(key, 3600, json.dumps(checkpoint))  # 1 hour TTL
+                    return True
+                return False
+                
+            result = _save_checkpoint()
+            if result:
+                log_event(
+                    service="streaming_server",
+                    event="stream_checkpoint_saved",
+                    status="info",
+                    message="Stream state checkpoint saved",
+                    extra={"stream_id": stream_id, "state_keys": list(state.keys())},
+                )
+            return result
+            
+        except Exception as e:
+            log_event(
+                service="streaming_server",
+                event="checkpoint_save_failed",
+                status="warn",
+                message="Failed to save stream checkpoint",
+                extra={"stream_id": stream_id, "error": str(e)},
+            )
+            return False
+    
+    def restore_checkpoint(self, stream_id: str) -> Optional[Dict[str, Any]]:
+        """Restore stream state from Redis checkpoint"""
+        try:
+            @redis_cb
+            def _load_checkpoint():
+                client = get_redis_client()
+                if client:
+                    key = f"stream_checkpoint:{stream_id}"
+                    data = client.get(key)
+                    if data:
+                        return json.loads(data)
+                return None
+                
+            checkpoint = _load_checkpoint()
+            if checkpoint:
+                log_event(
+                    service="streaming_server",
+                    event="stream_checkpoint_restored",
+                    status="info",
+                    message="Stream state checkpoint restored",
+                    extra={"stream_id": stream_id},
+                )
+                return checkpoint.get("state", {})
+            return None
+            
+        except Exception as e:
+            log_event(
+                service="streaming_server",
+                event="checkpoint_restore_failed",
+                status="warn",
+                message="Failed to restore stream checkpoint",
+                extra={"stream_id": stream_id, "error": str(e)},
+            )
+            return None
+
+# Initialize stream state manager
+stream_state_mgr = StreamStateManager()
+
+# --------------------------------------------------------------------------
+# Async Health Monitoring
+# --------------------------------------------------------------------------
+class HealthMonitor:
+    def __init__(self):
+        self.running = False
+        self.thread = None
+        self.uptime_start = time.time()
+        
+    def start(self):
+        """Start the health monitoring background thread"""
+        if self.running:
+            return
+            
+        self.running = True
+        self.thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self.thread.start()
+        log_event(
+            service="streaming_server",
+            event="health_monitor_started",
+            status="info",
+            message="Health monitoring started",
+        )
+    
+    def stop(self):
+        """Stop the health monitoring"""
+        self.running = False
+        if self.thread:
+            self.thread.join(timeout=5)
+    
+    def _monitor_loop(self):
+        """Background monitoring loop"""
+        while self.running:
+            try:
+                self._report_health()
+                time.sleep(15)  # Report every 15 seconds
+            except Exception as e:
+                log_event(
+                    service="streaming_server",
+                    event="health_monitor_error",
+                    status="error",
+                    message="Health monitor loop error",
+                    extra={"error": str(e)},
+                )
+                time.sleep(15)
+    
+    def _report_health(self):
+        """Report health metrics to system monitor"""
+        try:
+            uptime = time.time() - self.uptime_start
+            active_streams = len(stream_state_mgr.active_streams)
+            
+            # Report to metrics
+            Gauge("streaming_server_uptime_seconds", "Service uptime in seconds", registry=REGISTRY).set(uptime)
+            Gauge("streaming_server_active_streams", "Number of active streams", registry=REGISTRY).set(active_streams)
+            
+            # Log health status
+            log_event(
+                service="streaming_server",
+                event="health_heartbeat",
+                status="ok",
+                message="Streaming server health heartbeat",
+                extra={
+                    "uptime_seconds": uptime,
+                    "active_streams": active_streams,
+                    "redis_state": redis_cb.state,
+                    "redis_failures": redis_cb.failures
+                },
+            )
+            
+        except Exception as e:
+            log_event(
+                service="streaming_server",
+                event="health_report_failed",
+                status="error",
+                message="Failed to report health metrics",
+                extra={"error": str(e)},
+            )
+
+# Initialize health monitor
+health_monitor = HealthMonitor()
 
 # --------------------------------------------------------------------------
 # Import diagnostic helpers for parity with app.py (fallback stubs)
 # --------------------------------------------------------------------------
 try:
     from utils import check_redis_status, check_r2_connectivity
-except ModuleNotFoundError:
-    log_event(
-        service="streaming_server",
-        event="core_utils_missing",
-        status="warn",
-        message="utils missing; using local stubs",
-    )
-
+except Exception:
     async def check_r2_connectivity():
         return "not_available"
 
@@ -99,79 +408,113 @@ app.config["JSON_SORT_KEYS"] = False
 STREAM_HEARTBEAT_INTERVAL = float(os.getenv("STREAM_HEARTBEAT_INTERVAL", "10"))
 
 # --------------------------------------------------------------------------
+# Phase 11-D: Unified Metrics Startup
+# --------------------------------------------------------------------------
+# Restore persisted snapshot and start background sync
+try:
+    restore_snapshot_to_collector(metrics_collector)
+    start_background_sync(service_name="streaming")
+    
+    # Start health monitoring
+    health_monitor.start()
+    
+    log_event(
+        service="streaming",
+        event="global_metrics_sync_started",
+        status="ok",
+        message="Streaming server metrics restored and sync started",
+        extra={"phase": "11-D"}
+    )
+except Exception as e:
+    log_event(
+        service="streaming",
+        event="metrics_startup_failed",
+        status="error",
+        message="Failed to initialize unified metrics",
+        extra={"error": str(e), "stack": traceback.format_exc(), "phase": "11-D"}
+    )
+
+log_event(
+    service="streaming",
+    event="startup",
+    status="ok",
+    message="Streaming server initialized with unified metrics registry",
+    extra={"phase": "11-D"}
+)
+
+# --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
 def new_trace() -> str:
-    return str(uuid.uuid4())
+    trace_id = str(uuid.uuid4())
+    log_event(
+        service="streaming_server",
+        event="trace_created",
+        status="info",
+        message="New trace context created",
+        extra={"trace_id": trace_id},
+    )
+    return trace_id
 
 def sse_format(event: Optional[str] = None, data: Optional[dict] = None) -> str:
     msg_lines = []
     if event:
         msg_lines.append(f"event: {event}")
+        stream_events_total.labels(event_type=event).inc()
     if data is not None:
         msg_lines.append(f"data: {json.dumps(data, separators=(',', ':'))}")
     msg_lines.append("")
     return "\n".join(msg_lines) + "\n"
 
 def safe_redis_ping(trace_id: Optional[str] = None, session_id: Optional[str] = None) -> bool:
+    # Use circuit breaker for ping
     client = get_redis_client()
     if not client:
         return False
-    try:
+    
+    @redis_cb
+    def _ping():
         return client.ping()
-    except Exception as e:
-        log_event(
-            service="streaming_server",
-            event="redis_ping_failed",
-            status="warn",
-            message=str(e),
-            trace_id=trace_id,
-            session_id=session_id,
-        )
+    
+    res = _ping()
+    if res is None:
         return False
+    return bool(res)
+
+def safe_redis_call(func, *args, **kwargs):
+    """Utility wrapper to call Redis operations via circuit breaker."""
+    client = get_redis_client()
+    if not client:
+        return None
+    
+    @redis_cb  
+    def _wrapped_call():
+        return func(*args, **kwargs)
+        
+    return _wrapped_call()
 
 # --------------------------------------------------------------------------
-# Restore persisted snapshot on startup (best-effort)
+# Restore persisted snapshot on startup (FIXED: simplified restoration logic)
 # --------------------------------------------------------------------------
 def _restore_from_redis_at_startup():
     try:
-        # Attempt to restore into metrics_collector internal counters/latencies
-        restored = restore_snapshot_to_collector(metrics_collector)
-        if restored:
+        # Use standardized restore_snapshot_to_collector for all metrics restoration
+        result = redis_cb.call(lambda: restore_snapshot_to_collector(metrics_collector))
+        
+        if result:
             log_event(
                 service="streaming_server",
                 event="metrics_snapshot_restored",
                 status="info",
-                message="Restored snapshot into metrics_collector from Redis.",
+                message="Restored snapshot into metrics_collector from Redis using standardized restoration.",
             )
-        # Also apply streaming-specific values (if present) into the shared REGISTRY metrics
-        snap = load_metrics_snapshot() or {}
-        # The persisted shape may vary; prefer 'streaming' section if present, else check collector snapshot
-        streaming_section = snap.get("streaming") or snap.get("collector_snapshot", {}).get("streaming") or {}
-        if streaming_section:
-            try:
-                # tts_active_streams may be in metrics_collector as Gauge; attempt to set if exists
-                tts_active = streaming_section.get("tts_active_streams")
-                if tts_active is not None:
-                    try:
-                        # metrics_collector may expose a tts_active_streams gauge; try to set if present
-                        if hasattr(metrics_collector, "tts_active_streams"):
-                            try:
-                                metrics_collector.tts_active_streams.set(int(tts_active))
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-
-                bytes_total = streaming_section.get("stream_bytes_out_total")
-                if bytes_total is not None:
-                    try:
-                        # Set the shared REGISTRY Gauge to the value from snapshot (set via .set)
-                        stream_bytes_out_total.set(float(bytes_total))
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+        else:
+            log_event(
+                service="streaming_server",
+                event="metrics_restore_no_data",
+                status="info",
+                message="No metrics snapshot found in Redis for restoration.",
+            )
     except Exception as e:
         log_event(
             service="streaming_server",
@@ -190,47 +533,30 @@ _restore_from_redis_at_startup()
 @app.route("/metrics", methods=["GET"])
 def metrics_endpoint():
     """
-    Expose metrics. To maintain parity and compatibility:
-      - export_prometheus() keeps the Redis global aggregates and legacy counters
-      - generate_latest(REGISTRY) exposes the shared in-memory registry
-    We return both concatenated so dashboards & scrapers see a complete picture.
+    Expose unified metrics from shared REGISTRY.
     """
     try:
         try:
             increment_metric("streaming_metrics_requests_total")
+            stream_events_total.labels(event_type="metrics_request").inc()
         except Exception:
             pass
 
-        # Legacy/text export from metrics_collector (includes Redis global aggregates)
-        payload_parts = []
-        try:
-            payload_parts.append(export_prometheus())
-        except Exception as e:
-            log_event(
-                service="streaming_server",
-                event="export_prometheus_failed",
-                status="warn",
-                message="export_prometheus() failed in /metrics; continuing with REGISTRY output",
-                extra={"error": str(e)},
-            )
-
-        # Add textual output of shared REGISTRY
+        # Generate unified metrics from shared REGISTRY
         try:
             reg_text = generate_latest(REGISTRY).decode("utf-8")
-            payload_parts.append(reg_text)
+            return Response(reg_text, mimetype=CONTENT_TYPE_LATEST, status=200)
         except Exception as e:
             log_event(
                 service="streaming_server",
                 event="generate_latest_failed",
-                status="warn",
+                status="error",
                 message="Failed to generate REGISTRY output",
-                extra={"error": str(e)},
+                extra={"error": str(e), "stack": traceback.format_exc()},
             )
-
-        combined = "\n".join(part for part in payload_parts if part)
-        if not combined:
+            stream_errors_total.labels(error_type="metrics_generation").inc()
             return Response("# metrics_export_error 1\n", mimetype="text/plain", status=500)
-        return Response(combined, mimetype=CONTENT_TYPE_LATEST, status=200)
+
     except Exception as e:
         log_event(
             service="streaming_server",
@@ -239,6 +565,7 @@ def metrics_endpoint():
             message="Failed to serve /metrics",
             extra={"error": str(e), "stack": traceback.format_exc()},
         )
+        stream_errors_total.labels(error_type="metrics_endpoint").inc()
         return Response("# metrics_export_error 1\n", mimetype="text/plain", status=500)
 
 # --------------------------------------------------------------------------
@@ -247,31 +574,35 @@ def metrics_endpoint():
 @app.route("/metrics_snapshot", methods=["GET"])
 def metrics_snapshot():
     try:
-        # Increment local counter
         try:
             increment_metric("streaming_metrics_snapshot_requests_total")
+            stream_events_total.labels(event_type="metrics_snapshot").inc()
         except Exception:
             pass
 
-        # Collector snapshot
         coll_snap = {}
         try:
             coll_snap = get_snapshot()
         except Exception:
             coll_snap = {}
 
-        # REGISTRY snapshot (structured)
         registry_snap = {}
         try:
             for family in REGISTRY.collect():
                 fam_name = family.name
                 samples = []
                 for s in family.samples:
-                    sample_name, labels, value = s.name, s.labels, s.value
+                    # handle tuple-like and object sample representations
+                    try:
+                        sample_name = s[0] if isinstance(s, (list, tuple)) else getattr(s, "name", None)
+                        labels = s[1] if isinstance(s, (list, tuple)) else getattr(s, "labels", {})
+                        value = s[2] if isinstance(s, (list, tuple)) else getattr(s, "value", None)
+                    except Exception:
+                        sample_name, labels, value = getattr(s, "name", None), getattr(s, "labels", {}), getattr(s, "value", None)
                     samples.append({"name": sample_name, "labels": labels, "value": value})
                 registry_snap[fam_name] = {
-                    "documentation": family.documentation,
-                    "type": family.type,
+                    "documentation": getattr(family, "documentation", ""),
+                    "type": getattr(family, "type", ""),
                     "samples": samples,
                 }
         except Exception:
@@ -284,9 +615,18 @@ def metrics_snapshot():
             "registry_snapshot": registry_snap,
         }
 
-        # Persist collector snapshot via helper (expects metrics_collector.get_snapshot)
+        # Persist collector snapshot via helper (guarded)
         try:
-            push_snapshot_from_collector(get_snapshot)
+            safe_redis_call(push_snapshot_from_collector, get_snapshot)
+        except redis.exceptions.RedisError as e:
+            log_event(
+                service="streaming_server",
+                event="push_snapshot_redis_failed",
+                status="warn",
+                message=str(e),
+                extra={"stack": traceback.format_exc()},
+            )
+            stream_errors_total.labels(error_type="redis_snapshot").inc()
         except Exception as e:
             log_event(
                 service="streaming_server",
@@ -295,12 +635,15 @@ def metrics_snapshot():
                 message="push_snapshot_from_collector failed",
                 extra={"error": str(e)},
             )
+            stream_errors_total.labels(error_type="snapshot_push").inc()
 
         # Also save combined payload as convenience/fallback
         try:
-            save_metrics_snapshot(payload)
+            safe_redis_call(save_metrics_snapshot, payload)
+        except redis.exceptions.RedisError:
+            stream_errors_total.labels(error_type="redis_backup").inc()
         except Exception:
-            pass
+            stream_errors_total.labels(error_type="backup_snapshot").inc()
 
         return jsonify(payload), 200
     except Exception as e:
@@ -311,6 +654,7 @@ def metrics_snapshot():
             message="Failed to produce metrics snapshot",
             extra={"error": str(e), "stack": traceback.format_exc()},
         )
+        stream_errors_total.labels(error_type="snapshot_generation").inc()
         return jsonify({"error": "snapshot_failure"}), 500
 
 # --------------------------------------------------------------------------
@@ -320,20 +664,55 @@ def metrics_snapshot():
 def healthz():
     try:
         increment_metric("streaming_healthz_requests_total")
+        stream_events_total.labels(event_type="healthz").inc()
     except Exception:
         pass
-    return jsonify({"status": "ok", "service": "streaming_server"}), 200
+    
+    log_event(
+        service="streaming",
+        event="healthz_check",
+        status="ok",
+        message="Streaming health OK",
+        extra={
+            "active_streams": len(stream_state_mgr.active_streams),
+            "redis_circuit_state": redis_cb.state,
+            "uptime_seconds": time.time() - health_monitor.uptime_start
+        }
+    )
+    return jsonify({
+        "status": "ok", 
+        "service": "streaming_server",
+        "active_streams": len(stream_state_mgr.active_streams),
+        "redis_circuit_state": redis_cb.state
+    }), 200
 
 @app.route("/health", methods=["GET"])
 def health():
     trace_id = new_trace()
+    log_event(
+        service="streaming",
+        event="health_check",
+        status="ok",
+        message="Streaming health check",
+        trace_id=trace_id,
+        extra={
+            "active_streams": len(stream_state_mgr.active_streams),
+            "redis_circuit_state": redis_cb.state
+        }
+    )
+    
     client = get_redis_client()
     if client is None:
         return jsonify({"status": "ok", "redis": "not_applicable"}), 200
     try:
         ok = safe_redis_ping(trace_id=trace_id)
         if ok:
-            return jsonify({"status": "ok", "redis": "connected"}), 200
+            return jsonify({
+                "status": "ok", 
+                "redis": "connected",
+                "circuit_state": redis_cb.state,
+                "active_streams": len(stream_state_mgr.active_streams)
+            }), 200
         else:
             log_event(
                 service="streaming_server",
@@ -341,8 +720,24 @@ def health():
                 status="warn",
                 message="Redis unreachable during health check",
                 trace_id=trace_id,
+                extra={"circuit_state": redis_cb.state, "failures": redis_cb.failures},
             )
-            return jsonify({"status": "degraded", "redis": "unreachable"}), 503
+            return jsonify({
+                "status": "degraded", 
+                "redis": "unreachable",
+                "circuit_state": redis_cb.state
+            }), 503
+    except redis.exceptions.RedisError as e:
+        log_event(
+            service="streaming_server",
+            event="health_exception_redis",
+            status="error",
+            message=str(e),
+            trace_id=trace_id,
+            extra={"stack": traceback.format_exc()},
+        )
+        stream_errors_total.labels(error_type="health_redis").inc()
+        return jsonify({"status": "degraded", "redis": "error"}), 503
     except Exception as e:
         log_event(
             service="streaming_server",
@@ -352,6 +747,7 @@ def health():
             trace_id=trace_id,
             extra={"error": str(e), "stack": traceback.format_exc()},
         )
+        stream_errors_total.labels(error_type="health_general").inc()
         return jsonify({"status": "degraded", "redis": "error"}), 503
 
 # --------------------------------------------------------------------------
@@ -359,17 +755,26 @@ def health():
 # --------------------------------------------------------------------------
 @app.route("/system_status", methods=["GET"])
 def system_status():
-    """
-    Diagnostics parity endpoint.
-    Returns service-level status matching the App service schema.
-    """
     try:
-        # Per assignment: streaming service treats Redis as not applicable for this endpoint
+        log_event(
+            service="streaming",
+            event="system_status_check",
+            status="ok",
+            message="System status check",
+            extra={
+                "active_streams": len(stream_state_mgr.active_streams),
+                "redis_circuit_state": redis_cb.state,
+                "uptime_seconds": time.time() - health_monitor.uptime_start
+            }
+        )
         return jsonify({
             "service": "streaming_server",
             "status": "ok",
             "redis_connectivity": "not_applicable_in_streaming",
-            "r2_connectivity": "ok"
+            "r2_connectivity": "ok",
+            "active_streams": len(stream_state_mgr.active_streams),
+            "redis_circuit_state": redis_cb.state,
+            "uptime_seconds": round(time.time() - health_monitor.uptime_start, 2)
         }), 200
     except Exception as e:
         trace_id = new_trace()
@@ -381,6 +786,7 @@ def system_status():
             trace_id=trace_id,
             extra={"error": str(e), "stack": traceback.format_exc()},
         )
+        stream_errors_total.labels(error_type="system_status").inc()
         return jsonify({
             "status": "error",
             "service": "streaming_server",
@@ -397,6 +803,7 @@ def stream():
 
     try:
         increment_metric("stream_requests_total")
+        stream_events_total.labels(event_type="stream_request").inc()
     except Exception:
         pass
 
@@ -416,7 +823,22 @@ def stream():
                 session_id=session_id,
             )
             increment_metric("stream_rejected_total")
+            stream_errors_total.labels(error_type="no_input_text").inc()
             return jsonify({"error": "No input text"}), 400
+
+        # Create initial stream state
+        stream_state = {
+            "session_id": session_id,
+            "trace_id": trace_id,
+            "user_text": user_text,
+            "stage": "received",
+            "start_time": time.time(),
+            "last_checkpoint": time.time()
+        }
+        stream_state_mgr.active_streams[session_id] = stream_state
+        
+        # Save initial checkpoint
+        stream_state_mgr.create_checkpoint(session_id, stream_state)
 
         log_event(
             service="streaming_server",
@@ -425,6 +847,7 @@ def stream():
             message=f"Stream session started ({len(user_text)} chars)",
             trace_id=trace_id,
             session_id=session_id,
+            extra={"text_length": len(user_text), "stage": "initialized"},
         )
 
         @stream_with_context
@@ -433,14 +856,26 @@ def stream():
                 yield sse_format("status", {"stage": "received", "trace_id": trace_id})
 
                 start_infer = time.time()
-                reply_text = generate_reply(user_text, trace_id=trace_id)
+                with latency_seconds.labels(stage="inference").time():
+                    reply_text = generate_reply(user_text, trace_id=trace_id)
                 infer_ms = round((time.time() - start_infer) * 1000, 2)
+
+                # Update stream state
+                stream_state["stage"] = "inference_complete"
+                stream_state["inference_latency_ms"] = infer_ms
+                stream_state["reply_text_length"] = len(reply_text)
+                stream_state_mgr.active_streams[session_id] = stream_state
+
+                # Save checkpoint after inference
+                if time.time() - stream_state["last_checkpoint"] > 30:
+                    stream_state_mgr.create_checkpoint(session_id, stream_state)
+                    stream_state["last_checkpoint"] = time.time()
+
                 try:
                     observe_latency("inference_latency_ms", infer_ms)
                 except Exception:
                     pass
 
-                # Also observe to the shared REGISTRY Summary (stream_latency_ms)
                 try:
                     stream_latency_ms.observe(infer_ms)
                 except Exception:
@@ -453,19 +888,25 @@ def stream():
                     message=f"Inference completed ({len(reply_text)} chars)",
                     trace_id=trace_id,
                     session_id=session_id,
-                    extra={"inference_latency_ms": infer_ms},
+                    extra={
+                        "inference_latency_ms": infer_ms,
+                        "reply_text_length": len(reply_text),
+                        "stage": "inference_complete"
+                    },
                 )
                 yield sse_format("reply_text", {"text": reply_text})
 
                 start_tts = time.time()
-                tts_result = run_tts(
-                    {"text": reply_text, "trace_id": trace_id, "session_id": session_id},
-                    inline=True,
-                )
+                with latency_seconds.labels(stage="tts").time():
+                    tts_result = run_tts(
+                        {"text": reply_text, "trace_id": trace_id, "session_id": session_id},
+                        inline=True,
+                    )
                 tts_ms = round((time.time() - start_tts) * 1000, 2)
 
                 if isinstance(tts_result, dict) and tts_result.get("error"):
                     increment_metric("tts_failures_total")
+                    stream_errors_total.labels(error_type="tts_generation").inc()
                     log_event(
                         service="streaming_server",
                         event="tts_failed",
@@ -480,6 +921,7 @@ def stream():
 
                 if isinstance(tts_result, dict) and tts_result.get("cached"):
                     increment_metric("tts_cache_hits_total")
+                    stream_events_total.labels(event_type="tts_cache_hit").inc()
                     log_event(
                         service="streaming_server",
                         event="cache_hit",
@@ -495,13 +937,22 @@ def stream():
                     bytes_out = tts_result.get("bytes", None)
                     if isinstance(bytes_out, (int, float)):
                         try:
-                            # Update the Gauge with a cumulative total (set, not inc)
-                            # If you prefer incrementing, use .inc(bytes_out) instead.
                             stream_bytes_out_total.inc(bytes_out)
                         except Exception:
                             pass
 
                 audio_url = tts_result.get("audio_url") if isinstance(tts_result, dict) else None
+                
+                # Update final stream state
+                stream_state["stage"] = "complete"
+                stream_state["tts_latency_ms"] = tts_ms
+                stream_state["audio_url"] = audio_url
+                stream_state["end_time"] = time.time()
+                stream_state_mgr.active_streams[session_id] = stream_state
+
+                # Final checkpoint
+                stream_state_mgr.create_checkpoint(session_id, stream_state)
+
                 log_event(
                     service="streaming_server",
                     event="tts_done",
@@ -509,11 +960,20 @@ def stream():
                     message="TTS generated successfully",
                     trace_id=trace_id,
                     session_id=session_id,
-                    extra={"audio_url": audio_url, "tts_latency_ms": tts_ms},
+                    extra={
+                        "audio_url": audio_url, 
+                        "tts_latency_ms": tts_ms,
+                        "stage": "complete",
+                        "total_duration_ms": round((time.time() - stream_state["start_time"]) * 1000, 2)
+                    },
                 )
 
                 yield sse_format("audio_ready", {"url": audio_url})
                 yield sse_format("complete", {"trace_id": trace_id, "session_id": session_id})
+
+                # Clean up completed stream
+                if session_id in stream_state_mgr.active_streams:
+                    del stream_state_mgr.active_streams[session_id]
 
             except Exception as exc:
                 err_id = str(uuid.uuid4())
@@ -524,9 +984,18 @@ def stream():
                     message=str(exc),
                     trace_id=trace_id or new_trace(),
                     session_id=session_id or "unknown",
-                    extra={"error_id": err_id, "stack": traceback.format_exc()},
+                    extra={
+                        "error_id": err_id, 
+                        "stack": traceback.format_exc(),
+                        "stage": stream_state.get("stage", "unknown")
+                    },
                 )
+                stream_errors_total.labels(error_type="stream_internal").inc()
                 yield sse_format("error", {"message": "Streaming error", "error_id": err_id})
+                
+                # Clean up failed stream
+                if session_id in stream_state_mgr.active_streams:
+                    del stream_state_mgr.active_streams[session_id]
 
         headers = {
             "Content-Type": "text/event-stream",
@@ -535,7 +1004,6 @@ def stream():
             "X-Accel-Buffering": "no",
         }
         return Response(event_stream(), headers=headers)
-
     except Exception as e:
         trace = trace_id or new_trace()
         log_event(
@@ -548,6 +1016,12 @@ def stream():
             extra={"stack": traceback.format_exc()},
         )
         increment_metric("stream_errors_total")
+        stream_errors_total.labels(error_type="fatal").inc()
+        
+        # Clean up on fatal error
+        if session_id and session_id in stream_state_mgr.active_streams:
+            del stream_state_mgr.active_streams[session_id]
+            
         return jsonify({"error": "Internal server error", "trace_id": trace}), 500
 
 # --------------------------------------------------------------------------
@@ -562,15 +1036,18 @@ def twilio_tts():
 
     try:
         increment_metric("twilio_requests_total")
+        stream_events_total.labels(event_type="twilio_request").inc()
     except Exception:
         pass
 
     try:
         text = request.form.get("SpeechResult") or request.form.get("text") or "Hello from Sara AI"
-        tts_result = run_tts({"text": text, "session_id": session_id, "trace_id": trace_id}, inline=True)
+        with latency_seconds.labels(stage="twilio_tts").time():
+            tts_result = run_tts({"text": text, "session_id": session_id, "trace_id": trace_id}, inline=True)
 
         if isinstance(tts_result, dict) and tts_result.get("error"):
             increment_metric("tts_failures_total")
+            stream_errors_total.labels(error_type="twilio_tts").inc()
             log_event(
                 service="streaming_server",
                 event="twilio_tts_failed",
@@ -593,7 +1070,7 @@ def twilio_tts():
             message="Generated Twilio-compatible TTS",
             trace_id=trace_id,
             session_id=session_id,
-            extra={"audio_url": audio_url},
+            extra={"audio_url": audio_url, "text_length": len(text)},
         )
 
         twiml = f"<Response><Play>{audio_url}</Play></Response>"
@@ -610,14 +1087,59 @@ def twilio_tts():
             extra={"stack": traceback.format_exc()},
         )
         increment_metric("twilio_errors_total")
+        stream_errors_total.labels(error_type="twilio_exception").inc()
         return TwilioResponse(
             "<Response><Say>Sorry, an internal error occurred.</Say></Response>",
             mimetype="application/xml",
         )
 
 # --------------------------------------------------------------------------
+# Stream Recovery Endpoint
+# --------------------------------------------------------------------------
+@app.route("/stream/recover/<session_id>", methods=["GET"])
+def recover_stream(session_id: str):
+    """Recover stream state from checkpoint"""
+    try:
+        state = stream_state_mgr.restore_checkpoint(session_id)
+        if state:
+            log_event(
+                service="streaming_server",
+                event="stream_recovered",
+                status="info",
+                message="Stream state recovered from checkpoint",
+                extra={"session_id": session_id, "stage": state.get("stage")},
+            )
+            stream_events_total.labels(event_type="stream_recovery").inc()
+            return jsonify({"status": "recovered", "state": state}), 200
+        else:
+            log_event(
+                service="streaming_server",
+                event="stream_recovery_failed",
+                status="warn",
+                message="No checkpoint found for stream recovery",
+                extra={"session_id": session_id},
+            )
+            stream_errors_total.labels(error_type="recovery_not_found").inc()
+            return jsonify({"status": "not_found"}), 404
+    except Exception as e:
+        log_event(
+            service="streaming_server",
+            event="stream_recovery_error",
+            status="error",
+            message="Stream recovery failed",
+            extra={"session_id": session_id, "error": str(e)},
+        )
+        stream_errors_total.labels(error_type="recovery_error").inc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# --------------------------------------------------------------------------
 # Entrypoint
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 7000))
+    
+    # Ensure health monitor is stopped on exit
+    import atexit
+    atexit.register(health_monitor.stop)
+    
     app.run(host="0.0.0.0", port=port, threaded=True)

@@ -22,7 +22,7 @@ import requests
 import boto3
 import botocore.exceptions
 
-from celery_app import celery
+from celery_app import celery, safe_task_wrapper  # ← ADD safe_task_wrapper import
 from gpt_client import generate_reply
 from logging_utils import log_event
 
@@ -31,18 +31,15 @@ from logging_utils import log_event
 # --------------------------------------------------------------------------
 import metrics_collector as metrics  # type: ignore
 
-# optional external redis client (for cache)
-try:
-    from redis_client import get_client as _get_redis_client, redis_client as redis_client_singleton  # type: ignore
-    def _redis() -> Optional[object]:
-        try:
-            return _get_redis_client()
-        except Exception:
-            return redis_client_singleton
-except Exception:
-    _get_redis_client = lambda: None  # type: ignore
-    redis_client_singleton = None  # type: ignore
-    def _redis() -> Optional[object]:
+# --------------------------------------------------------------------------
+# Centralized Redis client (simplified)
+# --------------------------------------------------------------------------
+from redis_client import get_redis_client
+
+def _redis() -> Optional[object]:
+    try:
+        return get_redis_client()
+    except Exception:
         return None
 
 # --------------------------------------------------------------------------
@@ -97,36 +94,29 @@ CELERY_RETRY_MAX = int(os.getenv("CELERY_RETRY_MAX", "5"))
 CELERY_RETRY_BACKOFF_MAX = int(os.getenv("CELERY_RETRY_BACKOFF_MAX", "600"))
 
 # --------------------------------------------------------------------------
-# R2 / S3 client setup
+# R2 / S3 client setup (using centralized client)
 # --------------------------------------------------------------------------
 _s3_client = None
 
 def _get_s3_client():
-    """Lazily create a boto3 S3 client for Cloudflare R2."""
+    """Lazily create a boto3 S3 client using centralized R2 client."""
     global _s3_client
     if _s3_client is not None:
         return _s3_client
 
-    if not (R2_ACCOUNT_ID and R2_ACCESS_KEY_ID and R2_SECRET_ACCESS_KEY and R2_BUCKET_NAME):
-        log_event(service="tasks", event="r2_config_incomplete", status="warn",
-                  message="R2 configuration incomplete; uploads disabled")
-        return None
-
     try:
-        endpoint = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-        _s3_client = boto3.client(
-            "s3",
-            endpoint_url=endpoint,
-            aws_access_key_id=R2_ACCESS_KEY_ID,
-            aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-            region_name=R2_REGION,
-        )
-        log_event(service="tasks", event="r2_client_created", status="ok",
-                  message="R2 boto3 client created", extra={"endpoint": endpoint})
+        from r2_client import get_r2_client
+        _s3_client = get_r2_client()
+        if _s3_client:
+            log_event(service="tasks", event="r2_client_retrieved", status="ok",
+                      message="Got centralized R2 client via r2_client.py")
+        else:
+            log_event(service="tasks", event="r2_client_unavailable", status="warn",
+                      message="Central R2 client not available")
         return _s3_client
     except Exception as e:
         log_event(service="tasks", event="r2_client_failed", status="error",
-                  message="Failed to create R2 client",
+                  message="Failed to get R2 client from r2_client.py",
                   extra={"error": str(e), "stack": traceback.format_exc()})
         return None
 
@@ -400,8 +390,20 @@ def perform_tts_core(payload: Any, raise_on_error: bool = True) -> Dict[str, Any
     retry_backoff_max=CELERY_RETRY_BACKOFF_MAX,
     retry_kwargs={"max_retries": CELERY_RETRY_MAX},
 )
+@safe_task_wrapper  # ← ADD safe_task_wrapper decorator
 def _run_tts_task(self, payload=None):
-    return perform_tts_core(payload, raise_on_error=True)
+    # ADD circuit breaker awareness and task-specific metrics
+    metrics.inc_metric("task_run_tts_started_total")
+    
+    # Check Redis availability before proceeding
+    redis_client = _redis()
+    if not redis_client:
+        log_event(service="tasks", event="redis_unavailable_at_task_start", status="warn",
+                  message="Redis unavailable at task start - proceeding without cache")
+    
+    result = perform_tts_core(payload, raise_on_error=True)
+    metrics.inc_metric("task_run_tts_completed_total")
+    return result
 
 class RunTTSProxy:
     def __init__(self, celery_task):
@@ -424,7 +426,11 @@ run_tts = RunTTSProxy(_run_tts_task)
 # GPT + TTS Inference
 # --------------------------------------------------------------------------
 @celery.task(name="tasks.run_inference", bind=True)
+@safe_task_wrapper  # ← ADD safe_task_wrapper decorator
 def run_inference(self, payload):
+    # ADD task-specific metrics and circuit breaker awareness
+    metrics.inc_metric("task_run_inference_started_total")
+    
     payload = normalize_payload(payload)
     trace_id = payload.get("trace_id") or get_trace()
     session_id = payload.get("session_id") or str(uuid.uuid4())
@@ -445,9 +451,12 @@ def run_inference(self, payload):
                   message="Inference complete, TTS enqueued",
                   trace_id=trace_id, session_id=session_id,
                   extra={"latency_ms": latency_ms})
+        
+        metrics.inc_metric("task_run_inference_completed_total")
         return {"reply": reply_text, "latency_ms": latency_ms, "trace_id": trace_id}
     except Exception as e:
         metrics.inc_metric("inference_failures_total")
+        metrics.inc_metric("task_run_inference_failed_total")  # ← ADD task-specific failure metric
         log_event(service="tasks", event="inference_error", status="error",
                   message="Inference failed",
                   trace_id=trace_id, session_id=session_id,

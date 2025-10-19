@@ -1,44 +1,28 @@
 """
-redis_client.py — Phase 11-C (Telemetry + Auto-Recoverable Redis Singleton)
----------------------------------------------------------------------------
-Centralized, telemetry-aware Redis client for Sara AI Core.
-Integrates with structured logging (logging_utils.log_event)
-and provides self-healing connection management for all services.
+redis_client.py — Phase 11-D Compliant
+Centralized, telemetry-aware Redis client with self-healing connections.
 """
 
 import os
 import redis
 import time
 from typing import Optional
+
 from logging_utils import log_event
+from config import Config
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
 
-DEFAULT_REDIS_URL = "redis://localhost:6379/0"
+# Connection Management
+_redis_client: Optional[redis.Redis] = None
+
 _REDIS_CONNECT_TIMEOUT = 5
 _REDIS_SOCKET_TIMEOUT = 5
 _REDIS_HEALTH_CHECK_INTERVAL = 30
 
-# ---------------------------------------------------------------------------
-# Connection Management
-# ---------------------------------------------------------------------------
-
-def get_redis_url() -> str:
-    """Resolve Redis URL from environment or fallback."""
-    return (
-        os.getenv("REDIS_URL")
-        or os.getenv("REDIS_HOST")
-        or DEFAULT_REDIS_URL
-    )
-
-_redis_client: Optional[redis.Redis] = None
-
 
 def _connect() -> Optional[redis.Redis]:
     """Attempt to establish a Redis connection and perform a health check."""
-    url = get_redis_url()
+    url = Config.REDIS_URL
     try:
         client = redis.Redis.from_url(
             url,
@@ -98,22 +82,13 @@ def get_client() -> Optional[redis.Redis]:
     return _redis_client
 
 
-# ---------------------------------------------------------------------------
 # Public Singleton
-# ---------------------------------------------------------------------------
-
 redis_client: Optional[redis.Redis] = get_client()
 
-
-# ---------------------------------------------------------------------------
-# Utility Helpers (Telemetry-Aware)
-# ---------------------------------------------------------------------------
 
 def increment_metric(key: str, field: str, amount: int = 1) -> None:
     """
     Increment a Redis hash field safely.
-    Example:
-        increment_metric("metrics:tts", "uploads")
     """
     client = get_client()
     if not client:
@@ -172,15 +147,6 @@ def health_check() -> dict:
     return {
         "status": status,
         "latency_ms": latency_ms,
-        "url": get_redis_url(),
+        "url": Config.REDIS_URL,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-
-
-# ---------------------------------------------------------------------------
-# Smoke Test
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    hc = health_check()
-    print(f"[redis_client] Health: {hc}")

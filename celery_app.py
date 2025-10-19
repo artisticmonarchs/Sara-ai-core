@@ -1,24 +1,24 @@
 """
-celery_app.py — Phase 6 Ready (Flattened Structure)
-Initializes Celery app and connects to Redis broker and backend.
+celery_app.py — Phase 11-D Compliant
+Celery initialization with unified metrics, centralized config, and structured logging.
 """
 
-import os
-import logging
+import time
 from celery import Celery
-from logging_utils import log_event      # ✅ fixed import
 
-logger = logging.getLogger("celery_app")
+# Unified Observability Imports
+from config import Config
+from logging_utils import log_event
+from metrics_registry import restore_snapshot_to_collector
+from global_metrics_store import start_background_sync
+from redis_client import get_client, health_check as redis_health_check
 
-# Redis configuration
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-
-# Initialize Celery (named 'celery' for Procfile alignment)
+# Celery Initialization
 celery = Celery(
-    "sara_ai",                           # name can stay as identifier; not a module path
-    broker=REDIS_URL,
-    backend=REDIS_URL,
-    include=["tasks"],                   # ✅ fixed include path
+    "sara_ai",
+    broker=Config.REDIS_URL,
+    backend=Config.REDIS_URL,
+    include=["tasks"],
 )
 
 celery.conf.update(
@@ -28,13 +28,75 @@ celery.conf.update(
     accept_content=["json"],
     task_acks_late=True,
     worker_prefetch_multiplier=1,
-    worker_concurrency=2,
+    worker_concurrency=2, # Fixed value for consistency
 )
 
-# Startup banner log
+def validate_redis_connection():
+    """Validate Redis connectivity with retry logic."""
+    retries = 3
+    for i in range(retries):
+        try:
+            client = get_client()
+            if client and client.ping():
+                log_event(
+                    service="celery",
+                    event="redis_connection_ok",
+                    status="ok",
+                    message=f"Connected to Redis at {Config.REDIS_URL}"
+                )
+                return True
+        except Exception as e:
+            log_event(
+                service="celery",
+                event="redis_connection_failed",
+                status="warning",
+                message=f"Retry {i+1}/{retries}: {str(e)}"
+            )
+            time.sleep(2)
+
+    log_event(
+        service="celery",
+        event="redis_connection_failed_permanent",
+        status="error",
+        message="Redis unreachable after retries."
+    )
+    return False
+
+# Validate Redis on startup
+validate_redis_connection()
+
+# Metrics Restoration and Global Sync Startup
+try:
+    # Import metrics_collector for restoration
+    import metrics_collector
+    restored_ok = restore_snapshot_to_collector(metrics_collector)
+    if restored_ok:
+        log_event(
+            service="celery",
+            event="metrics_restored",
+            status="info",
+            message="Restored metrics registry at worker startup"
+        )
+
+    start_background_sync()
+    log_event(
+        service="celery",
+        event="global_metrics_sync_started",
+        status="info",
+        message="Started background metrics sync"
+    )
+except Exception as e:
+    log_event(
+        service="celery",
+        event="metrics_startup_failed",
+        status="error",
+        message=f"Metrics startup failed: {str(e)}"
+    )
+
+# Startup Banner Log
 log_event(
     service="celery",
     event="startup",
     status="ok",
-    message=f"Celery app initialized with Redis broker: {REDIS_URL}",
+    message=f"Celery app initialized with Redis broker: {Config.REDIS_URL}"
 )

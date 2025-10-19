@@ -1,11 +1,6 @@
 """
-logger_json.py — Phase 10K-E
-Structured JSON Logger (Safe Formatter)
----------------------------------------
-Updated for Phase 10K-E:
-- Reads from record.structured (Phase 10K fix)
-- Avoids overwriting 'message'
-- Maintains ISO timestamps, trace/session awareness
+logger_json.py — Phase 11-D Compliant
+Structured JSON Logger with trace/session awareness.
 """
 
 import json
@@ -14,9 +9,6 @@ import sys
 from datetime import datetime
 
 
-# --------------------------------------------------------------------------
-# JSON Formatter
-# --------------------------------------------------------------------------
 class JsonFormatter(logging.Formatter):
     """Formats logs as one-line JSON with consistent field names."""
 
@@ -50,9 +42,6 @@ class JsonFormatter(logging.Formatter):
             return f"[JsonFormatter error: {e}] {record.getMessage()}"
 
 
-# --------------------------------------------------------------------------
-# Logger Factory
-# --------------------------------------------------------------------------
 def get_json_logger(name: str = "sara-ai-core") -> logging.Logger:
     """Return a logger configured for structured JSON output."""
     logger = logging.getLogger(name)
@@ -65,22 +54,3 @@ def get_json_logger(name: str = "sara-ai-core") -> logging.Logger:
         logger.propagate = False  # prevent duplicates
 
     return logger
-
-
-# --------------------------------------------------------------------------
-# Smoke Test
-# --------------------------------------------------------------------------
-if __name__ == "__main__":
-    test_logger = get_json_logger("sara-ai-core-test")
-    test_logger.info(
-        "json_logger_ready",
-        extra={"structured": {
-            "service": "logger_json",
-            "event": "init_test",
-            "status": "ok",
-            "trace_id": "test-trace-123",
-            "session_id": "demo-session",
-            "phase": "10K-E"
-        }},
-    )
-    print("✅ logger_json.py smoke test complete — JSON log emitted.")

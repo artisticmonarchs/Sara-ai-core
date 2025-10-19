@@ -9,6 +9,8 @@ Key fixes (Phase 11-D):
  - observe_latency persists counts & sums to Redis so global latencies are available.
  - Adds metric index (SADD) for discovery and TTL refresh on writes.
  - Adds rate-limited Redis error logging.
+ - Phase 11-D enhancements: structured logging, config integration, circuit breaker awareness,
+   health metrics, fault-tolerant sync loop, and Prometheus endpoint compatibility.
 """
 
 from __future__ import annotations
@@ -24,23 +26,100 @@ import traceback
 
 from logging_utils import log_event
 
+# --------------------------------------------------------------------------
+# Phase 11-D Configuration Integration
+# --------------------------------------------------------------------------
+try:
+    from config import config, get_metrics_config
+except ImportError:
+    # Fallback configuration for backward compatibility
+    class FallbackConfig:
+        SERVICE_NAME = os.getenv("SERVICE_NAME", "unknown_service")
+        ENABLE_METRICS_SYNC = os.getenv("ENABLE_METRICS_SYNC", "true").lower() == "true"
+        METRICS_SYNC_INTERVAL = int(os.getenv("METRICS_SYNC_INTERVAL", "30"))
+        SNAPSHOT_INTERVAL = int(os.getenv("SNAPSHOT_INTERVAL", "60"))
+        ENABLE_METRICS_PERSISTENCE = os.getenv("ENABLE_METRICS_PERSISTENCE", "true").lower() == "true"
+        METRICS_ENDPOINT_ENABLED = os.getenv("METRICS_ENDPOINT_ENABLED", "true").lower() == "true"
+    
+    config = FallbackConfig()
+    
+    def get_metrics_config():
+        return {
+            "enable_sync": config.ENABLE_METRICS_SYNC,
+            "sync_interval": config.METRICS_SYNC_INTERVAL,
+            "snapshot_interval": config.SNAPSHOT_INTERVAL,
+            "enable_persistence": config.ENABLE_METRICS_PERSISTENCE,
+            "enable_endpoint": config.METRICS_ENDPOINT_ENABLED,
+        }
+
 # Shared REGISTRY import (we no longer use local REGISTRY for generate_latest here)
 from core.metrics_registry import REGISTRY  # type: ignore
 
 # Prometheus client imports for temp registry construction & exposition
-from prometheus_client import CollectorRegistry, Gauge, generate_latest
+from prometheus_client import CollectorRegistry, Gauge, generate_latest, Counter, Histogram
 
-# Redis client (centralized)
+# --------------------------------------------------------------------------
+# Phase 11-D Redis Client with Circuit Breaker Integration
+# --------------------------------------------------------------------------
 try:
-    from redis_client import redis_client as _redis_client  # type: ignore
+    from redis_client import (
+        safe_redis_operation, 
+        increment_metric_redis, 
+        get_metric_redis,
+        set_key_redis,
+        get_key_redis,
+        save_snapshot,
+        load_snapshot,
+        get_circuit_breaker_status
+    )
+    _has_redis_client = True
 except Exception:
-    _redis_client = None
+    _has_redis_client = False
+    # Fallback implementations
+    def safe_redis_operation(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    
+    def increment_metric_redis(*args, **kwargs):
+        pass
+    
+    def get_metric_redis(*args, **kwargs):
+        return 0
+    
+    def set_key_redis(*args, **kwargs):
+        return False
+    
+    def get_key_redis(*args, **kwargs):
+        return None
+    
+    def save_snapshot(*args, **kwargs):
+        return False
+    
+    def load_snapshot(*args, **kwargs):
+        return None
+    
+    def get_circuit_breaker_status():
+        return {"state": "DISABLED", "enabled": False}
 
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# Phase 11-D Health Metrics
+# --------------------------------------------------------------------------
+_health_metrics = {
+    "metrics_collector_uptime_seconds": time.time(),
+    "metrics_sync_success_total": 0,
+    "metrics_sync_failure_total": 0,
+    "metrics_persistence_success_total": 0,
+    "metrics_persistence_failure_total": 0,
+    "last_successful_sync": 0,
+    "last_successful_persistence": 0,
+}
+
+# --------------------------------------------------------------------------
 # In-process counters & latency buckets (thread-safe)
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
 _DEFAULT_ROLLING_WINDOW = 1000  # samples per latency metric
-_lock = threading.Lock()
+_lock = threading.RLock()  # Upgraded to RLock for Phase 11-D thread safety
 _counters: Dict[str, int] = defaultdict(int)
 _latency_buckets: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=_DEFAULT_ROLLING_WINDOW))
 
@@ -49,7 +128,7 @@ REDIS_METRIC_PREFIX = "prometheus:metrics:"  # prometheus:metrics:<service>:<met
 LATENCY_SUBPREFIX = "latency"               # prometheus:metrics:<service>:latency:<name>:count|sum
 REDIS_INDEX_KEY = "prometheus:metrics:index"  # set of metric names for quick discovery
 
-SERVICE_NAME = os.getenv("SERVICE_NAME", "unknown_service")
+SERVICE_NAME = config.SERVICE_NAME
 
 # TTL for metric keys (days -> seconds)
 REDIS_METRIC_TTL_DAYS = int(os.getenv("REDIS_METRIC_TTL_DAYS", "30"))
@@ -62,6 +141,31 @@ REDIS_METRIC_SNAPSHOT_KEY = os.getenv("REDIS_METRIC_SNAPSHOT_KEY", "global_metri
 _redis_error_timestamps: Dict[str, float] = {}
 _REDIS_LOG_RATE_LIMIT_SEC = int(os.getenv("REDIS_LOG_RATE_LIMIT_SEC", "60"))
 
+# Phase 11-D Sync Control
+_sync_enabled = get_metrics_config()["enable_sync"]
+_sync_interval = get_metrics_config()["sync_interval"]
+_snapshot_interval = get_metrics_config()["snapshot_interval"]
+_sync_thread: Optional[threading.Thread] = None
+_sync_running = False
+_sync_lock = threading.Lock()
+
+# --------------------------------------------------------------------------
+# Phase 11-D Structured Logging Helpers
+# --------------------------------------------------------------------------
+def _log_metric_event(event: str, status: str, message: str, **extra):
+    """Structured logging for metric events with Phase 11-D context."""
+    log_event(
+        service="metrics_collector",
+        event=event,
+        status=status,
+        message=message,
+        extra={
+            "service_name": SERVICE_NAME,
+            "sync_enabled": _sync_enabled,
+            "sync_interval": _sync_interval,
+            **extra
+        }
+    )
 
 def _rate_limited_redis_log(event: str, level: str = "warn", **kwargs):
     """Log Redis-related issues but rate-limit repeated messages per event."""
@@ -70,7 +174,7 @@ def _rate_limited_redis_log(event: str, level: str = "warn", **kwargs):
     if now - last > _REDIS_LOG_RATE_LIMIT_SEC:
         _redis_error_timestamps[event] = now
         try:
-            log_event(service="metrics", event=event, status=level, **kwargs)
+            _log_metric_event(event, level, **kwargs)
         except Exception:
             # fallback print to avoid silent failures
             try:
@@ -78,11 +182,173 @@ def _rate_limited_redis_log(event: str, level: str = "warn", **kwargs):
             except Exception:
                 pass
 
+def _log_sync_activity(event: str, status: str, message: str, **extra):
+    """Structured logging for sync activities."""
+    _log_metric_event(
+        f"sync_{event}",
+        status,
+        message,
+        sync_interval=_sync_interval,
+        snapshot_interval=_snapshot_interval,
+        **extra
+    )
 
+# --------------------------------------------------------------------------
+# Phase 11-D Fault-Tolerant Sync Loop
+# --------------------------------------------------------------------------
+def _start_sync_loop():
+    """Start the background metrics sync loop."""
+    global _sync_thread, _sync_running
+    
+    with _sync_lock:
+        if _sync_thread and _sync_thread.is_alive():
+            return
+        
+        _sync_running = True
+        _sync_thread = threading.Thread(target=_sync_loop, daemon=True, name="MetricsSync")
+        _sync_thread.start()
+        _log_metric_event(
+            "sync_loop_started",
+            "info",
+            "Background metrics sync loop started",
+            sync_interval=_sync_interval,
+            snapshot_interval=_snapshot_interval
+        )
+
+def _stop_sync_loop():
+    """Stop the background metrics sync loop."""
+    global _sync_running
+    _sync_running = False
+    _log_metric_event("sync_loop_stopped", "info", "Background metrics sync loop stopped")
+
+def _sync_loop():
+    """Background loop for syncing metrics and snapshots."""
+    last_sync = 0
+    last_snapshot = 0
+    
+    while _sync_running:
+        try:
+            current_time = time.time()
+            metrics_config = get_metrics_config()
+            
+            # Sync metrics to Redis if enabled and interval elapsed
+            if metrics_config["enable_sync"] and (current_time - last_sync) >= metrics_config["sync_interval"]:
+                if _sync_metrics_to_redis():
+                    last_sync = current_time
+                    _health_metrics["metrics_sync_success_total"] += 1
+                    _health_metrics["last_successful_sync"] = current_time
+                else:
+                    _health_metrics["metrics_sync_failure_total"] += 1
+            
+            # Create snapshots if enabled and interval elapsed
+            if metrics_config["enable_persistence"] and (current_time - last_snapshot) >= metrics_config["snapshot_interval"]:
+                if _create_and_save_snapshot():
+                    last_snapshot = current_time
+                    _health_metrics["metrics_persistence_success_total"] += 1
+                    _health_metrics["last_successful_persistence"] = current_time
+                else:
+                    _health_metrics["metrics_persistence_failure_total"] += 1
+            
+            # Update health metrics
+            _health_metrics["metrics_collector_uptime_seconds"] = current_time - _health_metrics["metrics_collector_uptime_seconds"]
+            
+            time.sleep(1)  # Check every second for responsiveness
+            
+        except Exception as e:
+            _log_sync_activity(
+                "loop_error",
+                "error",
+                "Unhandled error in sync loop",
+                error=str(e),
+                stack_trace=traceback.format_exc()
+            )
+            time.sleep(5)  # Back off on errors
+
+def _sync_metrics_to_redis() -> bool:
+    """Sync current metrics to Redis with circuit breaker protection."""
+    try:
+        with _lock:
+            counters_copy = dict(_counters)
+            latencies_copy = {k: list(v) for k, v in _latency_buckets.items()}
+        
+        # Sync counters
+        for metric_name, value in counters_copy.items():
+            safe_redis_operation("sync_counter")(lambda client: client.set(
+                _redis_key(metric_name), 
+                value, 
+                ex=REDIS_METRIC_TTL
+            ))
+        
+        # Sync latency aggregates
+        for metric_name, samples in latencies_copy.items():
+            if samples:
+                count_key, sum_key = _redis_latency_keys(metric_name)
+                total_sum = sum(samples)
+                
+                safe_redis_operation("sync_latency_count")(lambda client: client.set(
+                    count_key, len(samples), ex=REDIS_METRIC_TTL
+                ))
+                safe_redis_operation("sync_latency_sum")(lambda client: client.set(
+                    sum_key, total_sum, ex=REDIS_METRIC_TTL
+                ))
+        
+        _log_sync_activity("metrics_synced", "info", "Metrics successfully synced to Redis")
+        return True
+        
+    except Exception as e:
+        _log_sync_activity(
+            "metrics_sync_failed",
+            "error",
+            "Failed to sync metrics to Redis",
+            error=str(e),
+            circuit_breaker_state=get_circuit_breaker_status()["state"]
+        )
+        return False
+
+def _create_and_save_snapshot() -> bool:
+    """Create and save a metrics snapshot with Phase 11-D persistence."""
+    try:
+        snapshot = get_snapshot()
+        snapshot_key = f"metrics_snapshot:{SERVICE_NAME}:{int(time.time())}"
+        
+        success = save_snapshot(
+            snapshot_key,
+            snapshot,
+            ttl=REDIS_METRIC_TTL
+        )
+        
+        if success:
+            _log_sync_activity(
+                "snapshot_saved",
+                "info",
+                "Metrics snapshot saved successfully",
+                snapshot_key=snapshot_key
+            )
+        else:
+            _log_sync_activity(
+                "snapshot_failed",
+                "warn",
+                "Failed to save metrics snapshot",
+                circuit_breaker_state=get_circuit_breaker_status()["state"]
+            )
+        
+        return success
+        
+    except Exception as e:
+        _log_sync_activity(
+            "snapshot_error",
+            "error",
+            "Error creating/saving metrics snapshot",
+            error=str(e)
+        )
+        return False
+
+# --------------------------------------------------------------------------
+# Redis Key Helpers
+# --------------------------------------------------------------------------
 def _redis_key(metric_name: str) -> str:
     """Return a Redis key namespaced with the service name (legacy per-service totals)."""
     return f"{REDIS_METRIC_PREFIX}{SERVICE_NAME}:{metric_name}"
-
 
 def _redis_latency_keys(metric_name: str) -> Tuple[str, str]:
     """Return (count_key, sum_key) for a latency metric for this service."""
@@ -90,22 +356,23 @@ def _redis_latency_keys(metric_name: str) -> Tuple[str, str]:
     base = f"{REDIS_METRIC_PREFIX}{SERVICE_NAME}:{LATENCY_SUBPREFIX}:{metric_name}"
     return (f"{base}:count", f"{base}:sum")
 
-
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Backwards-compatible console shim
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
 def init_redis_client(*args, **kwargs) -> None:
     try:
-        log_event(service="metrics", event="init_redis_client_deprecated",
-                  status="info" if _redis_client else "warn",
-                  message=f"init_redis_client called; redis_present={bool(_redis_client)}")
+        _log_metric_event(
+            "init_redis_client_deprecated",
+            "info" if _has_redis_client else "warn",
+            "init_redis_client called",
+            redis_present=_has_redis_client
+        )
     except Exception:
         pass
 
-
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Counter helpers
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
 def increment_metric(metric_name: str, value: int = 1) -> bool:
     """Increment local counter and write per-service Redis total (best-effort).
     Also ensure metric index contains the metric_name and key TTL refreshed.
@@ -117,25 +384,42 @@ def increment_metric(metric_name: str, value: int = 1) -> bool:
         _rate_limited_redis_log("increment_local_failed", "error", message=str(e), stack=traceback.format_exc())
         # continue to try Redis writes even if local fails
 
-    if _redis_client:
+    if _has_redis_client:
         try:
-            pipe = _redis_client.pipeline()
-            key = _redis_key(metric_name)
-            pipe.incrby(key, int(value))
-            # refresh TTL & add to index
-            pipe.expire(key, REDIS_METRIC_TTL)
-            pipe.sadd(REDIS_INDEX_KEY, metric_name)
-            pipe.execute()
+            # Use Phase 11-D safe Redis operation
+            success = safe_redis_operation("increment_metric_persist")(
+                lambda client: client.incrby(_redis_key(metric_name), int(value))
+            )
+            
+            if success is not None:
+                # Refresh TTL & add to index using safe operations
+                safe_redis_operation("refresh_metric_ttl")(
+                    lambda client: client.expire(_redis_key(metric_name), REDIS_METRIC_TTL)
+                )
+                safe_redis_operation("add_metric_index")(
+                    lambda client: client.sadd(REDIS_INDEX_KEY, metric_name)
+                )
+                
+                _log_metric_event(
+                    "metric_incremented",
+                    "info",
+                    "Metric incremented successfully",
+                    metric_name=metric_name,
+                    value=value,
+                    new_total=_counters[metric_name]
+                )
+            else:
+                _rate_limited_redis_log("redis_incr_failed", "warn",
+                                        message="Failed to increment Redis metric (circuit breaker)",
+                                        extra={"metric": metric_name, "value": value})
         except Exception as e:
             _rate_limited_redis_log("redis_incr_failed", "warn",
                                     message="Failed to incrby Redis metric (best-effort)",
                                     extra={"metric": metric_name, "value": value, "error": str(e)})
     return True
 
-
 def inc_metric(name: str, amount: int = 1) -> bool:
     return increment_metric(name, amount)
-
 
 def set_metric(name: str, value: int) -> bool:
     """Overwrite local and per-service Redis metric (best-effort)."""
@@ -145,19 +429,33 @@ def set_metric(name: str, value: int) -> bool:
     except Exception as e:
         _rate_limited_redis_log("set_local_failed", "error", message=str(e), stack=traceback.format_exc())
 
-    if _redis_client:
+    if _has_redis_client:
         try:
-            pipe = _redis_client.pipeline()
-            pipe.set(_redis_key(name), int(value))
-            pipe.expire(_redis_key(name), REDIS_METRIC_TTL)
-            pipe.sadd(REDIS_INDEX_KEY, name)
-            pipe.execute()
+            success = safe_redis_operation("set_metric_persist")(
+                lambda client: client.set(_redis_key(name), int(value), ex=REDIS_METRIC_TTL)
+            )
+            
+            if success:
+                safe_redis_operation("add_metric_index")(
+                    lambda client: client.sadd(REDIS_INDEX_KEY, name)
+                )
+                
+                _log_metric_event(
+                    "metric_set",
+                    "info",
+                    "Metric set successfully",
+                    metric_name=name,
+                    value=value
+                )
+            else:
+                _rate_limited_redis_log("redis_set_failed", "warn",
+                                        message="Failed to set metric in Redis (circuit breaker)",
+                                        extra={"metric": name, "value": value})
         except Exception as e:
             _rate_limited_redis_log("redis_set_failed", "warn",
                                     message="Failed to set metric in Redis (best-effort)",
                                     extra={"metric": name, "value": value, "error": str(e)})
     return True
-
 
 def get_metric_total(metric_name: str) -> int:
     """
@@ -165,30 +463,39 @@ def get_metric_total(metric_name: str) -> int:
     If Redis is available, sum across all services: pattern prometheus:metrics:*:<metric_name>.
     Otherwise fall back to local in-memory counter.
     """
-    if _redis_client:
+    if _has_redis_client:
         try:
             # Use SCAN to find keys matching pattern and mget them in bulk
             pattern = f"{REDIS_METRIC_PREFIX}*:{metric_name}"
-            keys = []
-            for k in _redis_client.scan_iter(match=pattern):
-                keys.append(k)
-            if not keys:
-                # No Redis keys (maybe first time) -> fallback to local
+            
+            def scan_and_sum(client):
+                keys = []
+                for k in client.scan_iter(match=pattern):
+                    keys.append(k)
+                if not keys:
+                    return None
+                vals = client.mget(keys)
+                s = 0
+                for v in vals:
+                    try:
+                        if v is None:
+                            continue
+                        if isinstance(v, bytes):
+                            v = v.decode("utf-8")
+                        s += int(v)
+                    except Exception:
+                        continue
+                return s
+            
+            result = safe_redis_operation("get_metric_total")(scan_and_sum)
+            
+            if result is not None:
+                return int(result)
+            else:
+                # No Redis keys or circuit breaker blocked -> fallback to local
                 with _lock:
                     return int(_counters.get(metric_name, 0))
-            vals = _redis_client.mget(keys)
-            s = 0
-            for v in vals:
-                try:
-                    if v is None:
-                        continue
-                    if isinstance(v, bytes):
-                        v = v.decode("utf-8")
-                    s += int(v)
-                except Exception:
-                    # skip unparsable values
-                    continue
-            return int(s)
+                    
         except Exception as e:
             _rate_limited_redis_log("redis_get_total_failed", "warn",
                                     message="Failed to sum Redis metric keys; falling back to local",
@@ -199,10 +506,9 @@ def get_metric_total(metric_name: str) -> int:
         with _lock:
             return int(_counters.get(metric_name, 0))
 
-
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Latency handling (local + persisted aggregates)
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
 def observe_latency(name: str, value_ms: float) -> bool:
     """
     Record latency sample locally and persist aggregated count & sum to Redis (best-effort).
@@ -219,34 +525,49 @@ def observe_latency(name: str, value_ms: float) -> bool:
         _rate_limited_redis_log("observe_local_failed", "error", message=str(e), stack=traceback.format_exc())
         # continue to persist to redis if possible
 
-    if _redis_client:
+    if _has_redis_client:
         try:
             count_key, sum_key = _redis_latency_keys(name)
-            pipe = _redis_client.pipeline()
-            pipe.incrby(count_key, 1)
-            # Use INCRBYFLOAT if available to add fractional ms; fallback to incrby with int(ms)
-            try:
-                pipe.incrbyfloat(sum_key, float(val))
-            except Exception:
-                # older redis-py may not have incrbyfloat; fallback to get+set approach
-                cur = _redis_client.get(sum_key)
-                curf = float(cur) if cur else 0.0
-                pipe.set(sum_key, curf + float(val))
-            pipe.expire(count_key, REDIS_METRIC_TTL)
-            pipe.expire(sum_key, REDIS_METRIC_TTL)
-            # add latency metric name to index for discovery
-            pipe.sadd(REDIS_INDEX_KEY, f"{LATENCY_SUBPREFIX}:{name}")
-            pipe.execute()
+            
+            def persist_latency(client):
+                pipe = client.pipeline()
+                pipe.incrby(count_key, 1)
+                try:
+                    pipe.incrbyfloat(sum_key, float(val))
+                except Exception:
+                    # older redis-py may not have incrbyfloat; fallback to get+set approach
+                    cur = client.get(sum_key)
+                    curf = float(cur) if cur else 0.0
+                    pipe.set(sum_key, curf + float(val))
+                pipe.expire(count_key, REDIS_METRIC_TTL)
+                pipe.expire(sum_key, REDIS_METRIC_TTL)
+                pipe.sadd(REDIS_INDEX_KEY, f"{LATENCY_SUBPREFIX}:{name}")
+                return pipe.execute()
+            
+            success = safe_redis_operation("persist_latency")(persist_latency)
+            
+            if success is None:
+                _rate_limited_redis_log("redis_latency_write_failed", "warn",
+                                        message="Failed to persist latency aggregates (circuit breaker)",
+                                        extra={"latency": name, "value_ms": value_ms})
+            else:
+                _log_metric_event(
+                    "latency_observed",
+                    "info",
+                    "Latency observed and persisted",
+                    latency_name=name,
+                    value_ms=value_ms
+                )
+                
         except Exception as e:
             _rate_limited_redis_log("redis_latency_write_failed", "warn",
                                     message="Failed to persist latency aggregates (best-effort)",
                                     extra={"latency": name, "value_ms": value_ms, "error": str(e)})
     return True
 
-
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Snapshot
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
 def _compute_latency_stats(samples: List[float]) -> Dict[str, float]:
     if not samples:
         return {"count": 0, "avg": 0.0, "min": 0.0, "max": 0.0, "p50": 0.0, "p95": 0.0, "sum": 0.0}
@@ -273,14 +594,26 @@ def _compute_latency_stats(samples: List[float]) -> Dict[str, float]:
         "sum": round(sum(samples), 2),
     }
 
-
 def get_snapshot() -> Dict[str, Any]:
+    """Get comprehensive metrics snapshot with Phase 11-D health metrics."""
     try:
         with _lock:
             counters_copy = dict(_counters)
             latencies_copy = {k: list(v) for k, v in _latency_buckets.items()}
 
         latencies_stats = {n: _compute_latency_stats(v) for n, v in latencies_copy.items()}
+
+        # Include Phase 11-D health metrics
+        health_info = {
+            "uptime_seconds": time.time() - _health_metrics["metrics_collector_uptime_seconds"],
+            "sync_success_total": _health_metrics["metrics_sync_success_total"],
+            "sync_failure_total": _health_metrics["metrics_sync_failure_total"],
+            "persistence_success_total": _health_metrics["metrics_persistence_success_total"],
+            "persistence_failure_total": _health_metrics["metrics_persistence_failure_total"],
+            "last_successful_sync": _health_metrics["last_successful_sync"],
+            "last_successful_persistence": _health_metrics["last_successful_persistence"],
+            "circuit_breaker_state": get_circuit_breaker_status()["state"],
+        }
 
         # Avoid touching private internals of Prometheus objects; just report None if not available.
         streaming_info: Dict[str, Any] = {}
@@ -294,21 +627,28 @@ def get_snapshot() -> Dict[str, Any]:
             "counters": counters_copy,
             "latencies": latencies_stats,
             "streaming": streaming_info,
+            "health": health_info,
+            "config": get_metrics_config(),
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         return snapshot
     except Exception as e:
         try:
-            log_event(service="metrics", event="get_snapshot_failed", status="error",
-                      message=str(e), extra={"stack": traceback.format_exc()})
+            _log_metric_event("get_snapshot_failed", "error", message=str(e), stack=traceback.format_exc())
         except Exception:
             pass
-        return {"counters": {}, "latencies": {}, "streaming": {}, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        return {
+            "counters": {}, 
+            "latencies": {}, 
+            "streaming": {}, 
+            "health": {},
+            "config": {},
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        }
 
-
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Prometheus export (single canonical exposition using temporary registry)
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
 def export_prometheus() -> str:
     """
     Produce a consistent Prometheus exposition representing global totals.
@@ -325,9 +665,12 @@ def export_prometheus() -> str:
         metric_names = set()
 
         # 1) Discover names from Redis index if available
-        if _redis_client:
+        if _has_redis_client:
             try:
-                members = _redis_client.smembers(REDIS_INDEX_KEY)
+                def get_index_members(client):
+                    return client.smembers(REDIS_INDEX_KEY)
+                
+                members = safe_redis_operation("get_index_members")(get_index_members)
                 if members:
                     for m in members:
                         if isinstance(m, bytes):
@@ -356,37 +699,54 @@ def export_prometheus() -> str:
                 # Aggregate counts and sums across services from Redis if possible
                 total_count = 0
                 total_sum_ms = 0.0
-                if _redis_client:
+                if _has_redis_client:
                     try:
                         # pattern: prometheus:metrics:*:latency:<name>:count  and ...:sum
                         count_pattern = f"{REDIS_METRIC_PREFIX}*:{LATENCY_SUBPREFIX}:{latency_name}:count"
                         sum_pattern = f"{REDIS_METRIC_PREFIX}*:{LATENCY_SUBPREFIX}:{latency_name}:sum"
 
-                        # gather keys and mget
-                        ckeys = [k for k in _redis_client.scan_iter(match=count_pattern)]
-                        if ckeys:
-                            cvals = _redis_client.mget(ckeys)
+                        def aggregate_latency(client):
+                            ckeys = [k for k in client.scan_iter(match=count_pattern)]
+                            skeys = [k for k in client.scan_iter(match=sum_pattern)]
+                            
+                            cvals = client.mget(ckeys) if ckeys else []
+                            svals = client.mget(skeys) if skeys else []
+                            
+                            count_total = 0
                             for v in cvals:
                                 try:
                                     if v is None:
                                         continue
                                     if isinstance(v, bytes):
                                         v = v.decode("utf-8")
-                                    total_count += int(float(v))
+                                    count_total += int(float(v))
                                 except Exception:
                                     continue
-                        skeys = [k for k in _redis_client.scan_iter(match=sum_pattern)]
-                        if skeys:
-                            svals = _redis_client.mget(skeys)
+                            
+                            sum_total = 0.0
                             for v in svals:
                                 try:
                                     if v is None:
                                         continue
                                     if isinstance(v, bytes):
                                         v = v.decode("utf-8")
-                                    total_sum_ms += float(v)
+                                    sum_total += float(v)
                                 except Exception:
                                     continue
+                            
+                            return count_total, sum_total
+                        
+                        result = safe_redis_operation("aggregate_latency")(aggregate_latency)
+                        if result:
+                            total_count, total_sum_ms = result
+                        else:
+                            # Circuit breaker blocked -> fallback to local
+                            with _lock:
+                                local_samples = list(_latency_buckets.get(latency_name, []))
+                            local_stats = _compute_latency_stats(local_samples)
+                            total_count = int(local_stats.get("count", 0))
+                            total_sum_ms = float(local_stats.get("sum", 0.0))
+                            
                     except Exception as e:
                         _rate_limited_redis_log("redis_latency_aggregate_failed", "warn",
                                                 message="Failed to aggregate latency keys from Redis",
@@ -421,12 +781,14 @@ def export_prometheus() -> str:
             metric = entry
             # Compute global total via Redis aggregation if available
             total = 0
-            if _redis_client:
+            if _has_redis_client:
                 try:
-                    pattern = f"{REDIS_METRIC_PREFIX}*:{metric}"
-                    keys = [k for k in _redis_client.scan_iter(match=pattern)]
-                    if keys:
-                        vals = _redis_client.mget(keys)
+                    def aggregate_metric(client):
+                        pattern = f"{REDIS_METRIC_PREFIX}*:{metric}"
+                        keys = [k for k in client.scan_iter(match=pattern)]
+                        if not keys:
+                            return None
+                        vals = client.mget(keys)
                         s = 0
                         for v in vals:
                             try:
@@ -437,9 +799,13 @@ def export_prometheus() -> str:
                                 s += int(float(v))
                             except Exception:
                                 continue
-                        total = int(s)
+                        return s
+                    
+                    result = safe_redis_operation("aggregate_metric")(aggregate_metric)
+                    if result is not None:
+                        total = int(result)
                     else:
-                        # no redis keys -> fallback to local counter
+                        # Circuit breaker blocked -> fallback to local
                         with _lock:
                             total = int(_counters.get(metric, 0))
                 except Exception as e:
@@ -474,57 +840,114 @@ def export_prometheus() -> str:
             text = generate_latest(temp_registry).decode("utf-8")
             return text
         except Exception as e:
-            log_event(service="metrics", event="generate_latest_temp_failed", status="error",
-                      message="Failed to generate exposition from temp registry", extra={"error": str(e), "stack": traceback.format_exc()})
+            _log_metric_event("generate_latest_temp_failed", "error",
+                      message="Failed to generate exposition from temp registry", 
+                      extra={"error": str(e), "stack": traceback.format_exc()})
             return "# metrics_export_error 1\n"
     except Exception as e:
-        log_event(service="metrics", event="export_prometheus_unhandled", status="error",
-                  message="Unhandled error in export_prometheus", extra={"error": str(e), "stack": traceback.format_exc()})
+        _log_metric_event("export_prometheus_unhandled", "error",
+                  message="Unhandled error in export_prometheus", 
+                  extra={"error": str(e), "stack": traceback.format_exc()})
         return "# metrics_export_error 1\n"
 
-
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Redis snapshot push/pull helpers (compat)
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
 def push_metrics_snapshot_to_redis(snapshot: dict) -> bool:
     """Store the latest metrics snapshot in Redis as JSON under REDIS_METRIC_SNAPSHOT_KEY."""
-    if not _redis_client:
+    if not _has_redis_client:
         _rate_limited_redis_log("redis_unavailable_snapshot_save", "warn", message="Redis not configured; snapshot not saved.")
         return False
     try:
-        payload = json.dumps(snapshot)
-        _redis_client.set(REDIS_METRIC_SNAPSHOT_KEY, payload)
-        _redis_client.expire(REDIS_METRIC_SNAPSHOT_KEY, REDIS_METRIC_TTL)
-        log_event(service="metrics", event="snapshot_saved", status="info", message="Metrics snapshot saved")
-        return True
+        success = safe_redis_operation("push_snapshot")(
+            lambda client: client.set(REDIS_METRIC_SNAPSHOT_KEY, json.dumps(snapshot), ex=REDIS_METRIC_TTL)
+        )
+        
+        if success:
+            _log_metric_event("snapshot_saved", "info", "Metrics snapshot saved")
+        else:
+            _rate_limited_redis_log("snapshot_save_failed", "warn", 
+                                    message="Failed to save snapshot (circuit breaker)",
+                                    circuit_breaker_state=get_circuit_breaker_status()["state"])
+        
+        return bool(success)
     except Exception as e:
         _rate_limited_redis_log("snapshot_save_failed", "error", message=str(e), stack=traceback.format_exc())
         return False
 
-
 def pull_metrics_snapshot_from_redis() -> dict:
     """Retrieve the latest metrics snapshot from Redis. Returns empty dict if missing/error."""
-    if not _redis_client:
+    if not _has_redis_client:
         _rate_limited_redis_log("redis_unavailable_snapshot_load", "warn", message="Redis not configured; cannot load snapshot.")
         return {}
     try:
-        raw = _redis_client.get(REDIS_METRIC_SNAPSHOT_KEY)
-        if not raw:
-            return {}
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
-        data = json.loads(raw)
-        log_event(service="metrics", event="snapshot_loaded", status="info", message="Metrics snapshot loaded")
-        return data
+        def load_snapshot_data(client):
+            raw = client.get(REDIS_METRIC_SNAPSHOT_KEY)
+            if not raw:
+                return {}
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            return json.loads(raw)
+        
+        data = safe_redis_operation("pull_snapshot")(load_snapshot_data)
+        
+        if data:
+            _log_metric_event("snapshot_loaded", "info", "Metrics snapshot loaded")
+        else:
+            _rate_limited_redis_log("snapshot_load_failed", "warn", 
+                                    message="Failed to load snapshot (circuit breaker or empty)",
+                                    circuit_breaker_state=get_circuit_breaker_status()["state"])
+        
+        return data if data else {}
     except Exception as e:
         _rate_limited_redis_log("snapshot_load_failed", "warn", message=str(e), stack=traceback.format_exc())
         return {}
 
+# --------------------------------------------------------------------------
+# Phase 11-D Initialization
+# --------------------------------------------------------------------------
+def initialize_metrics_collector():
+    """Initialize the metrics collector with Phase 11-D features."""
+    metrics_config = get_metrics_config()
+    
+    _log_metric_event(
+        "initializing",
+        "info",
+        "Initializing metrics collector",
+        sync_enabled=metrics_config["enable_sync"],
+        persistence_enabled=metrics_config["enable_persistence"],
+        endpoint_enabled=metrics_config["enable_endpoint"]
+    )
+    
+    # Start sync loop if enabled
+    if metrics_config["enable_sync"]:
+        _start_sync_loop()
+    
+    _log_metric_event("initialized", "info", "Metrics collector initialized successfully")
 
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
 # Utilities
-# ------------------------------------------------------------------
+# --------------------------------------------------------------------------
 def reset_collector() -> None:
     with _lock:
         _counters.clear()
         _latency_buckets.clear()
+    _log_metric_event("collector_reset", "info", "Metrics collector reset")
+
+def get_health_status() -> Dict[str, Any]:
+    """Get health status for monitoring."""
+    return {
+        "uptime_seconds": time.time() - _health_metrics["metrics_collector_uptime_seconds"],
+        "sync_success_total": _health_metrics["metrics_sync_success_total"],
+        "sync_failure_total": _health_metrics["metrics_sync_failure_total"],
+        "persistence_success_total": _health_metrics["metrics_persistence_success_total"],
+        "persistence_failure_total": _health_metrics["metrics_persistence_failure_total"],
+        "last_successful_sync": _health_metrics["last_successful_sync"],
+        "last_successful_persistence": _health_metrics["last_successful_persistence"],
+        "sync_loop_running": _sync_running,
+        "circuit_breaker_state": get_circuit_breaker_status()["state"],
+        "service_name": SERVICE_NAME,
+    }
+
+# Initialize on module import
+initialize_metrics_collector()

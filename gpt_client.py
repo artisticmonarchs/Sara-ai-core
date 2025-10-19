@@ -1,15 +1,28 @@
 """
-gpt_client.py — Phase 10D (Final)
+gpt_client.py — Phase 11-D
 Handles GPT inference for Sara AI with full trace logging,
-Render-safe proxy cleanup, and fault-tolerant fallback.
+metrics integration, and fault-tolerant fallback.
 """
 
 import os
 import uuid
 import logging
+import time
 from openai import OpenAI
 from logging_utils import log_event
 
+# --------------------------------------------------------------------------
+# Phase 11-D Metrics Integration
+# --------------------------------------------------------------------------
+try:
+    from metrics_collector import increment_metric, observe_latency
+except ImportError:
+    # Fallback metrics functions for backward compatibility
+    def increment_metric(metric_name: str, value: int = 1):
+        pass
+    
+    def observe_latency(metric_name: str, latency_ms: float):
+        pass
 
 # --------------------------------------------------------------------------
 # Environment & Safety Fixes
@@ -44,9 +57,13 @@ logger.setLevel(logging.INFO)
 def generate_reply(prompt: str, trace_id: str | None = None) -> str:
     """
     Generate a GPT response from the given prompt.
-    Includes observability hooks and safe fallback on error.
+    Includes observability hooks, metrics, and safe fallback on error.
     """
     trace_id = trace_id or str(uuid.uuid4())
+    start_time = time.time()
+
+    # Phase 11-D: Increment request counter
+    increment_metric("gpt_requests_total")
 
     log_event(
         service="gpt_client",
@@ -67,6 +84,11 @@ def generate_reply(prompt: str, trace_id: str | None = None) -> str:
         )
 
         reply = response.choices[0].message.content.strip()
+        latency_ms = (time.time() - start_time) * 1000
+
+        # Phase 11-D: Record success metrics
+        increment_metric("gpt_success_total")
+        observe_latency("gpt_latency_ms", latency_ms)
 
         log_event(
             service="gpt_client",
@@ -77,11 +99,15 @@ def generate_reply(prompt: str, trace_id: str | None = None) -> str:
             extra={
                 "reply_preview": reply[:120],
                 "usage": getattr(response, "usage", {}),
+                "latency_ms": round(latency_ms, 2)
             },
         )
         return reply
 
     except Exception as e:
+        # Phase 11-D: Record failure metrics
+        increment_metric("gpt_failures_total")
+        
         logger.exception("GPT request failed")
         log_event(
             service="gpt_client",
