@@ -23,6 +23,8 @@ import time
 import os
 import json
 import traceback
+import uuid
+from contextlib import contextmanager
 
 from logging_utils import log_event
 
@@ -907,6 +909,124 @@ def pull_metrics_snapshot_from_redis() -> dict:
     except Exception as e:
         _rate_limited_redis_log("snapshot_load_failed", "warn", message=str(e), stack=traceback.format_exc())
         return {}
+
+# --------------------------------------------------------------------------
+# Phase 11-D Utility Functions for Duplicate Prevention and Safe Operations
+# --------------------------------------------------------------------------
+def safe_register_metric(metric, registry):
+    """Avoid duplicate metric registration in the same registry."""
+    try:
+        registry.unregister(metric)
+    except KeyError:
+        pass
+    return metric
+
+@contextmanager
+def redis_lock(lock_name, timeout=10):
+    """Redis-based distributed lock for preventing concurrent operations."""
+    if not _has_redis_client:
+        yield False
+        return
+        
+    token = str(uuid.uuid4())
+    try:
+        # Try to acquire the lock
+        acquired = safe_redis_operation("acquire_lock")(
+            lambda client: client.set(lock_name, token, nx=True, ex=timeout)
+        )
+        
+        if not acquired:
+            yield False
+            return
+            
+        try:
+            yield True
+        finally:
+            # Release the lock, but only if we still own it
+            def release_lock(client):
+                current_token = client.get(lock_name)
+                if current_token and current_token.decode('utf-8') == token:
+                    client.delete(lock_name)
+                    return True
+                return False
+                
+            safe_redis_operation("release_lock")(release_lock)
+            
+    except Exception as e:
+        _rate_limited_redis_log("redis_lock_error", "warn", 
+                                message="Redis lock operation failed",
+                                extra={"lock_name": lock_name, "error": str(e)})
+        yield False
+
+def save_metrics_snapshot(snapshot):
+    """Persist metrics snapshot safely (idempotent)."""
+    if not _has_redis_client:
+        _rate_limited_redis_log("redis_unavailable_snapshot_save", "warn", 
+                                message="Redis not configured; snapshot not saved.")
+        return False
+        
+    key = f"prometheus:registry_snapshot:{SERVICE_NAME}"
+    
+    try:
+        # Check if snapshot is unchanged to avoid redundant writes
+        existing = safe_redis_operation("check_existing_snapshot")(
+            lambda client: client.get(key)
+        )
+        
+        if existing:
+            existing_data = json.loads(existing.decode('utf-8') if isinstance(existing, bytes) else existing)
+            if existing_data == snapshot:
+                _log_metric_event("snapshot_unchanged", "info", "Snapshot unchanged; skipping write.")
+                return True
+        
+        # Save the new snapshot
+        success = safe_redis_operation("save_metrics_snapshot")(
+            lambda client: client.set(key, json.dumps(snapshot), ex=REDIS_METRIC_TTL)
+        )
+        
+        if success:
+            _log_metric_event("snapshot_saved", "info", f"Metrics snapshot updated for {SERVICE_NAME}")
+        else:
+            _rate_limited_redis_log("snapshot_save_failed", "warn",
+                                    message="Failed to save metrics snapshot (circuit breaker)")
+        
+        return bool(success)
+        
+    except Exception as e:
+        _rate_limited_redis_log("snapshot_save_error", "error", 
+                                message="Error saving metrics snapshot",
+                                extra={"error": str(e), "stack": traceback.format_exc()})
+        return False
+
+def push_snapshot_from_collector():
+    """
+    Phase 11-D — Unified snapshot push handler.
+    Used by external modules to trigger metrics persistence manually.
+    """
+    try:
+        # Use Redis lock to prevent concurrent snapshot operations
+        with redis_lock(f"metrics_lock:{SERVICE_NAME}") as locked:
+            if not locked:
+                _log_metric_event("snapshot_skipped", "warn", 
+                                 "Metrics collector lock already held; skipping snapshot push.")
+                return {"status": "skipped"}
+            
+            # FIXED: Use get_snapshot() instead of non-existent generate_metrics_snapshot()
+            snapshot = get_snapshot()
+            success = save_metrics_snapshot(snapshot)
+            
+            if success:
+                _log_metric_event("snapshot_pushed", "info", "Snapshot pushed successfully from collector")
+                return {"status": "success", "snapshot": snapshot}
+            else:
+                _log_metric_event("snapshot_push_failed", "error", "Failed to push snapshot from collector")
+                return {"status": "error", "error": "Failed to save snapshot"}
+                
+    except Exception as e:
+        _log_metric_event("snapshot_push_error", "error",
+                         f"Failed to push snapshot from collector: {e}",
+                         extra={"stack": traceback.format_exc()})
+        return {"status": "error", "error": str(e)}
 
 # --------------------------------------------------------------------------
 # Phase 11-D Initialization
