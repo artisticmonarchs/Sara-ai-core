@@ -85,6 +85,15 @@ def get_client() -> Optional[redis.Redis]:
 # Public Singleton
 redis_client: Optional[redis.Redis] = get_client()
 
+# Phase 11-D Compatibility Alias
+# Ensures backward compatibility for modules importing get_redis_client
+def get_redis_client() -> Optional[redis.Redis]:
+    """Alias for get_client() to maintain import compatibility."""
+    return get_client()
+
+__all__ = ["get_client", "get_redis_client", "redis_client",
+           "increment_metric", "get_metric", "health_check"]
+
 
 def increment_metric(key: str, field: str, amount: int = 1) -> None:
     """
