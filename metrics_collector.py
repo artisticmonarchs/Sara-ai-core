@@ -32,7 +32,17 @@ from logging_utils import log_event
 # Phase 11-D Configuration Integration
 # --------------------------------------------------------------------------
 try:
-    from config import config, get_metrics_config
+    from config import Config
+    config = Config()
+    
+    def get_metrics_config():
+        return {
+            "enable_sync": config.ENABLE_METRICS_SYNC,
+            "sync_interval": config.METRICS_SYNC_INTERVAL,
+            "snapshot_interval": config.SNAPSHOT_INTERVAL,
+            "enable_persistence": config.ENABLE_METRICS_PERSISTENCE,
+            "enable_endpoint": config.METRICS_ENDPOINT_ENABLED,
+        }
 except ImportError:
     # Fallback configuration for backward compatibility
     class FallbackConfig:
@@ -54,16 +64,8 @@ except ImportError:
             "enable_endpoint": config.METRICS_ENDPOINT_ENABLED,
         }
 
-# FIXED: Corrected import path - changed from core.metrics_registry to direct import
-try:
-    from metrics_registry import REGISTRY  # type: ignore
-except ImportError:
-    # Fallback: create minimal REGISTRY if metrics_registry doesn't exist
-    from prometheus_client import CollectorRegistry
-    REGISTRY = CollectorRegistry(auto_describe=True)
-
 # Prometheus client imports for temp registry construction & exposition
-from prometheus_client import CollectorRegistry, Gauge, generate_latest, Counter, Histogram
+from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
 # --------------------------------------------------------------------------
 # Phase 11-D Redis Client with Circuit Breaker Integration
@@ -113,7 +115,7 @@ except Exception:
 # Phase 11-D Health Metrics
 # --------------------------------------------------------------------------
 _health_metrics = {
-    "metrics_collector_uptime_seconds": time.time(),
+    "metrics_collector_start_time": time.time(),
     "metrics_sync_success_total": 0,
     "metrics_sync_failure_total": 0,
     "metrics_persistence_success_total": 0,
@@ -226,6 +228,8 @@ def _stop_sync_loop():
     """Stop the background metrics sync loop."""
     global _sync_running
     _sync_running = False
+    if _sync_thread and _sync_thread.is_alive():
+        _sync_thread.join(timeout=5.0)
     _log_metric_event("sync_loop_stopped", "info", "Background metrics sync loop stopped")
 
 def _sync_loop():
@@ -257,9 +261,9 @@ def _sync_loop():
                     _health_metrics["metrics_persistence_failure_total"] += 1
             
             # Update health metrics
-            _health_metrics["metrics_collector_uptime_seconds"] = current_time - _health_metrics["metrics_collector_uptime_seconds"]
+            _health_metrics["metrics_collector_start_time"] = _health_metrics["metrics_collector_start_time"]  # Keep original start time
             
-            time.sleep(1)  # Check every second for responsiveness
+            time.sleep(5)  # Check every 5 seconds for better CPU usage
             
         except Exception as e:
             _log_sync_activity(
@@ -331,11 +335,14 @@ def _create_and_save_snapshot() -> bool:
                 "Metrics snapshot saved successfully",
                 snapshot_key=snapshot_key
             )
+        elif not _has_redis_client:
+            # Don't log warnings if Redis is not available
+            pass
         else:
-            _log_sync_activity(
+            _rate_limited_redis_log(
                 "snapshot_failed",
                 "warn",
-                "Failed to save metrics snapshot",
+                message="Failed to save metrics snapshot",
                 circuit_breaker_state=get_circuit_breaker_status()["state"]
             )
         
@@ -612,7 +619,7 @@ def get_snapshot() -> Dict[str, Any]:
 
         # Include Phase 11-D health metrics
         health_info = {
-            "uptime_seconds": time.time() - _health_metrics["metrics_collector_uptime_seconds"],
+            "uptime_seconds": time.time() - _health_metrics["metrics_collector_start_time"],
             "sync_success_total": _health_metrics["metrics_sync_success_total"],
             "sync_failure_total": _health_metrics["metrics_sync_failure_total"],
             "persistence_success_total": _health_metrics["metrics_persistence_success_total"],
@@ -774,9 +781,9 @@ def export_prometheus() -> str:
 
                 # Expose count (integer) and sum (in seconds)
                 try:
-                    g_count = Gauge(f"{latency_name}_count", f"Count of {latency_name} observations (global)", registry=temp_registry)
+                    g_count = safe_register_metric(Gauge(f"{latency_name}_count", f"Count of {latency_name} observations (global)", registry=temp_registry), temp_registry)
                     g_count.set(int(total_count))
-                    g_sum = Gauge(f"{latency_name}_sum", f"Sum of {latency_name} in seconds (global)", registry=temp_registry)
+                    g_sum = safe_register_metric(Gauge(f"{latency_name}_sum", f"Sum of {latency_name} in seconds (global)", registry=temp_registry), temp_registry)
                     g_sum.set(float(total_sum_ms) / 1000.0)  # convert ms -> s
                 except Exception as e:
                     _rate_limited_redis_log("temp_registry_latency_register_failed", "warn",
@@ -827,7 +834,7 @@ def export_prometheus() -> str:
 
             # Register a Gauge with the canonical metric name and set the merged value
             try:
-                g = Gauge(metric, f"Global total for {metric} (aggregated across services)", registry=temp_registry)
+                g = safe_register_metric(Gauge(metric, f"Global total for {metric} (aggregated across services)", registry=temp_registry), temp_registry)
                 g.set(int(total))
             except Exception as e:
                 _rate_limited_redis_log("temp_registry_metric_register_failed", "warn",
@@ -837,7 +844,7 @@ def export_prometheus() -> str:
 
         # Also expose a timestamp of the snapshot for debugging
         try:
-            ts_g = Gauge("_metrics_snapshot_timestamp_seconds", "Snapshot timestamp (epoch seconds)", registry=temp_registry)
+            ts_g = safe_register_metric(Gauge("_metrics_snapshot_timestamp_seconds", "Snapshot timestamp (epoch seconds)", registry=temp_registry), temp_registry)
             ts_g.set(float(time.time()))
         except Exception:
             pass
@@ -957,6 +964,7 @@ def redis_lock(lock_name, timeout=10):
                                 message="Redis lock operation failed",
                                 extra={"lock_name": lock_name, "error": str(e)})
         yield False
+        return
 
 def save_metrics_snapshot(snapshot):
     """Persist metrics snapshot safely (idempotent)."""
@@ -1062,7 +1070,7 @@ def reset_collector() -> None:
 def get_health_status() -> Dict[str, Any]:
     """Get health status for monitoring."""
     return {
-        "uptime_seconds": time.time() - _health_metrics["metrics_collector_uptime_seconds"],
+        "uptime_seconds": time.time() - _health_metrics["metrics_collector_start_time"],
         "sync_success_total": _health_metrics["metrics_sync_success_total"],
         "sync_failure_total": _health_metrics["metrics_sync_failure_total"],
         "persistence_success_total": _health_metrics["metrics_persistence_success_total"],
@@ -1074,5 +1082,6 @@ def get_health_status() -> Dict[str, Any]:
         "service_name": SERVICE_NAME,
     }
 
-# Initialize on module import
-initialize_metrics_collector()
+# Initialize on module import - moved to prevent circular imports
+if __name__ != "__main__":
+    initialize_metrics_collector()

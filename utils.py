@@ -29,21 +29,39 @@ except ImportError:
     def get_trace_id() -> str:
         return "no-trace-id"
 
-# Unified metrics API
-try:
-    from metrics_collector import increment_metric
-except ImportError:
-    def increment_metric(name: str, amount: int = 1, labels: dict = None):
+# Unified metrics API - Lazy import wrapper to avoid circular imports
+def increment_metric(name: str, amount: int = 1, labels: dict = None):
+    """Safe metrics increment wrapper that avoids circular imports."""
+    try:
+        from metrics_collector import increment_metric as _inc
+        return _inc(name, amount, labels)
+    except Exception:
         return None
 
 try:
-    from redis_client import get_redis_client, safe_redis_operation
+    from redis_client import get_redis_client
 except ImportError:
     def get_redis_client():
         return None
-    
-    def safe_redis_operation(operation, fallback=None, operation_name="unknown"):
-        return fallback
+
+def restore_metrics_snapshot(service_name: str = "metrics_collector"):
+    """
+    Restore last known metrics snapshot from Redis.
+    Called during app startup to reload previous metric state.
+    """
+    try:
+        from redis_client import get_redis_client
+        client = get_redis_client()
+        if not client:
+            return None
+        key = f"prometheus:registry_snapshot:{service_name}"
+        snapshot = client.get(key)
+        if not snapshot:
+            return None
+        return json.loads(snapshot)
+    except Exception as e:
+        print(f"[restore_metrics_snapshot] Error restoring snapshot: {e}")
+        return None
 
 def _safe_inc_metric(metric_name: str, value: int = 1, labels: Optional[dict] = None) -> None:
     """Safely increment metrics counter with fallback and label support"""
@@ -221,11 +239,11 @@ def retry_operation(func: Callable, retries: int = 3, delay: float = 1.0,
 def _is_circuit_open(key: str = "circuit_breaker:utils:state") -> bool:
     """Check if circuit breaker is open for a specific operation."""
     try:
-        state = safe_redis_operation(
-            lambda: (get_redis_client() and get_redis_client().get(key)),
-            fallback=None,
-            operation_name="check_circuit_breaker"
-        )
+        from redis_client import get_redis_client
+        client = get_redis_client()
+        if not client:
+            return False
+        state = client.get(key)
         state = _decode_redis_value(state) or ""
         return state.lower() == "open"
     except Exception:
@@ -327,6 +345,7 @@ __all__ = [
     "retry_operation",
     "ensure_trace_session",
     "self_test",
+    "restore_metrics_snapshot",
     "_safe_inc_metric",
     "_is_circuit_open",
     "_decode_redis_value"
