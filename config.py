@@ -47,6 +47,7 @@ class Config:
     # Metrics Configuration
     METRICS_SYNC_INTERVAL = int(os.getenv("METRICS_SYNC_INTERVAL", "30"))
     REDIS_METRIC_TTL_DAYS = int(os.getenv("REDIS_METRIC_TTL_DAYS", "30"))
+    ENABLE_METRICS_SYNC = os.getenv("ENABLE_METRICS_SYNC", "true").lower() == "true"   # ✅ Added for metrics_collector
     
     # Environment Mode
     SARA_ENV = os.getenv("SARA_ENV", "development")
