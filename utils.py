@@ -60,7 +60,18 @@ def restore_metrics_snapshot(service_name: str = "metrics_collector"):
             return None
         return json.loads(snapshot)
     except Exception as e:
-        print(f"[restore_metrics_snapshot] Error restoring snapshot: {e}")
+        # Replace print with structured logging
+        try:
+            log_event(
+                service="utils",
+                event="restore_metrics_snapshot",
+                status="error",
+                message=f"Error restoring snapshot: {e}",
+                service_name=service_name
+            )
+        except Exception:
+            # Ultimate fallback if log_event fails
+            print(f"[utils] restore_metrics_snapshot: Error restoring snapshot: {e}")
         return None
 
 def _safe_inc_metric(metric_name: str, value: int = 1, labels: Optional[dict] = None) -> None:

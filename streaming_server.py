@@ -11,7 +11,6 @@ Sara AI Core — Streaming Service
 - Retains SSE streaming, Twilio webhook, health endpoints, and structured logging
 """
 
-import os
 import json
 import time
 import uuid
@@ -23,28 +22,81 @@ from typing import Generator, Optional, Dict, Any
 from flask import Flask, request, jsonify, Response, stream_with_context
 import redis  # for typed redis exceptions and client behaviors
 
+# --------------------------------------------------------------------------
+# Phase 11-D Configuration Isolation
+# --------------------------------------------------------------------------
+try:
+    from config import Config
+except ImportError:
+    # Fallback config for backward compatibility
+    import os
+    class Config:
+        STREAM_HEARTBEAT_INTERVAL = float(os.getenv("STREAM_HEARTBEAT_INTERVAL", "10"))
+        PORT = int(os.getenv("PORT", "7000"))
+
+# --------------------------------------------------------------------------
+# Phase 11-D Metrics Integration - Lazy Import Shim
+# --------------------------------------------------------------------------
+def _get_metrics():
+    """Lazy metrics shim to avoid circular imports at import-time"""
+    try:
+        import metrics_collector as metrics
+        return metrics
+    except Exception:
+        # safe no-op fallbacks
+        class NoopMetrics:
+            def increment_metric(self, *a, **k): pass
+            def observe_latency(self, *a, **k): pass
+            def get_snapshot(self, *a, **k): return {}
+        return NoopMetrics()
+
+# Lazy metrics instance - will be initialized on first use
+_metrics = None
+
+def get_metrics():
+    """Get or initialize lazy metrics instance"""
+    global _metrics
+    if _metrics is None:
+        _metrics = _get_metrics()
+    return _metrics
+
+# --------------------------------------------------------------------------
 # Local modules
+# --------------------------------------------------------------------------
 from tasks import run_tts
 from gpt_client import generate_reply
 from logging_utils import log_event
-import metrics_collector as metrics_collector  # used by restore hooks
-from metrics_collector import (
-    increment_metric,
-    observe_latency,
-    get_snapshot,
-)
 
 # --------------------------------------------------------------------------
-# Shared registry & registry-backed metrics (Phase 11-D)
+# Shared registry & registry-backed metrics (Phase 11-D) - Lazy imports
 # --------------------------------------------------------------------------
-from metrics_registry import (
-    REGISTRY,
-    restore_snapshot_to_collector,
-    push_snapshot_from_collector,
-    save_metrics_snapshot,
-)
-from global_metrics_store import start_background_sync
-from prometheus_client import Summary, Gauge, Counter, generate_latest, CONTENT_TYPE_LATEST
+def _get_registry():
+    """Lazy import for metrics registry"""
+    try:
+        from metrics_registry import REGISTRY
+        return REGISTRY
+    except Exception:
+        return None
+
+def _get_prometheus_client():
+    """Lazy import for prometheus client"""
+    try:
+        from prometheus_client import Summary, Gauge, Counter, generate_latest, CONTENT_TYPE_LATEST
+        return Summary, Gauge, Counter, generate_latest, CONTENT_TYPE_LATEST
+    except Exception:
+        # Fallback no-op classes
+        class NoopMetric:
+            def __init__(self, *args, **kwargs): pass
+            def inc(self, *args, **kwargs): pass
+            def set(self, *args, **kwargs): pass
+            def observe(self, *args, **kwargs): pass
+            def labels(self, *args, **kwargs): return self
+            def time(self): return lambda: None
+        return NoopMetric, NoopMetric, NoopMetric, lambda: "# metrics_unavailable\n", "text/plain"
+
+# Initialize metrics with lazy loading
+Summary, Gauge, Counter, generate_latest, CONTENT_TYPE_LATEST = _get_prometheus_client()
+REGISTRY = _get_registry()
 
 # Register streaming-specific metrics to the shared REGISTRY
 stream_latency_ms = Summary(
@@ -405,42 +457,74 @@ except Exception:
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 
-STREAM_HEARTBEAT_INTERVAL = float(os.getenv("STREAM_HEARTBEAT_INTERVAL", "10"))
-
 # --------------------------------------------------------------------------
-# Phase 11-D: Unified Metrics Startup
+# Lazy Initialization Functions (Phase 11-D - No side effects at import time)
 # --------------------------------------------------------------------------
-# Restore persisted snapshot and start background sync
-try:
-    restore_snapshot_to_collector(metrics_collector)
-    start_background_sync(service_name="streaming")
-    
-    # Start health monitoring
-    health_monitor.start()
-    
-    log_event(
-        service="streaming",
-        event="global_metrics_sync_started",
-        status="ok",
-        message="Streaming server metrics restored and sync started",
-        extra={"phase": "11-D"}
-    )
-except Exception as e:
-    log_event(
-        service="streaming",
-        event="metrics_startup_failed",
-        status="error",
-        message="Failed to initialize unified metrics",
-        extra={"error": str(e), "stack": traceback.format_exc(), "phase": "11-D"}
-    )
+def _initialize_metrics_system():
+    """Lazy metrics system initialization - called on first request"""
+    try:
+        from metrics_registry import restore_snapshot_to_collector
+        from global_metrics_store import start_background_sync
+        
+        restore_snapshot_to_collector(get_metrics())
+        start_background_sync(service_name="streaming")
+        
+        # Start health monitoring
+        health_monitor.start()
+        
+        log_event(
+            service="streaming",
+            event="global_metrics_sync_started",
+            status="ok",
+            message="Streaming server metrics restored and sync started",
+            extra={"phase": "11-D"}
+        )
+    except Exception as e:
+        log_event(
+            service="streaming",
+            event="metrics_startup_failed",
+            status="error",
+            message="Failed to initialize unified metrics",
+            extra={"error": str(e), "stack": traceback.format_exc(), "phase": "11-D"}
+        )
 
-log_event(
-    service="streaming",
-    event="startup",
-    status="ok",
-    message="Streaming server initialized with unified metrics registry",
-    extra={"phase": "11-D"}
-)
+def _initialize_metrics_restore():
+    """Lazy metrics restore - called on first request"""
+    try:
+        @redis_cb
+        def _restore_metrics():
+            from metrics_registry import restore_snapshot_to_collector
+            return restore_snapshot_to_collector(get_metrics())
+        
+        result = _restore_metrics()
+        
+        if result:
+            log_event(
+                service="streaming_server",
+                event="metrics_snapshot_restored",
+                status="info",
+                message="Restored snapshot into metrics_collector from Redis using standardized restoration.",
+            )
+        else:
+            log_event(
+                service="streaming_server",
+                event="metrics_restore_no_data",
+                status="info",
+                message="No metrics snapshot found in Redis for restoration.",
+            )
+    except Exception as e:
+        log_event(
+            service="streaming_server",
+            event="restore_at_startup_failed",
+            status="warn",
+            message="Failed to restore metrics snapshot at startup (best-effort).",
+            extra={"error": str(e), "stack": traceback.format_exc()},
+        )
+
+def _ensure_initialized():
+    """Ensure metrics are initialized on first use"""
+    _initialize_metrics_system()
+    _initialize_metrics_restore()
 
 # --------------------------------------------------------------------------
 # Helpers
@@ -494,40 +578,6 @@ def safe_redis_call(func, *args, **kwargs):
     return _wrapped_call()
 
 # --------------------------------------------------------------------------
-# Restore persisted snapshot on startup (FIXED: simplified restoration logic)
-# --------------------------------------------------------------------------
-def _restore_from_redis_at_startup():
-    try:
-        # Use standardized restore_snapshot_to_collector for all metrics restoration
-        result = redis_cb.call(lambda: restore_snapshot_to_collector(metrics_collector))
-        
-        if result:
-            log_event(
-                service="streaming_server",
-                event="metrics_snapshot_restored",
-                status="info",
-                message="Restored snapshot into metrics_collector from Redis using standardized restoration.",
-            )
-        else:
-            log_event(
-                service="streaming_server",
-                event="metrics_restore_no_data",
-                status="info",
-                message="No metrics snapshot found in Redis for restoration.",
-            )
-    except Exception as e:
-        log_event(
-            service="streaming_server",
-            event="restore_at_startup_failed",
-            status="warn",
-            message="Failed to restore metrics snapshot at startup (best-effort).",
-            extra={"error": str(e), "stack": traceback.format_exc()},
-        )
-
-# Invoke restore at import time (safe best-effort)
-_restore_from_redis_at_startup()
-
-# --------------------------------------------------------------------------
 # Prometheus Metrics Endpoint
 # --------------------------------------------------------------------------
 @app.route("/metrics", methods=["GET"])
@@ -537,7 +587,7 @@ def metrics_endpoint():
     """
     try:
         try:
-            increment_metric("streaming_metrics_requests_total")
+            get_metrics().increment_metric("streaming_metrics_requests_total")
             stream_events_total.labels(event_type="metrics_request").inc()
         except Exception:
             pass
@@ -575,14 +625,14 @@ def metrics_endpoint():
 def metrics_snapshot():
     try:
         try:
-            increment_metric("streaming_metrics_snapshot_requests_total")
+            get_metrics().increment_metric("streaming_metrics_snapshot_requests_total")
             stream_events_total.labels(event_type="metrics_snapshot").inc()
         except Exception:
             pass
 
         coll_snap = {}
         try:
-            coll_snap = get_snapshot()
+            coll_snap = get_metrics().get_snapshot()
         except Exception:
             coll_snap = {}
 
@@ -617,7 +667,8 @@ def metrics_snapshot():
 
         # Persist collector snapshot via helper (guarded)
         try:
-            safe_redis_call(push_snapshot_from_collector, get_snapshot)
+            from metrics_collector import push_snapshot_from_collector
+            safe_redis_call(push_snapshot_from_collector, get_metrics().get_snapshot)
         except redis.exceptions.RedisError as e:
             log_event(
                 service="streaming_server",
@@ -639,6 +690,7 @@ def metrics_snapshot():
 
         # Also save combined payload as convenience/fallback
         try:
+            from metrics_registry import save_metrics_snapshot
             safe_redis_call(save_metrics_snapshot, payload)
         except redis.exceptions.RedisError:
             stream_errors_total.labels(error_type="redis_backup").inc()
@@ -663,7 +715,7 @@ def metrics_snapshot():
 @app.route("/healthz", methods=["GET"])
 def healthz():
     try:
-        increment_metric("streaming_healthz_requests_total")
+        get_metrics().increment_metric("streaming_healthz_requests_total")
         stream_events_total.labels(event_type="healthz").inc()
     except Exception:
         pass
@@ -802,7 +854,7 @@ def stream():
     session_id = None
 
     try:
-        increment_metric("stream_requests_total")
+        get_metrics().increment_metric("stream_requests_total")
         stream_events_total.labels(event_type="stream_request").inc()
     except Exception:
         pass
@@ -822,7 +874,7 @@ def stream():
                 trace_id=trace_id,
                 session_id=session_id,
             )
-            increment_metric("stream_rejected_total")
+            get_metrics().increment_metric("stream_rejected_total")
             stream_errors_total.labels(error_type="no_input_text").inc()
             return jsonify({"error": "No input text"}), 400
 
@@ -872,7 +924,7 @@ def stream():
                     stream_state["last_checkpoint"] = time.time()
 
                 try:
-                    observe_latency("inference_latency_ms", infer_ms)
+                    get_metrics().observe_latency("inference_latency_ms", infer_ms)
                 except Exception:
                     pass
 
@@ -905,7 +957,7 @@ def stream():
                 tts_ms = round((time.time() - start_tts) * 1000, 2)
 
                 if isinstance(tts_result, dict) and tts_result.get("error"):
-                    increment_metric("tts_failures_total")
+                    get_metrics().increment_metric("tts_failures_total")
                     stream_errors_total.labels(error_type="tts_generation").inc()
                     log_event(
                         service="streaming_server",
@@ -920,7 +972,7 @@ def stream():
                     return
 
                 if isinstance(tts_result, dict) and tts_result.get("cached"):
-                    increment_metric("tts_cache_hits_total")
+                    get_metrics().increment_metric("tts_cache_hits_total")
                     stream_events_total.labels(event_type="tts_cache_hit").inc()
                     log_event(
                         service="streaming_server",
@@ -1015,7 +1067,7 @@ def stream():
             session_id=session_id or "unknown",
             extra={"stack": traceback.format_exc()},
         )
-        increment_metric("stream_errors_total")
+        get_metrics().increment_metric("stream_errors_total")
         stream_errors_total.labels(error_type="fatal").inc()
         
         # Clean up on fatal error
@@ -1035,7 +1087,7 @@ def twilio_tts():
     session_id = str(uuid.uuid4())
 
     try:
-        increment_metric("twilio_requests_total")
+        get_metrics().increment_metric("twilio_requests_total")
         stream_events_total.labels(event_type="twilio_request").inc()
     except Exception:
         pass
@@ -1046,7 +1098,7 @@ def twilio_tts():
             tts_result = run_tts({"text": text, "session_id": session_id, "trace_id": trace_id}, inline=True)
 
         if isinstance(tts_result, dict) and tts_result.get("error"):
-            increment_metric("tts_failures_total")
+            get_metrics().increment_metric("tts_failures_total")
             stream_errors_total.labels(error_type="twilio_tts").inc()
             log_event(
                 service="streaming_server",
@@ -1086,7 +1138,7 @@ def twilio_tts():
             session_id=session_id,
             extra={"stack": traceback.format_exc()},
         )
-        increment_metric("twilio_errors_total")
+        get_metrics().increment_metric("twilio_errors_total")
         stream_errors_total.labels(error_type="twilio_exception").inc()
         return TwilioResponse(
             "<Response><Say>Sorry, an internal error occurred.</Say></Response>",
@@ -1136,10 +1188,21 @@ def recover_stream(session_id: str):
 # Entrypoint
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 7000))
+    # Initialize metrics system on startup
+    _ensure_initialized()
+    
+    port = Config.PORT
     
     # Ensure health monitor is stopped on exit
     import atexit
     atexit.register(health_monitor.stop)
+    
+    log_event(
+        service="streaming",
+        event="startup",
+        status="ok",
+        message="Streaming server initialized with unified metrics registry",
+        extra={"phase": "11-D"}
+    )
     
     app.run(host="0.0.0.0", port=port, threaded=True)

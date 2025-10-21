@@ -4,44 +4,96 @@ Phase 11-D compliant version
 Decoupled from Celery internals, unified observability, and R2 centralized client.
 """
 
-import os
 import time
 import traceback
 from flask import Flask, request, jsonify, Response
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 # --------------------------------------------------------------------------
+# Phase 11-D Configuration Isolation
+# --------------------------------------------------------------------------
+try:
+    from config import Config
+except ImportError:
+    # Fallback config for backward compatibility
+    import os
+    class Config:
+        PORT = int(os.getenv("PORT", "5000"))
+        R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME")
+
+# --------------------------------------------------------------------------
+# Phase 11-D Metrics Integration - Lazy Import Shim
+# --------------------------------------------------------------------------
+def _get_metrics():
+    """Lazy metrics shim to avoid circular imports at import-time"""
+    try:
+        import metrics_collector as metrics
+        return metrics
+    except Exception:
+        # safe no-op fallbacks
+        class NoopMetrics:
+            def inc_metric(self, *a, **k): pass
+            def increment_metric(self, *a, **k): pass
+            def get_snapshot(self, *a, **k): return {}
+        return NoopMetrics()
+
+# Lazy metrics instance - will be initialized on first use
+_metrics = None
+
+def get_metrics():
+    """Get or initialize lazy metrics instance"""
+    global _metrics
+    if _metrics is None:
+        _metrics = _get_metrics()
+    return _metrics
+
+# --------------------------------------------------------------------------
 # Internal imports
 # --------------------------------------------------------------------------
 from celery_app import celery
 from logging_utils import log_event, get_trace_id
-from metrics_collector import (
-    export_prometheus,
-    get_snapshot,
-    push_snapshot_from_collector,
-)
-from metrics_registry import REGISTRY
 from redis_client import get_client
 from r2_client import get_r2_client, check_r2_connection as r2_check  # type: ignore
 from utils import increment_metric, restore_metrics_snapshot
 
 # --------------------------------------------------------------------------
-# Phase 11-D: Global Metrics Sync Startup
+# Lazy Initialization Functions (Phase 11-D - No side effects at import time)
 # --------------------------------------------------------------------------
-try:
-    from global_metrics_store import start_background_sync  # type: ignore
-    start_background_sync(service_name="app")
-    log_event(service="app", event="global_metrics_sync_started", status="ok",
-              message="Background global metrics sync started for app service")
-except Exception as e:
-    log_event(service="app", event="global_metrics_sync_failed", status="error",
-              message="Failed to start background metrics sync",
-              extra={"error": str(e), "stack": traceback.format_exc()})
+def _initialize_metrics_sync():
+    """Lazy metrics sync startup - called on first request"""
+    try:
+        from global_metrics_store import start_background_sync  # type: ignore
+        start_background_sync(service_name="app")
+        log_event(service="app", event="global_metrics_sync_started", status="ok",
+                  message="Background global metrics sync started for app service")
+    except Exception as e:
+        log_event(service="app", event="global_metrics_sync_failed", status="error",
+                  message="Failed to start background metrics sync",
+                  extra={"error": str(e), "stack": traceback.format_exc()})
 
-# --------------------------------------------------------------------------
-# Phase 11-D: Metrics Integration
-# --------------------------------------------------------------------------
-import metrics_collector as metrics  # type: ignore
+def _initialize_metrics_restore():
+    """Lazy metrics restore - called on first request"""
+    try:
+        from metrics_registry import restore_snapshot_to_collector  # type: ignore
+        try:
+            restored_ok = restore_snapshot_to_collector(get_metrics())
+            if restored_ok:
+                log_event(service="app", event="metrics_restored_on_startup", status="info",
+                          message="Restored persisted metrics into metrics_collector at app startup")
+        except Exception as e:
+            log_event(service="app", event="metrics_restore_failed", status="warn",
+                      message="Failed to restore metrics snapshot at app startup",
+                      extra={"error": str(e), "stack": traceback.format_exc()})
+    except Exception as e:
+        log_event(service="app", event="metrics_restore_import_failed", status="warn",
+                  message="Could not import metrics restore module",
+                  extra={"error": str(e)})
+
+def _ensure_initialized():
+    """Ensure metrics are initialized on first use"""
+    # These will only run once due to module-level caching
+    _initialize_metrics_sync()
+    _initialize_metrics_restore()
 
 # --------------------------------------------------------------------------
 # Phase 11-D: Startup System Validation
@@ -84,7 +136,7 @@ def validate_system_dependencies():
     # Metrics system validation
     try:
         # Test metrics collection
-        metrics.inc_metric("system_startup_validation_total")
+        get_metrics().inc_metric("system_startup_validation_total")
         components["metrics"] = {"status": "ok", "details": "Collector operational"}
         log_event(service="app", event="metrics_validation_ok", status="ok",
                   message="Metrics system validated at startup", trace_id=trace_id)
@@ -112,25 +164,6 @@ def validate_system_dependencies():
     return components
 
 # --------------------------------------------------------------------------
-# Phase 11-D: Metrics Snapshot Restore on Startup
-# --------------------------------------------------------------------------
-try:
-    from metrics_registry import restore_snapshot_to_collector  # type: ignore
-    try:
-        restored_ok = restore_snapshot_to_collector(metrics)
-        if restored_ok:
-            log_event(service="app", event="metrics_restored_on_startup", status="info",
-                      message="Restored persisted metrics into metrics_collector at app startup")
-    except Exception as e:
-        log_event(service="app", event="metrics_restore_failed", status="warn",
-                  message="Failed to restore metrics snapshot at app startup",
-                  extra={"error": str(e), "stack": traceback.format_exc()})
-except Exception as e:
-    log_event(service="app", event="metrics_restore_import_failed", status="warn",
-              message="Could not import metrics restore module",
-              extra={"error": str(e)})
-
-# --------------------------------------------------------------------------
 # App setup
 # --------------------------------------------------------------------------
 app = Flask(__name__)
@@ -156,7 +189,7 @@ startup_components = validate_system_dependencies()
 def healthz():
     trace_id = get_trace_id(request)
     try:
-        metrics.inc_metric("api_healthz_requests_total")
+        get_metrics().inc_metric("api_healthz_requests_total")
         
         # Enhanced health check with component status
         health_status = "ok"
@@ -193,7 +226,7 @@ def healthz():
         
         return jsonify(response_data), status_code
     except Exception as e:
-        metrics.inc_metric("api_healthz_failures_total")
+        get_metrics().inc_metric("api_healthz_failures_total")
         log_event(service="app", event="healthz_error", status="error", 
                   message=str(e), trace_id=trace_id)
         return jsonify({"status": "error", "message": str(e), "trace_id": trace_id}), 500
@@ -203,7 +236,7 @@ def healthz():
 def system_status():
     trace_id = get_trace_id(request)
     try:
-        metrics.inc_metric("api_system_status_requests_total")
+        get_metrics().inc_metric("api_system_status_requests_total")
         
         info = {
             "service": "Sara AI Core", 
@@ -216,7 +249,7 @@ def system_status():
                   trace_id=trace_id, extra={"component_count": len(startup_components)})
         return jsonify({"status": "ok", "info": info, "trace_id": trace_id})
     except Exception as e:
-        metrics.inc_metric("api_system_status_failures_total")
+        get_metrics().inc_metric("api_system_status_failures_total")
         log_event(service="app", event="system_status_error", status="error",
                   message=str(e), trace_id=trace_id)
         return jsonify({"status": "error", "message": str(e), "trace_id": trace_id}), 500
@@ -231,10 +264,10 @@ def check_r2_connection(trace_id=None, session_id=None):
         try:
             client = get_r2_client()
             if callable(r2_check):
-                ok, meta = r2_check(client=client, bucket=os.getenv("R2_BUCKET_NAME"))
+                ok, meta = r2_check(client=client, bucket=Config.R2_BUCKET_NAME)
                 latency_ms = round((time.time() - start) * 1000, 2)
                 if ok:
-                    metrics.inc_metric("r2_health_checks_ok_total")
+                    get_metrics().inc_metric("r2_health_checks_ok_total")
                     log_event(
                         service="app",
                         event="r2_status_ok",
@@ -246,7 +279,7 @@ def check_r2_connection(trace_id=None, session_id=None):
                     )
                     return {"status": "ok", "bucket": meta.get("bucket"), "r2_latency_ms": latency_ms}
                 else:
-                    metrics.inc_metric("r2_health_checks_failed_total")
+                    get_metrics().inc_metric("r2_health_checks_failed_total")
                     log_event(
                         service="app",
                         event="r2_status_error",
@@ -257,10 +290,10 @@ def check_r2_connection(trace_id=None, session_id=None):
                     )
                     return {"status": "error", "message": meta.get("error")}
             else:
-                bucket = os.getenv("R2_BUCKET_NAME")
+                bucket = Config.R2_BUCKET_NAME
                 client.list_objects_v2(Bucket=bucket, MaxKeys=1)
                 latency_ms = round((time.time() - start) * 1000, 2)
-                metrics.inc_metric("r2_health_checks_ok_total")
+                get_metrics().inc_metric("r2_health_checks_ok_total")
                 log_event(
                     service="app",
                     event="r2_status_ok",
@@ -272,7 +305,7 @@ def check_r2_connection(trace_id=None, session_id=None):
                 )
                 return {"status": "ok", "bucket": bucket, "r2_latency_ms": latency_ms}
         except Exception as inner_e:
-            metrics.inc_metric("r2_health_checks_failed_total")
+            get_metrics().inc_metric("r2_health_checks_failed_total")
             log_event(
                 service="app",
                 event="r2_status_error",
@@ -283,7 +316,7 @@ def check_r2_connection(trace_id=None, session_id=None):
             )
             return {"status": "error", "message": str(inner_e)}
     except Exception as e:
-        metrics.inc_metric("r2_health_checks_failed_total")
+        get_metrics().inc_metric("r2_health_checks_failed_total")
         log_event(
             service="app",
             event="r2_status_exception",
@@ -298,7 +331,7 @@ def check_r2_connection(trace_id=None, session_id=None):
 @app.route("/r2_status", methods=["GET"])
 def r2_status():
     trace_id = get_trace_id(request)
-    metrics.inc_metric("api_r2_status_requests_total")
+    get_metrics().inc_metric("api_r2_status_requests_total")
     result = check_r2_connection(trace_id=trace_id)
     return jsonify({**result, "trace_id": trace_id}), (200 if result.get("status") == "ok" else 500)
 
@@ -310,12 +343,12 @@ def r2_status():
 def metrics_snapshot():
     trace_id = get_trace_id(request)
     try:
-        metrics.inc_metric("api_metrics_snapshot_requests_total")
+        get_metrics().inc_metric("api_metrics_snapshot_requests_total")
         restore_metrics_snapshot()
         log_event(service="app", event="metrics_snapshot_restored", status="ok",
                   message="Metrics snapshot restored via API", trace_id=trace_id)
     except Exception as e:
-        metrics.inc_metric("api_metrics_snapshot_failures_total")
+        get_metrics().inc_metric("api_metrics_snapshot_failures_total")
         log_event(
             service="app",
             event="metrics_restore_fail",
@@ -326,12 +359,13 @@ def metrics_snapshot():
 
     # Persist using helper that expects metrics_collector.get_snapshot (callable)
     try:
+        from metrics_collector import push_snapshot_from_collector
         pushed = False
         try:
-            pushed = push_snapshot_from_collector(get_snapshot)
+            pushed = push_snapshot_from_collector(get_metrics().get_snapshot)
         except TypeError:
             try:
-                pushed = push_snapshot_from_collector(get_snapshot())
+                pushed = push_snapshot_from_collector(get_metrics().get_snapshot())
             except Exception as e:
                 raise
 
@@ -363,10 +397,11 @@ def metrics_snapshot():
 def metrics_endpoint():
     """Expose aggregated metrics in Prometheus plain-text format (legacy + REGISTRY)."""
     try:
-        metrics.inc_metric("api_metrics_requests_total")
+        get_metrics().inc_metric("api_metrics_requests_total")
 
         parts = []
         try:
+            from metrics_collector import export_prometheus
             legacy = export_prometheus()
             if legacy:
                 parts.append(legacy if isinstance(legacy, str) else legacy.decode("utf-8"))
@@ -380,6 +415,7 @@ def metrics_endpoint():
             )
 
         try:
+            from metrics_registry import REGISTRY
             reg_text = generate_latest(REGISTRY).decode("utf-8")
             parts.append(reg_text)
         except Exception as e:
@@ -393,12 +429,12 @@ def metrics_endpoint():
 
         combined = "\n".join(p for p in parts if p)
         if not combined:
-            metrics.inc_metric("api_metrics_failures_total")
+            get_metrics().inc_metric("api_metrics_failures_total")
             return Response("# metrics_export_error 1\n", mimetype="text/plain"), 500
 
         return Response(combined, mimetype=CONTENT_TYPE_LATEST), 200
     except Exception as e:
-        metrics.inc_metric("api_metrics_failures_total")
+        get_metrics().inc_metric("api_metrics_failures_total")
         log_event(
             service="app",
             event="metrics_export_error",
@@ -416,19 +452,19 @@ def metrics_endpoint():
 def tts_test():
     trace_id = get_trace_id(request)
     try:
-        metrics.inc_metric("api_tts_test_requests_total")
+        get_metrics().inc_metric("api_tts_test_requests_total")
         data = request.get_json(force=True)
         session_id = data.get("session_id")
         text = data.get("text", "")
         
         celery.send_task("tasks.run_tts", args=[session_id, text])
         
-        metrics.inc_metric("api_tts_test_dispatched_total")
+        get_metrics().inc_metric("api_tts_test_dispatched_total")
         log_event(service="app", event="tts_task_dispatched", status="ok", 
                   trace_id=trace_id, extra={"session_id": session_id})
         return jsonify({"status": "queued", "trace_id": trace_id})
     except Exception as e:
-        metrics.inc_metric("api_tts_test_failures_total")
+        get_metrics().inc_metric("api_tts_test_failures_total")
         log_event(service="app", event="tts_dispatch_failed", status="error", 
                   message=str(e), trace_id=trace_id)
         return jsonify({"status": "error", "trace_id": trace_id, "message": str(e)}), 500
@@ -442,7 +478,7 @@ def readiness_probe():
     """Kubernetes-style readiness probe with component checks."""
     trace_id = get_trace_id(request)
     try:
-        metrics.inc_metric("api_ready_requests_total")
+        get_metrics().inc_metric("api_ready_requests_total")
         
         checks = {}
         all_healthy = True
@@ -496,7 +532,7 @@ def readiness_probe():
         }), status_code
         
     except Exception as e:
-        metrics.inc_metric("api_ready_failures_total")
+        get_metrics().inc_metric("api_ready_failures_total")
         log_event(service="app", event="readiness_error", status="error",
                   message=str(e), trace_id=trace_id)
         return jsonify({"status": "error", "message": str(e), "trace_id": trace_id}), 500
@@ -506,7 +542,10 @@ def readiness_probe():
 # Main entrypoint
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
+    # Initialize metrics on startup
+    _ensure_initialized()
+    
     log_event(service="app", event="application_start", status="ok",
               message="Sara AI Core API starting", 
               extra={"phase": "11-D", "validated_components": len(startup_components)})
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
+    app.run(host="0.0.0.0", port=Config.PORT, debug=False)

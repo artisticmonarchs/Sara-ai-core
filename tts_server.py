@@ -3,7 +3,6 @@ tts_server.py — Phase 11-D Deepgram Integration (Production Standardization)
 Handles text-to-speech requests for Sara AI Core with full observability.
 """
 
-import os
 import io
 import time
 import json
@@ -11,20 +10,69 @@ from flask import Flask, request, jsonify, send_file
 
 # Phase 11-D Standardized Imports
 from config import Config
+
+# Phase 11-D: Defer metrics imports to avoid circular dependencies
+def _get_metrics():
+    """Lazy import metrics to avoid circular imports."""
+    try:
+        from metrics_collector import increment_metric, observe_latency
+        return increment_metric, observe_latency
+    except ImportError:
+        # Safe no-op fallbacks
+        def _noop_inc(*args, **kwargs): pass
+        def _noop_obs(*args, **kwargs): pass
+        return _noop_inc, _noop_obs
+
+# Initialize lazy metrics
+increment_metric, observe_latency = _get_metrics()
+
+# Phase 11-D: Import other dependencies
 from logging_utils import log_event, get_trace_id
 from redis_client import get_client, safe_redis_operation
-from metrics_collector import increment_metric, observe_latency
 from sentry_utils import init_sentry, capture_exception_safe
 from celery_app import celery
-from global_metrics_store import start_background_sync
 
 # --------------------------------------------------------------------------
-# Initialization
+# Initialization (No side effects at import)
 # --------------------------------------------------------------------------
-init_sentry()
-start_background_sync(service_name="tts_server")
-
 app = Flask(__name__)
+SERVICE_NAME = "tts_server"
+
+# Redis client for lightweight metrics (lazy initialization)
+_redis_client = None
+
+def get_redis_client():
+    """Lazy Redis client initialization."""
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = get_client()
+    return _redis_client
+
+def initialize_tts_server():
+    """Initialize TTS server components - call this at startup."""
+    # Initialize Sentry
+    init_sentry()
+    
+    # Phase 11-D: Start background sync only when explicitly initialized
+    try:
+        from global_metrics_store import start_background_sync
+        start_background_sync(service_name=SERVICE_NAME)
+        log_event(
+            service=SERVICE_NAME,
+            event="global_metrics_sync_started",
+            status="info",
+            message="Background global metrics sync started for tts_server",
+            trace_id=get_trace_id()
+        )
+    except Exception as e:
+        log_event(
+            service=SERVICE_NAME, 
+            event="global_metrics_sync_failed", 
+            status="error",
+            message="Failed to start background metrics sync",
+            trace_id=get_trace_id(),
+            extra={"error": str(e)}
+        )
 
 # --------------------------------------------------------------------------
 # Circuit Breaker Implementation (Canonical Pattern)
@@ -32,7 +80,7 @@ app = Flask(__name__)
 def _is_circuit_breaker_open(service: str = "tts") -> bool:
     """Canonical circuit breaker check used across Phase 11-D services."""
     try:
-        client = get_client()
+        client = get_redis_client()
         if not client:
             return False
         key = f"circuit_breaker:{service}:state"
@@ -416,8 +464,9 @@ def health_check():
     
     try:
         # Check Redis connectivity with safety wrapper
+        redis_client = get_redis_client()
         redis_health = safe_redis_operation(
-            lambda: get_client().ping(),
+            lambda: redis_client.ping() if redis_client else False,
             fallback=False,
             operation_name="health_check_ping"
         )
@@ -464,8 +513,9 @@ def detailed_health_check():
     
     try:
         # Redis health
+        redis_client = get_redis_client()
         redis_ok = safe_redis_operation(
-            lambda: get_client().ping(),
+            lambda: redis_client.ping() if redis_client else False,
             fallback=False,
             operation_name="detailed_health_ping"
         )
@@ -535,7 +585,10 @@ def detailed_health_check():
 # Entrypoint (Render will use Gunicorn)
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.getenv("TTS_PORT", Config.TTS_PORT))
+    # Initialize the server before running
+    initialize_tts_server()
+    
+    port = getattr(Config, 'TTS_PORT', 7001)
     
     log_event(
         service="tts_server",

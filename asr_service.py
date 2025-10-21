@@ -44,17 +44,18 @@ except ImportError:
         return None
 
 # --------------------------------------------------------------------------
-# Phase 11-D Metrics Integration
+# Phase 11-D Metrics Integration (Lazy Load)
 # --------------------------------------------------------------------------
-try:
-    from metrics_collector import increment_metric, observe_latency
-except ImportError:
-    # Fallback metrics functions
-    def increment_metric(metric_name: str, value: int = 1):
-        pass
-    
-    def observe_latency(metric_name: str, latency_ms: float):
-        pass
+# Lazy metrics shim to avoid circular imports at import-time
+def _get_metrics():
+    try:
+        from metrics_collector import increment_metric as _inc, observe_latency as _obs
+        return _inc, _obs
+    except Exception:
+        # safe no-op fallbacks
+        def _noop_inc(*a, **k): pass
+        def _noop_obs(*a, **k): pass
+        return _noop_inc, _noop_obs
 
 # --------------------------------------------------------------------------
 # Phase 11-D Metric Constants
@@ -135,14 +136,16 @@ def _convert_audio_to_text(audio_bytes: bytes) -> Optional[str]:
             audio = recognizer.record(source)
         text = recognizer.recognize_google(audio)
         
-        # Phase 11-D: Record latency
+        # Phase 11-D: Record latency (lazy metrics)
         latency_ms = (time.time() - start_time) * 1000
-        observe_latency(ASR_LATENCY_METRIC, latency_ms)
+        _inc, _obs = _get_metrics()
+        _obs(ASR_LATENCY_METRIC, latency_ms)
         
         return text
     except Exception as e:
-        # Phase 11-D: Increment failure metric
-        increment_metric(ASR_FAILURE_METRIC)
+        # Phase 11-D: Increment failure metric (lazy metrics)
+        _inc, _obs = _get_metrics()
+        _inc(ASR_FAILURE_METRIC)
         
         log_event(
             service="asr_service",
@@ -224,8 +227,9 @@ def process_audio_stream(call_sid: str, audio_chunk: bytes, trace_id: Optional[s
         update_partial_transcript(call_sid, text, {"chunk_size": len(audio_chunk)}, trace_id)
         _store_partial_state(call_sid, text, trace_id)
         
-        # Phase 11-D: Increment partial chunk metric
-        increment_metric(ASR_PARTIAL_METRIC)
+        # Phase 11-D: Increment partial chunk metric (lazy metrics)
+        _inc, _obs = _get_metrics()
+        _inc(ASR_PARTIAL_METRIC)
         
         # 🔹 Truncate logged text to first 200 chars for readability
         log_event(
@@ -240,8 +244,9 @@ def process_audio_stream(call_sid: str, audio_chunk: bytes, trace_id: Optional[s
             service_version="11d"
         )
     except Exception as e:
-        # Phase 11-D: Increment failure metric
-        increment_metric(ASR_FAILURE_METRIC)
+        # Phase 11-D: Increment failure metric (lazy metrics)
+        _inc, _obs = _get_metrics()
+        _inc(ASR_FAILURE_METRIC)
         
         log_event(
             service="asr_service",
@@ -295,8 +300,9 @@ def process_final_audio(call_sid: str, audio_data: bytes, trace_id: Optional[str
         )
         _store_final_state(call_sid, text, trace_id)
 
-        # Phase 11-D: Increment final chunk metric
-        increment_metric(ASR_FINAL_METRIC)
+        # Phase 11-D: Increment final chunk metric (lazy metrics)
+        _inc, _obs = _get_metrics()
+        _inc(ASR_FINAL_METRIC)
 
         log_event(
             service="asr_service",
@@ -314,8 +320,9 @@ def process_final_audio(call_sid: str, audio_data: bytes, trace_id: Optional[str
         run_inference.delay({"text": text, "call_sid": call_sid, "trace_id": trace_id})
 
     except Exception as e:
-        # Phase 11-D: Increment failure metric
-        increment_metric(ASR_FAILURE_METRIC)
+        # Phase 11-D: Increment failure metric (lazy metrics)
+        _inc, _obs = _get_metrics()
+        _inc(ASR_FAILURE_METRIC)
         
         log_event(
             service="asr_service",
@@ -375,7 +382,18 @@ if __name__ == "__main__":
     """
     import sys
     if len(sys.argv) < 3:
-        print("Usage: python asr_service.py <audio_file.wav> <call_sid>")
+        # Replace print with log_event fallback
+        try:
+            log_event(
+                service="asr_service",
+                event="cli_usage_error",
+                status="error",
+                message="Usage: python asr_service.py <audio_file.wav> <call_sid>",
+                schema_version="phase_11d_v1",
+                service_version="11d"
+            )
+        except Exception:
+            print("Usage: python asr_service.py <audio_file.wav> <call_sid>")
         sys.exit(1)
 
     file_path = sys.argv[1]
@@ -384,4 +402,15 @@ if __name__ == "__main__":
         audio_bytes = f.read()
 
     process_final_audio(call_sid, audio_bytes)
-    print(f"[ASR] Processed final audio for call_sid={call_sid}")
+    try:
+        log_event(
+            service="asr_service",
+            event="cli_processing_complete",
+            status="info",
+            message=f"Processed final audio for call_sid={call_sid}",
+            call_sid=call_sid,
+            schema_version="phase_11d_v1",
+            service_version="11d"
+        )
+    except Exception:
+        print(f"[ASR] Processed final audio for call_sid={call_sid}")

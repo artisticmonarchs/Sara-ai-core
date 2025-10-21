@@ -15,9 +15,36 @@ from logging_utils import get_json_logger, log_event, get_trace_id
 # Phase 11-D canonical imports
 from config import Config
 from redis_client import get_redis_client, safe_redis_operation
-from metrics_collector import increment_metric, observe_latency
-from sentry_utils import init_sentry, capture_exception_safe
-from global_metrics_store import start_background_sync
+
+# Lazy imports to avoid circular dependencies
+def _get_metrics():
+    """Lazy import metrics to avoid circular imports"""
+    try:
+        from metrics_collector import increment_metric, observe_latency
+        return increment_metric, observe_latency
+    except Exception:
+        def _noop_inc(*a, **k): pass
+        def _noop_obs(*a, **k): pass
+        return _noop_inc, _noop_obs
+
+def _get_sentry():
+    """Lazy import sentry to avoid import-time side effects"""
+    try:
+        from sentry_utils import init_sentry, capture_exception_safe
+        return init_sentry, capture_exception_safe
+    except Exception:
+        def _noop_init(*a, **k): pass
+        def _noop_capture(*a, **k): pass
+        return _noop_init, _noop_capture
+
+def _get_global_metrics():
+    """Lazy import global_metrics_store to avoid import-time side effects"""
+    try:
+        from global_metrics_store import start_background_sync
+        return start_background_sync
+    except Exception:
+        def _noop_sync(*a, **k): pass
+        return _noop_sync
 
 # --------------------------------------------------------------------------
 # Compliance Metadata
@@ -27,21 +54,25 @@ __schema_version__ = "phase_11d_v1"
 __service__ = "voice_pipeline"
 
 # --------------------------------------------------------------------------
-# Initialization
+# Initialization (MOVED from module top to function)
 # --------------------------------------------------------------------------
-init_sentry()
-start_background_sync(service_name="voice_pipeline")
+def initialize_voice_pipeline():
+    """Initialize voice pipeline services - call this explicitly from app startup"""
+    init_sentry, capture_exception_safe = _get_sentry()
+    start_background_sync = _get_global_metrics()
+    
+    init_sentry()
+    start_background_sync(service_name="voice_pipeline")
+    
+    log_event(
+        service=__service__,
+        event="startup_init", 
+        status="info",
+        message="Voice pipeline initialized with Phase 11-D compliance",
+        extra={"phase": __phase__, "schema_version": __schema_version__}
+    )
 
 logger = get_json_logger("sara-ai-core-voice")
-
-# Startup logging
-log_event(
-    service=__service__,
-    event="startup_init", 
-    status="info",
-    message="Voice pipeline initialized with Phase 11-D compliance",
-    extra={"phase": __phase__, "schema_version": __schema_version__}
-)
 
 # Optional imports (ASR / Twilio)
 try:
@@ -58,15 +89,15 @@ except Exception:
 # Centralized configuration (from config.settings)
 # --------------------------------------------------------------------------
 SERVICE_NAME = __service__
-SARA_ENV = getattr(Config, "SARA_ENV", "development")
+SARA_ENV = Config.SARA_ENV
 
-CALL_STATE_TTL = int(getattr(Config, "CALL_STATE_TTL", 60 * 60 * 4))
-PARTIAL_THROTTLE_SECONDS = float(getattr(Config, "PARTIAL_THROTTLE_SECONDS", 1.5))
+CALL_STATE_TTL = Config.CALL_STATE_TTL
+PARTIAL_THROTTLE_SECONDS = Config.PARTIAL_THROTTLE_SECONDS
 PARTIAL_THROTTLE_PREFIX = "partial_throttle:"
 
-INFERENCE_TASK_NAME = getattr(Config, "INFERENCE_TASK_NAME", "sara_ai.tasks.voice_pipeline.run_inference")
-EVENT_TASK_NAME = getattr(Config, "EVENT_TASK_NAME", "sara_ai.tasks.voice_pipeline.dispatch_event")
-CELERY_VOICE_QUEUE = getattr(Config, "CELERY_VOICE_QUEUE", "voice_pipeline")
+INFERENCE_TASK_NAME = Config.INFERENCE_TASK_NAME
+EVENT_TASK_NAME = Config.EVENT_TASK_NAME
+CELERY_VOICE_QUEUE = Config.CELERY_VOICE_QUEUE
 
 # --------------------------------------------------------------------------
 # Circuit Breaker Implementation (Canonical Pattern)
@@ -82,6 +113,7 @@ def _is_circuit_breaker_open(service: str = "voice_pipeline") -> bool:
         
         # Record circuit breaker check metric
         try:
+            increment_metric, _ = _get_metrics()
             increment_metric("voice_pipeline_circuit_breaker_checks_total")
         except Exception:
             pass
@@ -104,6 +136,7 @@ def _is_circuit_breaker_open(service: str = "voice_pipeline") -> bool:
 def _record_metrics(event_type: str, status: str, latency_ms: float = None, trace_id: str = None):
     """Record standardized metrics for voice pipeline operations (seconds for latency)."""
     try:
+        increment_metric, observe_latency = _get_metrics()
         # Counters (best-effort)
         try:
             increment_metric(f"voice_pipeline_{event_type}_{status}_total")
@@ -171,6 +204,7 @@ def _get_r_client() -> Optional[Any]:
             rr.ping()
         # Record success metric
         try:
+            increment_metric, _ = _get_metrics()
             increment_metric("voice_pipeline_redis_success_total")
         except Exception:
             pass
@@ -178,6 +212,7 @@ def _get_r_client() -> Optional[Any]:
     except Exception as e:
         # Record failure metric
         try:
+            increment_metric, _ = _get_metrics()
             increment_metric("voice_pipeline_redis_failures_total")
         except Exception:
             pass
@@ -195,6 +230,7 @@ def _store_call_state(call_sid: str, trace_id: str, state: Dict[str, Any]) -> No
                         message="Redis unavailable during store", trace_id=trace_id, call_sid=call_sid)
         # record pipeline-level error metric
         try:
+            increment_metric, _ = _get_metrics()
             increment_metric("voice_pipeline_errors_total")
         except Exception:
             pass
@@ -233,6 +269,7 @@ def _store_call_state(call_sid: str, trace_id: str, state: Dict[str, Any]) -> No
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
         _record_metrics("store_state", "failure", latency_ms, trace_id)
+        _, capture_exception_safe = _get_sentry()
         capture_exception_safe(e, {"service": SERVICE_NAME, "trace_id": trace_id, "call_sid": call_sid})
         _structured_log("redis_set_failed", level="error", message=str(e),
                         trace_id=trace_id, call_sid=call_sid, extra={"traceback": traceback.format_exc()})
@@ -273,6 +310,7 @@ def _get_call_state(call_sid: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
         _record_metrics("get_state", "failure", latency_ms)
+        _, capture_exception_safe = _get_sentry()
         capture_exception_safe(e, {"service": SERVICE_NAME, "call_sid": call_sid})
         _structured_log("redis_get_failed", level="warn", message=str(e),
                         trace_id=get_trace_id(), call_sid=call_sid, extra={"traceback": traceback.format_exc()})
@@ -302,6 +340,7 @@ def clear_session(call_sid: str):
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
         _record_metrics("clear_session", "failure", latency_ms, trace_id)
+        _, capture_exception_safe = _get_sentry()
         capture_exception_safe(e, {"service": SERVICE_NAME, "trace_id": trace_id, "call_sid": call_sid})
         _structured_log("redis_delete_failed", level="warn", message=str(e),
                         trace_id=trace_id, call_sid=call_sid, extra={"traceback": traceback.format_exc()})
@@ -320,6 +359,7 @@ def _should_dispatch_partial(call_sid: str) -> bool:
         # Circuit breaker check
         if _is_circuit_breaker_open("redis"):
             try:
+                increment_metric, _ = _get_metrics()
                 increment_metric("voice_pipeline_circuit_breaker_hits_total")
             except Exception:
                 pass
@@ -331,6 +371,7 @@ def _should_dispatch_partial(call_sid: str) -> bool:
         if not rr:
             # Redis unavailable - allow dispatch but record metric
             try:
+                increment_metric, _ = _get_metrics()
                 increment_metric("voice_pipeline_redis_failures_total")
             except Exception:
                 pass
@@ -354,6 +395,7 @@ def _should_dispatch_partial(call_sid: str) -> bool:
             if not was_set:
                 # Throttled
                 try:
+                    increment_metric, _ = _get_metrics()
                     increment_metric("voice_pipeline_partial_throttled_total")
                 except Exception:
                     pass
@@ -363,6 +405,7 @@ def _should_dispatch_partial(call_sid: str) -> bool:
         except Exception as e:
             latency_ms = (time.time() - start_time) * 1000
             _record_metrics("throttle_check", "failure", latency_ms)
+            _, capture_exception_safe = _get_sentry()
             capture_exception_safe(e, {"service": SERVICE_NAME, "call_sid": call_sid})
             _structured_log("partial_throttle_error", level="warn",
                             message=str(e), trace_id=get_trace_id(), call_sid=call_sid,
@@ -396,12 +439,14 @@ def _twilio_with_retries(func: Callable, *args, max_attempts: int = 3, trace_id:
     latency_ms = (time.time() - start_time) * 1000
     _record_metrics("twilio_operation", "failure", latency_ms, trace_id)
     try:
+        increment_metric, _ = _get_metrics()
         increment_metric("voice_pipeline_errors_total")
     except Exception:
         pass
     
     # Capture final exception
     if last_exc:
+        _, capture_exception_safe = _get_sentry()
         capture_exception_safe(last_exc, {"service": SERVICE_NAME, "trace_id": trace_id, "call_sid": call_sid})
         
     return None
@@ -416,6 +461,7 @@ def _handle_partial_result(call_sid: str, text: str, payload: dict, trace_id: st
 
     if not _should_dispatch_partial(call_sid):
         try:
+            increment_metric, _ = _get_metrics()
             increment_metric("voice_pipeline_partial_throttled_total")
         except Exception:
             pass
@@ -447,6 +493,7 @@ def _handle_partial_result(call_sid: str, text: str, payload: dict, trace_id: st
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
         _record_metrics("partial_dispatch", "failure", latency_ms, trace_id)
+        _, capture_exception_safe = _get_sentry()
         capture_exception_safe(e, {"service": SERVICE_NAME, "trace_id": trace_id, "call_sid": call_sid})
         _structured_log("partial_dispatch_failed", level="error", message=str(e), trace_id=trace_id, call_sid=call_sid,
                         extra={"traceback": traceback.format_exc()})
@@ -460,6 +507,7 @@ def _handle_final_result(call_sid: str, text: str, payload: dict, trace_id: str)
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
         _record_metrics("final_processing", "failure", latency_ms, trace_id)
+        _, capture_exception_safe = _get_sentry()
         capture_exception_safe(e, {"service": SERVICE_NAME, "trace_id": trace_id, "call_sid": call_sid})
         _structured_log("final_process_failed", level="error", message=str(e), trace_id=trace_id, call_sid=call_sid, extra={"traceback": traceback.format_exc()})
 
@@ -474,6 +522,7 @@ def process_audio_chunk(call_sid: str, audio_chunk: bytes,
     # Circuit breaker check
     if _is_circuit_breaker_open("voice_pipeline"):
         try:
+            increment_metric, _ = _get_metrics()
             increment_metric("voice_pipeline_circuit_breaker_hits_total")
         except Exception:
             pass
@@ -483,6 +532,7 @@ def process_audio_chunk(call_sid: str, audio_chunk: bytes,
 
     # metrics: count chunk
     try:
+        increment_metric, _ = _get_metrics()
         increment_metric("voice_pipeline_chunks_total")
     except Exception:
         pass
@@ -495,6 +545,7 @@ def process_audio_chunk(call_sid: str, audio_chunk: bytes,
     if not process_audio_buffer:
         _structured_log("asr_missing", level="error", message="ASR backend unavailable", trace_id=trace, call_sid=call_sid)
         try:
+            increment_metric, _ = _get_metrics()
             increment_metric("voice_pipeline_asr_failures_total")
         except Exception:
             pass
@@ -507,6 +558,7 @@ def process_audio_chunk(call_sid: str, audio_chunk: bytes,
             consumed, result = process_audio_buffer(call_sid, bytearray(audio_chunk))
         except (ValueError, TypeError) as e:
             try:
+                increment_metric, _ = _get_metrics()
                 increment_metric("voice_pipeline_asr_invalid_output_total")
             except Exception:
                 pass
@@ -519,6 +571,7 @@ def process_audio_chunk(call_sid: str, audio_chunk: bytes,
         latency_ms = duration * 1000
         
         try:
+            _, observe_latency = _get_metrics()
             observe_latency("voice_pipeline_asr_latency_seconds", duration)
         except Exception:
             pass
@@ -544,6 +597,7 @@ def process_audio_chunk(call_sid: str, audio_chunk: bytes,
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
         _record_metrics("chunk_processing", "failure", latency_ms, trace)
+        _, capture_exception_safe = _get_sentry()
         capture_exception_safe(e, {"service": SERVICE_NAME, "trace_id": trace, "call_sid": call_sid})
         _structured_log("asr_processing_failed", level="error", message=str(e), trace_id=trace, call_sid=call_sid, extra={"traceback": traceback.format_exc()})
 
@@ -600,6 +654,7 @@ def process_final_transcript(call_sid: str, final_text: str,
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
         _record_metrics("final_processing", "failure", latency_ms, resolved)
+        _, capture_exception_safe = _get_sentry()
         capture_exception_safe(e, {"service": SERVICE_NAME, "trace_id": resolved, "call_sid": call_sid})
         _structured_log("final_store_failed", level="error", message=str(e), trace_id=resolved, call_sid=call_sid, extra={"traceback": traceback.format_exc()})
         return {"ok": False, "error": str(e)}
@@ -614,6 +669,7 @@ def _dispatch_inference_final(final_text: str, call_sid: str, trace_id: str) -> 
                 return {"ok": False, "error": "twilio_dispatch_failed"}
             _structured_log("inference_dispatched_via_twilio_client", message="Inference dispatched via Twilio client", trace_id=trace_id, call_sid=call_sid)
             try:
+                increment_metric, _ = _get_metrics()
                 increment_metric("voice_pipeline_inference_dispatched_total")
             except Exception:
                 pass
@@ -629,6 +685,7 @@ def _dispatch_inference_final(final_text: str, call_sid: str, trace_id: str) -> 
                 queue=CELERY_VOICE_QUEUE
             )
             try:
+                increment_metric, _ = _get_metrics()
                 increment_metric("voice_pipeline_inference_dispatched_total")
             except Exception:
                 pass
@@ -638,6 +695,7 @@ def _dispatch_inference_final(final_text: str, call_sid: str, trace_id: str) -> 
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
         _record_metrics("inference_dispatch", "failure", latency_ms, trace_id)
+        _, capture_exception_safe = _get_sentry()
         capture_exception_safe(e, {"service": SERVICE_NAME, "trace_id": trace_id, "call_sid": call_sid})
         _structured_log("inference_dispatch_error", level="error", message=str(e), trace_id=trace_id, call_sid=call_sid, extra={"traceback": traceback.format_exc()})
         return {"ok": False, "error": str(e)}
@@ -647,6 +705,7 @@ def _dispatch_inference_final(final_text: str, call_sid: str, trace_id: str) -> 
 # --------------------------------------------------------------------------
 def _test_simulate_chunk_flow():
     try:
+        increment_metric, _ = _get_metrics()
         increment_metric("voice_pipeline_test_runs_total")
     except Exception:
         pass
@@ -673,6 +732,7 @@ def _test_simulate_chunk_flow():
 
 def _test_simulate_final_flow():
     try:
+        increment_metric, _ = _get_metrics()
         increment_metric("voice_pipeline_test_runs_total")
     except Exception:
         pass
@@ -685,7 +745,8 @@ def _test_simulate_final_flow():
 __all__ = [
     "process_audio_chunk", "process_final_transcript",
     "_store_call_state", "_get_call_state", "get_session_metadata",
-    "clear_session", "_test_simulate_chunk_flow", "_test_simulate_final_flow"
+    "clear_session", "_test_simulate_chunk_flow", "_test_simulate_final_flow",
+    "initialize_voice_pipeline"  # ADDED: explicit initialization function
 ]
 
 # --------------------------------------------------------------------------
@@ -693,6 +754,10 @@ __all__ = [
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
     from flask import Flask, jsonify
+    
+    # Initialize explicitly when run as main
+    initialize_voice_pipeline()
+    
     app = Flask(__name__)
     
     @app.route("/health", methods=["GET"])
@@ -704,6 +769,7 @@ if __name__ == "__main__":
         try:
             # Record health check metric
             try:
+                increment_metric, _ = _get_metrics()
                 increment_metric("voice_pipeline_health_checks_total")
             except Exception:
                 pass
@@ -768,6 +834,7 @@ if __name__ == "__main__":
         except Exception as e:
             latency_ms = (time.time() - start_time) * 1000
             _record_metrics("health_check", "failure", latency_ms, trace_id)
+            _, capture_exception_safe = _get_sentry()
             capture_exception_safe(e, {"service": "voice_pipeline", "health_check": "main"})
             return jsonify({
                 "service": "voice_pipeline", 
@@ -786,5 +853,5 @@ if __name__ == "__main__":
         extra={"phase": __phase__, "schema_version": __schema_version__}
     )
     
-    port = int(getattr(Config, "VOICE_PIPELINE_PORT", 7000))
+    port = Config.VOICE_PIPELINE_PORT
     app.run(host="0.0.0.0", port=port)

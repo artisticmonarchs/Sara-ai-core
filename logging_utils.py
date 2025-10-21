@@ -43,52 +43,31 @@ except ImportError:
     config = FallbackConfig()
 
 # --------------------------------------------------------------------------
-# Phase 11-D Redis Integration with Circuit Breaker
+# Lazy Metrics Shim to Avoid Circular Imports
 # --------------------------------------------------------------------------
-try:
-    from redis_client import safe_redis_operation, get_circuit_breaker_status
-    _has_redis_client = True
-except Exception:
-    _has_redis_client = False
-    # Fixed fallback implementations to match expected usage pattern
-    def safe_redis_operation(func, fallback=None, operation_name=None):
-        """
-        Execute a callable that accepts a single 'client' argument.
-        If redis is not available, return fallback.
-        """
-        try:
-            # Try to import minimal client
-            from redis_client import get_client
-            client = get_client()
-            if not client:
-                return fallback
-            try:
-                return func(client)
-            except Exception:
-                return fallback
-        except Exception:
-            # No redis_client available - execute without a client
-            try:
-                return func(None)  # Pass None as client
-            except Exception:
-                return fallback
-    
-    def get_circuit_breaker_status():
-        return {"state": "DISABLED", "enabled": False}
+def _get_metrics():
+    """Lazy import metrics functions to break circular imports."""
+    try:
+        from metrics_collector import increment_metric as _inc, observe_latency as _obs
+        return _inc, _obs
+    except Exception:
+        # safe no-op fallbacks
+        def _noop_inc(*a, **k): pass
+        def _noop_obs(*a, **k): pass
+        return _noop_inc, _noop_obs
 
-# --------------------------------------------------------------------------
-# Phase 11-D Metrics Integration
-# --------------------------------------------------------------------------
 # Safe metric wrappers to handle signature differences
 def _increment_metric_safe(metric_name: str, value: int = 1):
     """Safe wrapper for increment_metric with flexible signature handling."""
     try:
-        increment_metric(metric_name, value)
+        inc_func, _ = _get_metrics()
+        inc_func(metric_name, value)
     except TypeError:
         try:
             # Try older API signature: increment_metric(key, field, amount)
             # Use metric_name as both key and field for compatibility
-            increment_metric(metric_name, metric_name, value)
+            inc_func, _ = _get_metrics()
+            inc_func(metric_name, metric_name, value)
         except Exception:
             pass  # Silently fail if metrics are not available
     except Exception:
@@ -97,26 +76,47 @@ def _increment_metric_safe(metric_name: str, value: int = 1):
 def _observe_latency_safe(metric_name: str, latency_ms: float):
     """Safe wrapper for observe_latency with flexible signature handling."""
     try:
-        observe_latency(metric_name, latency_ms)
+        _, obs_func = _get_metrics()
+        obs_func(metric_name, latency_ms)
     except Exception:
         pass  # Silently fail if metrics are not available
 
-try:
-    from metrics_collector import increment_metric, observe_latency
-except ImportError:
-    # Fallback metrics functions
-    def increment_metric(metric_name: str, value: int = 1):
-        pass
-    
-    def observe_latency(metric_name: str, latency_ms: float):
-        pass
-    
-    # Use direct fallbacks for safe functions
-    def _increment_metric_safe(metric_name: str, value: int = 1):
-        pass
-    
-    def _observe_latency_safe(metric_name: str, latency_ms: float):
-        pass
+# --------------------------------------------------------------------------
+# Lazy Redis Client Shim to Avoid Circular Imports
+# --------------------------------------------------------------------------
+def _get_redis_utils():
+    """Lazy import redis utilities to break circular imports."""
+    try:
+        from redis_client import safe_redis_operation, get_circuit_breaker_status
+        return safe_redis_operation, get_circuit_breaker_status, True
+    except Exception:
+        # Fixed fallback implementations to match expected usage pattern
+        def safe_redis_operation(func, fallback=None, operation_name=None):
+            """
+            Execute a callable that accepts a single 'client' argument.
+            If redis is not available, return fallback.
+            """
+            try:
+                # Try to import minimal client
+                from redis_client import get_client
+                client = get_client()
+                if not client:
+                    return fallback
+                try:
+                    return func(client)
+                except Exception:
+                    return fallback
+            except Exception:
+                # No redis_client available - execute without a client
+                try:
+                    return func(None)  # Pass None as client
+                except Exception:
+                    return fallback
+        
+        def get_circuit_breaker_status():
+            return {"state": "DISABLED", "enabled": False}
+        
+        return safe_redis_operation, get_circuit_breaker_status, False
 
 # --------------------------------------------------------------------------
 # Phase 11-D Log Buffer for Fault Tolerance
@@ -210,11 +210,16 @@ def _flush_log_buffer():
     """Flush buffered logs to Redis if available."""
     global _last_flush_time
     
-    if not _buffer_enabled or not _log_buffer or not _has_redis_client:
+    if not _buffer_enabled or not _log_buffer:
         return
     
     current_time = time.time()
     if current_time - _last_flush_time < config.LOG_FLUSH_INTERVAL:
+        return
+    
+    # Lazy import Redis utilities
+    safe_redis_operation, _, has_redis = _get_redis_utils()
+    if not has_redis:
         return
     
     with _buffer_lock:
@@ -260,7 +265,9 @@ def _flush_log_buffer():
 
 def recover_buffered_logs() -> int:
     """Recover buffered logs from Redis (typically on service startup)."""
-    if not _has_redis_client:
+    # Lazy import Redis utilities
+    safe_redis_operation, _, has_redis = _get_redis_utils()
+    if not has_redis:
         return 0
     
     try:
@@ -516,7 +523,8 @@ def health_check() -> Dict[str, Any]:
         
         # Check Redis connectivity
         redis_status = "unknown"
-        if _has_redis_client:
+        _, get_circuit_breaker_status, has_redis = _get_redis_utils()
+        if has_redis:
             cb_status = get_circuit_breaker_status()
             redis_status = cb_status["state"]
         
@@ -630,7 +638,7 @@ def initialize_logging_system():
             "log_buffering": _buffer_enabled,
             "buffer_size": config.LOG_BUFFER_SIZE,
             "recovered_logs": recovered_logs,
-            "redis_available": _has_redis_client
+            "redis_available": _get_redis_utils()[2]  # has_redis
         }
     )
 

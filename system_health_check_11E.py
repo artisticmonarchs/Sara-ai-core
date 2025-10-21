@@ -10,11 +10,48 @@ import sys
 from datetime import datetime
 import uuid
 
-# Phase 11-E: Multi-service configuration
+# Configuration isolation with lazy loading
+def _get_config():
+    try:
+        from config import Config
+        return Config
+    except Exception:
+        class FallbackConfig:
+            SERVICE_NAME = "system_health_check"
+            # Service URLs should be configured via environment variables
+            APP_URL = "https://sara-ai-core-app.onrender.com"
+            STREAMING_URL = "https://sara-ai-core-streaming.onrender.com"
+            WORKER_URL = "https://sara-ai-core-worker.onrender.com"
+        return FallbackConfig
+
+Config = _get_config()
+
+# Structured logging with lazy shim
+def _get_logger():
+    try:
+        from logging_utils import log_event
+        return log_event
+    except Exception:
+        def _noop_log(*a, **k): 
+            # Fallback to print for health check script
+            print(f"[{a[0]}] {a[2] if len(a) > 2 else a[1] if len(a) > 1 else ''}")
+        return _noop_log
+
+log_event = _get_logger()
+
+# Trace ID with fallback
+def _get_trace_id():
+    try:
+        from logging_utils import get_trace_id
+        return get_trace_id()
+    except Exception:
+        return str(uuid.uuid4())[:8]
+
+# Phase 11-E: Multi-service configuration - using Config
 SERVICES = {
-    "app": "https://sara-ai-core-app.onrender.com",
-    "streaming": "https://sara-ai-core-streaming.onrender.com", 
-    "worker": "https://sara-ai-core-worker.onrender.com"
+    "app": getattr(Config, "APP_URL", "https://sara-ai-core-app.onrender.com"),
+    "streaming": getattr(Config, "STREAMING_URL", "https://sara-ai-core-streaming.onrender.com"), 
+    "worker": getattr(Config, "WORKER_URL", "https://sara-ai-core-worker.onrender.com")
 }
 
 ENDPOINTS = ["/healthz", "/health", "/metrics"]
@@ -146,6 +183,7 @@ def run_tts_test(service_url):
 
 def check_service_health(service_name, service_url):
     """Comprehensive service health check"""
+    trace_id = _get_trace_id()
     service_result = {
         "service": service_name,
         "url": service_url,
@@ -188,24 +226,33 @@ def check_service_health(service_name, service_url):
     if service_result["redis_validation"]["status"] != "success":
         service_result["overall_status"] = "degraded"
     
+    log_event("system_health_check", "service_health_checked", "info",
+             f"Completed health check for {service_name}",
+             service_name=service_name, status=service_result["overall_status"], 
+             trace_id=trace_id)
+    
     return service_result
 
 def main():
-    print("\n🚀 Starting Phase 11-E Multi-Service Health Validation")
-    print(f"→ Services: {', '.join(SERVICES.keys())}")
-    print(f"→ Session ID: {SESSION_ID}")
-    print(f"→ CI Mode: {CI_MODE}\n")
+    trace_id = _get_trace_id()
+    
+    log_event("system_health_check", "validation_started", "info",
+             "Starting Phase 11-E Multi-Service Health Validation",
+             services=list(SERVICES.keys()), session_id=SESSION_ID, 
+             ci_mode=CI_MODE, trace_id=trace_id)
     
     result = {
         "phase": "11-E",
         "schema_version": "phase_11e_v1",
         "start_time": datetime.utcnow().isoformat() + "Z",
         "services": {},
-        "overall_status": "healthy"
+        "overall_status": "healthy",
+        "trace_id": trace_id
     }
     
     # Step 1 — Baseline metrics from app service
-    print("📊 Fetching baseline metrics snapshot...")
+    log_event("system_health_check", "baseline_metrics_start", "info",
+             "Fetching baseline metrics snapshot", trace_id=trace_id)
     baseline_metrics_text = safe_get_text(f"{SERVICES['app']}/metrics")
     baseline_metrics = parse_prometheus_metrics(baseline_metrics_text)
     result["metrics_before"] = {
@@ -214,9 +261,12 @@ def main():
     }
     
     # Step 2 — Comprehensive service health checks
-    print("🔍 Performing multi-service health checks...")
+    log_event("system_health_check", "service_checks_start", "info",
+             "Performing multi-service health checks", trace_id=trace_id)
     for service_name, service_url in SERVICES.items():
-        print(f"  → Checking {service_name} service...")
+        log_event("system_health_check", "service_check_start", "info",
+                 f"Checking {service_name} service", 
+                 service_name=service_name, trace_id=trace_id)
         service_result = check_service_health(service_name, service_url)
         result["services"][service_name] = service_result
         
@@ -225,12 +275,14 @@ def main():
             result["overall_status"] = "degraded"
     
     # Step 3 — TTS functionality test
-    print("🗣️  Running TTS functionality test...")
+    log_event("system_health_check", "tts_test_start", "info",
+             "Running TTS functionality test", trace_id=trace_id)
     tts_result = run_tts_test(SERVICES['app'])
     result["tts_test"] = tts_result
     
     # Step 4 — Post-test metrics comparison
-    print("📈 Capturing post-test metrics...")
+    log_event("system_health_check", "post_metrics_start", "info",
+             "Capturing post-test metrics", trace_id=trace_id)
     time.sleep(3)  # Allow metric propagation
     after_metrics_text = safe_get_text(f"{SERVICES['app']}/metrics") 
     after_metrics = parse_prometheus_metrics(after_metrics_text)
@@ -253,34 +305,55 @@ def main():
          datetime.fromisoformat(result["start_time"].replace('Z', '+00:00'))).total_seconds(), 2
     )
     
-    # Output results
+    # Output results with structured logging
+    log_event("system_health_check", "validation_complete", "info",
+             "Phase 11-E health validation complete",
+             overall_status=result["overall_status"], 
+             healthy_services=len([s for s in result["services"].values() if s["overall_status"] == "healthy"]),
+             total_services=len(result["services"]),
+             duration_seconds=result["duration_seconds"],
+             trace_id=trace_id)
+    
+    # CI Mode output (minimal)
     if CI_MODE:
-        # Compact output for CI/CD pipelines
-        print(f"\n✅ HEALTH_CHECK_SUMMARY: {result['overall_status']}")
-        print(f"📊 SERVICES: {len([s for s in result['services'].values() if s['overall_status'] == 'healthy'])}/{len(result['services'])} healthy")
-        print(f"🔢 METRICS_DELTA: health_checks+{result['prometheus_deltas']['health_checks_delta']}")
-        if "r2_validation" in result.get("tts_test", {}):
-            r2_status = result["tts_test"]["r2_validation"]["status"]
-            print(f"☁️  R2_ACCESS: {r2_status}")
+        log_event("system_health_check", "ci_summary", "info",
+                 "CI Health Check Summary",
+                 overall_status=result["overall_status"],
+                 healthy_services=f"{len([s for s in result['services'].values() if s['overall_status'] == 'healthy'])}/{len(result['services'])}",
+                 metrics_delta=f"health_checks+{result['prometheus_deltas']['health_checks_delta']}",
+                 trace_id=trace_id)
     else:
         # Detailed output for manual runs
-        print("\n✅ Phase 11-E health validation complete.\n")
-        print(json.dumps(result, indent=2))
+        log_event("system_health_check", "detailed_results", "info",
+                 "Detailed validation results",
+                 result_summary=result, trace_id=trace_id)
     
-    # Always write detailed results to file
+    # Write detailed results to file with error handling
     timestamp = int(time.time())
     filename = f"system_health_summary_11E_{timestamp}.json"
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2)
-        if not CI_MODE:
-            print(f"\n📁 Detailed results written to {filename}")
+    try:
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2)
+        log_event("system_health_check", "results_saved", "info",
+                 "Detailed results written to file",
+                 filename=filename, trace_id=trace_id)
+    except Exception as e:
+        log_event("system_health_check", "file_save_failed", "error",
+                 "Failed to save results to file",
+                 filename=filename, error=str(e), trace_id=trace_id)
     
     # Exit code for CI/CD (0 = success, 1 = degraded/failed)
     exit_code = 0 if result["overall_status"] == "healthy" else 1
+    log_event("system_health_check", "exit_preparation", "info",
+             "Preparing to exit",
+             exit_code=exit_code, trace_id=trace_id)
+    
     if CI_MODE:
         sys.exit(exit_code)
     else:
-        print(f"\nExit code: {exit_code}")
+        log_event("system_health_check", "manual_exit", "info",
+                 "Manual execution complete",
+                 exit_code=exit_code, trace_id=trace_id)
 
 if __name__ == "__main__":
     main()

@@ -26,22 +26,20 @@ import traceback
 import uuid
 from contextlib import contextmanager
 
-from logging_utils import log_event
-
 # --------------------------------------------------------------------------
 # Phase 11-D Configuration Integration
 # --------------------------------------------------------------------------
 try:
     from config import Config
-    config = Config()
+    config = Config
     
     def get_metrics_config():
         return {
-            "enable_sync": config.ENABLE_METRICS_SYNC,
-            "sync_interval": config.METRICS_SYNC_INTERVAL,
-            "snapshot_interval": config.SNAPSHOT_INTERVAL,
-            "enable_persistence": config.ENABLE_METRICS_PERSISTENCE,
-            "enable_endpoint": config.METRICS_ENDPOINT_ENABLED,
+            "enable_sync": getattr(config, "ENABLE_METRICS_SYNC", True),
+            "sync_interval": getattr(config, "METRICS_SYNC_INTERVAL", 30),
+            "snapshot_interval": getattr(config, "SNAPSHOT_INTERVAL", 60),
+            "enable_persistence": getattr(config, "ENABLE_METRICS_PERSISTENCE", True),
+            "enable_endpoint": getattr(config, "METRICS_ENDPOINT_ENABLED", True),
         }
 except ImportError:
     # Fallback configuration for backward compatibility
@@ -68,48 +66,75 @@ except ImportError:
 from prometheus_client import CollectorRegistry, Gauge, generate_latest
 
 # --------------------------------------------------------------------------
-# Phase 11-D Redis Client with Circuit Breaker Integration
+# Lazy Redis Client Shim to Avoid Circular Imports
 # --------------------------------------------------------------------------
-try:
-    from redis_client import (
-        safe_redis_operation, 
-        increment_metric_redis, 
-        get_metric_redis,
-        set_key_redis,
-        get_key_redis,
-        save_snapshot,
-        load_snapshot,
-        get_circuit_breaker_status
-    )
-    _has_redis_client = True
-except Exception:
-    _has_redis_client = False
-    # Fallback implementations
-    def safe_redis_operation(*args, **kwargs):
-        def decorator(func):
-            return func
-        return decorator
-    
-    def increment_metric_redis(*args, **kwargs):
-        pass
-    
-    def get_metric_redis(*args, **kwargs):
-        return 0
-    
-    def set_key_redis(*args, **kwargs):
+def _has_redis():
+    """Check if Redis client is available without importing at module level."""
+    try:
+        import redis_client
+        return True
+    except Exception:
         return False
-    
-    def get_key_redis(*args, **kwargs):
-        return None
-    
-    def save_snapshot(*args, **kwargs):
-        return False
-    
-    def load_snapshot(*args, **kwargs):
-        return None
-    
-    def get_circuit_breaker_status():
-        return {"state": "DISABLED", "enabled": False}
+
+def _get_redis_utils():
+    """Lazy import Redis utilities to break circular imports."""
+    try:
+        from redis_client import (
+            safe_redis_operation, 
+            increment_metric_redis, 
+            get_metric_redis,
+            set_key_redis,
+            get_key_redis,
+            save_snapshot,
+            load_snapshot,
+            get_circuit_breaker_status
+        )
+        return (safe_redis_operation, increment_metric_redis, get_metric_redis,
+                set_key_redis, get_key_redis, save_snapshot, load_snapshot,
+                get_circuit_breaker_status, True)
+    except Exception:
+        # Fallback implementations
+        def safe_redis_operation(*args, **kwargs):
+            def decorator(func):
+                return func
+            return decorator
+        
+        def increment_metric_redis(*args, **kwargs):
+            pass
+        
+        def get_metric_redis(*args, **kwargs):
+            return 0
+        
+        def set_key_redis(*args, **kwargs):
+            return False
+        
+        def get_key_redis(*args, **kwargs):
+            return None
+        
+        def save_snapshot(*args, **kwargs):
+            return False
+        
+        def load_snapshot(*args, **kwargs):
+            return None
+        
+        def get_circuit_breaker_status():
+            return {"state": "DISABLED", "enabled": False}
+        
+        return (safe_redis_operation, increment_metric_redis, get_metric_redis,
+                set_key_redis, get_key_redis, save_snapshot, load_snapshot,
+                get_circuit_breaker_status, False)
+
+# --------------------------------------------------------------------------
+# Lazy Logging Shim to Avoid Circular Imports
+# --------------------------------------------------------------------------
+def _get_logger():
+    """Lazy import logging utilities to break circular imports."""
+    try:
+        from logging_utils import log_event
+        return log_event
+    except Exception:
+        def _noop_log(*a, **k): pass
+        return _noop_log
 
 # --------------------------------------------------------------------------
 # Phase 11-D Health Metrics
@@ -137,7 +162,7 @@ REDIS_METRIC_PREFIX = "prometheus:metrics:"  # prometheus:metrics:<service>:<met
 LATENCY_SUBPREFIX = "latency"               # prometheus:metrics:<service>:latency:<name>:count|sum
 REDIS_INDEX_KEY = "prometheus:metrics:index"  # set of metric names for quick discovery
 
-SERVICE_NAME = config.SERVICE_NAME
+SERVICE_NAME = getattr(config, "SERVICE_NAME", os.getenv("SERVICE_NAME", "unknown_service"))
 
 # TTL for metric keys (days -> seconds)
 REDIS_METRIC_TTL_DAYS = int(os.getenv("REDIS_METRIC_TTL_DAYS", "30"))
@@ -163,7 +188,8 @@ _sync_lock = threading.Lock()
 # --------------------------------------------------------------------------
 def _log_metric_event(event: str, status: str, message: str, **extra):
     """Structured logging for metric events with Phase 11-D context."""
-    log_event(
+    log_func = _get_logger()
+    log_func(
         service="metrics_collector",
         event=event,
         status=status,
@@ -284,6 +310,7 @@ def _sync_metrics_to_redis() -> bool:
         
         # Sync counters
         for metric_name, value in counters_copy.items():
+            safe_redis_operation, _, _, _, _, _, _, get_circuit_breaker_status, _ = _get_redis_utils()
             safe_redis_operation("sync_counter")(lambda client: client.set(
                 _redis_key(metric_name), 
                 value, 
@@ -312,7 +339,7 @@ def _sync_metrics_to_redis() -> bool:
             "error",
             "Failed to sync metrics to Redis",
             error=str(e),
-            circuit_breaker_state=get_circuit_breaker_status()["state"]
+            circuit_breaker_state=_get_redis_utils()[-2]()["state"]  # get_circuit_breaker_status
         )
         return False
 
@@ -322,6 +349,7 @@ def _create_and_save_snapshot() -> bool:
         snapshot = get_snapshot()
         snapshot_key = f"metrics_snapshot:{SERVICE_NAME}:{int(time.time())}"
         
+        _, _, _, _, _, save_snapshot, _, _, has_redis = _get_redis_utils()
         success = save_snapshot(
             snapshot_key,
             snapshot,
@@ -335,7 +363,7 @@ def _create_and_save_snapshot() -> bool:
                 "Metrics snapshot saved successfully",
                 snapshot_key=snapshot_key
             )
-        elif not _has_redis_client:
+        elif not has_redis:
             # Don't log warnings if Redis is not available
             pass
         else:
@@ -343,7 +371,7 @@ def _create_and_save_snapshot() -> bool:
                 "snapshot_failed",
                 "warn",
                 message="Failed to save metrics snapshot",
-                circuit_breaker_state=get_circuit_breaker_status()["state"]
+                circuit_breaker_state=_get_redis_utils()[-2]()["state"]  # get_circuit_breaker_status
             )
         
         return success
@@ -377,9 +405,9 @@ def init_redis_client(*args, **kwargs) -> None:
     try:
         _log_metric_event(
             "init_redis_client_deprecated",
-            "info" if _has_redis_client else "warn",
+            "info" if _has_redis() else "warn",
             "init_redis_client called",
-            redis_present=_has_redis_client
+            redis_present=_has_redis()
         )
     except Exception:
         pass
@@ -398,9 +426,10 @@ def increment_metric(metric_name: str, value: int = 1) -> bool:
         _rate_limited_redis_log("increment_local_failed", "error", message=str(e), stack=traceback.format_exc())
         # continue to try Redis writes even if local fails
 
-    if _has_redis_client:
+    if _has_redis():
         try:
             # Use Phase 11-D safe Redis operation
+            safe_redis_operation, _, _, _, _, _, _, _, _ = _get_redis_utils()
             success = safe_redis_operation("increment_metric_persist")(
                 lambda client: client.incrby(_redis_key(metric_name), int(value))
             )
@@ -443,8 +472,9 @@ def set_metric(name: str, value: int) -> bool:
     except Exception as e:
         _rate_limited_redis_log("set_local_failed", "error", message=str(e), stack=traceback.format_exc())
 
-    if _has_redis_client:
+    if _has_redis():
         try:
+            safe_redis_operation, _, _, _, _, _, _, _, _ = _get_redis_utils()
             success = safe_redis_operation("set_metric_persist")(
                 lambda client: client.set(_redis_key(name), int(value), ex=REDIS_METRIC_TTL)
             )
@@ -477,7 +507,7 @@ def get_metric_total(metric_name: str) -> int:
     If Redis is available, sum across all services: pattern prometheus:metrics:*:<metric_name>.
     Otherwise fall back to local in-memory counter.
     """
-    if _has_redis_client:
+    if _has_redis():
         try:
             # Use SCAN to find keys matching pattern and mget them in bulk
             pattern = f"{REDIS_METRIC_PREFIX}*:{metric_name}"
@@ -501,6 +531,7 @@ def get_metric_total(metric_name: str) -> int:
                         continue
                 return s
             
+            safe_redis_operation, _, _, _, _, _, _, _, _ = _get_redis_utils()
             result = safe_redis_operation("get_metric_total")(scan_and_sum)
             
             if result is not None:
@@ -539,7 +570,7 @@ def observe_latency(name: str, value_ms: float) -> bool:
         _rate_limited_redis_log("observe_local_failed", "error", message=str(e), stack=traceback.format_exc())
         # continue to persist to redis if possible
 
-    if _has_redis_client:
+    if _has_redis():
         try:
             count_key, sum_key = _redis_latency_keys(name)
             
@@ -558,6 +589,7 @@ def observe_latency(name: str, value_ms: float) -> bool:
                 pipe.sadd(REDIS_INDEX_KEY, f"{LATENCY_SUBPREFIX}:{name}")
                 return pipe.execute()
             
+            safe_redis_operation, _, _, _, _, _, _, _, _ = _get_redis_utils()
             success = safe_redis_operation("persist_latency")(persist_latency)
             
             if success is None:
@@ -626,7 +658,7 @@ def get_snapshot() -> Dict[str, Any]:
             "persistence_failure_total": _health_metrics["metrics_persistence_failure_total"],
             "last_successful_sync": _health_metrics["last_successful_sync"],
             "last_successful_persistence": _health_metrics["last_successful_persistence"],
-            "circuit_breaker_state": get_circuit_breaker_status()["state"],
+            "circuit_breaker_state": _get_redis_utils()[-2]()["state"],  # get_circuit_breaker_status
         }
 
         # Avoid touching private internals of Prometheus objects; just report None if not available.
@@ -679,11 +711,12 @@ def export_prometheus() -> str:
         metric_names = set()
 
         # 1) Discover names from Redis index if available
-        if _has_redis_client:
+        if _has_redis():
             try:
                 def get_index_members(client):
                     return client.smembers(REDIS_INDEX_KEY)
                 
+                safe_redis_operation, _, _, _, _, _, _, _, _ = _get_redis_utils()
                 members = safe_redis_operation("get_index_members")(get_index_members)
                 if members:
                     for m in members:
@@ -713,7 +746,7 @@ def export_prometheus() -> str:
                 # Aggregate counts and sums across services from Redis if possible
                 total_count = 0
                 total_sum_ms = 0.0
-                if _has_redis_client:
+                if _has_redis():
                     try:
                         # pattern: prometheus:metrics:*:latency:<name>:count  and ...:sum
                         count_pattern = f"{REDIS_METRIC_PREFIX}*:{LATENCY_SUBPREFIX}:{latency_name}:count"
@@ -750,6 +783,7 @@ def export_prometheus() -> str:
                             
                             return count_total, sum_total
                         
+                        safe_redis_operation, _, _, _, _, _, _, _, _ = _get_redis_utils()
                         result = safe_redis_operation("aggregate_latency")(aggregate_latency)
                         if result:
                             total_count, total_sum_ms = result
@@ -795,7 +829,7 @@ def export_prometheus() -> str:
             metric = entry
             # Compute global total via Redis aggregation if available
             total = 0
-            if _has_redis_client:
+            if _has_redis():
                 try:
                     def aggregate_metric(client):
                         pattern = f"{REDIS_METRIC_PREFIX}*:{metric}"
@@ -815,6 +849,7 @@ def export_prometheus() -> str:
                                 continue
                         return s
                     
+                    safe_redis_operation, _, _, _, _, _, _, _, _ = _get_redis_utils()
                     result = safe_redis_operation("aggregate_metric")(aggregate_metric)
                     if result is not None:
                         total = int(result)
@@ -869,10 +904,11 @@ def export_prometheus() -> str:
 # --------------------------------------------------------------------------
 def push_metrics_snapshot_to_redis(snapshot: dict) -> bool:
     """Store the latest metrics snapshot in Redis as JSON under REDIS_METRIC_SNAPSHOT_KEY."""
-    if not _has_redis_client:
+    if not _has_redis():
         _rate_limited_redis_log("redis_unavailable_snapshot_save", "warn", message="Redis not configured; snapshot not saved.")
         return False
     try:
+        safe_redis_operation, _, _, _, _, _, _, get_circuit_breaker_status, _ = _get_redis_utils()
         success = safe_redis_operation("push_snapshot")(
             lambda client: client.set(REDIS_METRIC_SNAPSHOT_KEY, json.dumps(snapshot), ex=REDIS_METRIC_TTL)
         )
@@ -891,7 +927,7 @@ def push_metrics_snapshot_to_redis(snapshot: dict) -> bool:
 
 def pull_metrics_snapshot_from_redis() -> dict:
     """Retrieve the latest metrics snapshot from Redis. Returns empty dict if missing/error."""
-    if not _has_redis_client:
+    if not _has_redis():
         _rate_limited_redis_log("redis_unavailable_snapshot_load", "warn", message="Redis not configured; cannot load snapshot.")
         return {}
     try:
@@ -903,6 +939,7 @@ def pull_metrics_snapshot_from_redis() -> dict:
                 raw = raw.decode("utf-8")
             return json.loads(raw)
         
+        safe_redis_operation, _, _, _, _, _, _, get_circuit_breaker_status, _ = _get_redis_utils()
         data = safe_redis_operation("pull_snapshot")(load_snapshot_data)
         
         if data:
@@ -931,13 +968,14 @@ def safe_register_metric(metric, registry):
 @contextmanager
 def redis_lock(lock_name, timeout=10):
     """Redis-based distributed lock for preventing concurrent operations."""
-    if not _has_redis_client:
+    if not _has_redis():
         yield False
         return
         
     token = str(uuid.uuid4())
     try:
         # Try to acquire the lock
+        safe_redis_operation, _, _, _, _, _, _, _, _ = _get_redis_utils()
         acquired = safe_redis_operation("acquire_lock")(
             lambda client: client.set(lock_name, token, nx=True, ex=timeout)
         )
@@ -968,7 +1006,7 @@ def redis_lock(lock_name, timeout=10):
 
 def save_metrics_snapshot(snapshot):
     """Persist metrics snapshot safely (idempotent)."""
-    if not _has_redis_client:
+    if not _has_redis():
         _rate_limited_redis_log("redis_unavailable_snapshot_save", "warn", 
                                 message="Redis not configured; snapshot not saved.")
         return False
@@ -976,6 +1014,7 @@ def save_metrics_snapshot(snapshot):
     key = f"prometheus:registry_snapshot:{SERVICE_NAME}"
     
     try:
+        safe_redis_operation, _, _, _, _, _, _, _, _ = _get_redis_utils()
         # Check if snapshot is unchanged to avoid redundant writes
         existing = safe_redis_operation("check_existing_snapshot")(
             lambda client: client.get(key)
@@ -1078,10 +1117,10 @@ def get_health_status() -> Dict[str, Any]:
         "last_successful_sync": _health_metrics["last_successful_sync"],
         "last_successful_persistence": _health_metrics["last_successful_persistence"],
         "sync_loop_running": _sync_running,
-        "circuit_breaker_state": get_circuit_breaker_status()["state"],
+        "circuit_breaker_state": _get_redis_utils()[-2]()["state"],  # get_circuit_breaker_status
         "service_name": SERVICE_NAME,
     }
 
 # Initialize on module import - moved to prevent circular imports
-if __name__ != "__main__":
-    initialize_metrics_collector()
+# initialize_metrics_collector() is intentionally NOT called at import-time to avoid import cycles.
+# The application entrypoint (app.py) should call initialize_metrics_collector() after imports are complete.

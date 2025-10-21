@@ -60,3 +60,16 @@ class Config:
     
     # Backward compatibility alias
     log_buffer_size = LOG_BUFFER_SIZE
+
+    # Voice Pipeline Configuration - ADDED FOR PHASE 11-D COMPLIANCE
+    CALL_STATE_TTL = int(os.getenv("CALL_STATE_TTL", "14400"))  # 4 hours in seconds
+    PARTIAL_THROTTLE_SECONDS = float(os.getenv("PARTIAL_THROTTLE_SECONDS", "1.5"))
+    INFERENCE_TASK_NAME = os.getenv("INFERENCE_TASK_NAME", "sara_ai.tasks.voice_pipeline.run_inference")
+    EVENT_TASK_NAME = os.getenv("EVENT_TASK_NAME", "sara_ai.tasks.voice_pipeline.dispatch_event")
+    CELERY_VOICE_QUEUE = os.getenv("CELERY_VOICE_QUEUE", "voice_pipeline")
+    VOICE_PIPELINE_PORT = int(os.getenv("VOICE_PIPELINE_PORT", "7000"))
+    
+    # Additional Metrics Configuration - ADDED FOR PHASE 11-D COMPLIANCE
+    SNAPSHOT_INTERVAL = int(os.getenv("SNAPSHOT_INTERVAL", "60"))
+    ENABLE_METRICS_PERSISTENCE = os.getenv("ENABLE_METRICS_PERSISTENCE", "true").lower() == "true"
+    METRICS_ENDPOINT_ENABLED = os.getenv("METRICS_ENDPOINT_ENABLED", "true").lower() == "true"

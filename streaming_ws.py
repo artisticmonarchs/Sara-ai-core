@@ -3,7 +3,6 @@ streaming_ws.py — Sara AI Core (Phase 11-D)
 Real-time Twilio → Deepgram ASR Bridge with Full Observability
 """
 
-import os
 import io
 import json
 import base64
@@ -11,16 +10,32 @@ import asyncio
 import websockets
 import uuid
 import time
+from typing import Optional
 from flask import Flask, request
 from flask_sock import Sock
 
 # Phase 11-D Canonical Imports
 from config import Config
+
+# Phase 11-D: Defer metrics imports to avoid circular dependencies
+def _get_metrics():
+    """Lazy import metrics to avoid circular imports."""
+    try:
+        from metrics_collector import increment_metric, observe_latency
+        return increment_metric, observe_latency
+    except ImportError:
+        # Safe no-op fallbacks
+        def _noop_inc(*args, **kwargs): pass
+        def _noop_obs(*args, **kwargs): pass
+        return _noop_inc, _noop_obs
+
+# Initialize lazy metrics
+increment_metric, observe_latency = _get_metrics()
+
+# Phase 11-D: Import other dependencies
 from logging_utils import log_event, get_trace_id
 from sentry_utils import init_sentry, capture_exception_safe
 from redis_client import get_redis_client, safe_redis_operation
-from metrics_collector import increment_metric, observe_latency
-from global_metrics_store import start_background_sync
 from celery_app import celery
 
 # -------------------------------------------------------------------
@@ -31,18 +46,51 @@ __service__ = "streaming_ws"
 __schema_version__ = "phase_11d_v1"
 
 # -------------------------------------------------------------------
-# Initialization
+# Initialization (No side effects at import)
 # -------------------------------------------------------------------
-init_sentry()
-start_background_sync(service_name=__service__)
-
 app = Flask(__name__)
 sock = Sock(app)
+
+# Redis client for lightweight metrics (lazy initialization)
+_redis_client = None
+
+def get_redis_client_instance():
+    """Lazy Redis client initialization."""
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = get_redis_client()
+    return _redis_client
+
+def initialize_streaming_ws():
+    """Initialize streaming WebSocket components - call this at startup."""
+    # Initialize Sentry
+    init_sentry()
+    
+    # Phase 11-D: Start background sync only when explicitly initialized
+    try:
+        from global_metrics_store import start_background_sync
+        start_background_sync(service_name=__service__)
+        log_event(
+            service=__service__,
+            event="global_metrics_sync_started",
+            status="info",
+            message="Background global metrics sync started for streaming_ws",
+            trace_id=get_trace_id()
+        )
+    except Exception as e:
+        log_event(
+            service=__service__, 
+            event="global_metrics_sync_failed", 
+            status="error",
+            message="Failed to start background metrics sync",
+            trace_id=get_trace_id(),
+            extra={"error": str(e)}
+        )
 
 # -------------------------------------------------------------------
 # Configuration
 # -------------------------------------------------------------------
-DEEPGRAM_API_KEY = getattr(Config, "DEEPGRAM_API_KEY", os.getenv("DEEPGRAM_API_KEY"))
+DEEPGRAM_API_KEY = getattr(Config, "DEEPGRAM_API_KEY", "")
 DG_LISTEN_MODEL = getattr(Config, "DEEPGRAM_LISTEN_MODEL", "nova-3")
 
 # Twilio 8 kHz PCM stream parameters
@@ -57,7 +105,7 @@ DEEPGRAM_WS_BASE = (
 def _is_circuit_breaker_open(service: str = "streaming_ws") -> bool:
     """Canonical circuit breaker check used across Phase 11-D services."""
     try:
-        client = get_redis_client()
+        client = get_redis_client_instance()
         if not client:
             return False
         key = f"circuit_breaker:{service}:state"
@@ -160,7 +208,7 @@ async def enqueue_inference(transcript: str, trace_id: str, session_id: str):
     try:
         # Use safe Redis operation for session mapping
         call_sid = safe_redis_operation(
-            lambda: get_redis_client().get(f"twilio_call:{session_id}"),
+            lambda: get_redis_client_instance().get(f"twilio_call:{session_id}"),
             fallback=None,
             operation_name="get_call_sid"
         )
@@ -251,7 +299,7 @@ async def media_stream(ws):
             if call_sid:
                 # Store session_id -> call_sid mapping in Redis with safety wrapper
                 safe_redis_operation(
-                    lambda: get_redis_client().set(f"twilio_call:{session_id}", call_sid, ex=3600),
+                    lambda: get_redis_client_instance().set(f"twilio_call:{session_id}", call_sid, ex=3600),
                     fallback=None,
                     operation_name="store_call_sid"
                 )
@@ -265,6 +313,10 @@ async def media_stream(ws):
         # Connect to Deepgram live endpoint
         deepgram_connect_start = time.time()
         try:
+            # Phase 11-D: Use Config for API key, no hardcoded secret
+            if not DEEPGRAM_API_KEY:
+                raise ValueError("Deepgram API key not configured")
+                
             deepgram_ws = await websockets.connect(
                 DEEPGRAM_WS_BASE,
                 extra_headers={"Authorization": f"Token {DEEPGRAM_API_KEY}"},
@@ -425,7 +477,7 @@ async def media_stream(ws):
                 
             # Clean up Redis session mapping
             safe_redis_operation(
-                lambda: get_redis_client().delete(f"twilio_call:{session_id}"),
+                lambda: get_redis_client_instance().delete(f"twilio_call:{session_id}"),
                 fallback=None,
                 operation_name="cleanup_call_sid"
             )
@@ -481,8 +533,9 @@ def health_check():
             pass
         
         # Redis health
+        redis_client = get_redis_client_instance()
         redis_ok = safe_redis_operation(
-            lambda: get_redis_client().ping(),
+            lambda: redis_client.ping() if redis_client else False,
             fallback=False,
             operation_name="health_check_ping"
         )
@@ -495,7 +548,7 @@ def health_check():
         # Get active connections count (approximate)
         try:
             active_conns = safe_redis_operation(
-                lambda: int(get_redis_client().get("streaming_ws_active_connections_total") or 0),
+                lambda: int(redis_client.get("streaming_ws_active_connections_total") or 0) if redis_client else 0,
                 fallback=0,
                 operation_name="get_active_connections"
             )
@@ -556,20 +609,13 @@ def health_check():
         }, 500
 
 # -------------------------------------------------------------------
-# Startup Logging
-# -------------------------------------------------------------------
-_structured_log(
-    event="startup_init",
-    level="info",
-    message="WebSocket streaming service initialized with Phase 11-D compliance",
-    extra={"phase": __phase__, "schema_version": __schema_version__}
-)
-
-# -------------------------------------------------------------------
 # Local debug entry point
 # -------------------------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.getenv("STREAMING_WS_PORT", 8000))
+    # Initialize the server before running
+    initialize_streaming_ws()
+    
+    port = getattr(Config, 'STREAMING_WS_PORT', 8000)
     _structured_log(
         event="service_start",
         level="info", 

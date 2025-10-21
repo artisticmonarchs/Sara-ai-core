@@ -11,43 +11,71 @@ from typing import Tuple, Optional
 from flask import Flask, request, jsonify
 from werkzeug.exceptions import HTTPException
 
-# Phase 11-D: Use canonical config helper
-try:
-    from config import get_config_value
-except ImportError:
-    # Fallback if config helper not available
-    def get_config_value(key, default=None):
-        import os
-        return os.getenv(key, default)
+# Phase 11-D: Use centralized config only
+from config import Config
 
+# Phase 11-D: Defer metrics imports to avoid circular dependencies
+def _get_metrics():
+    """Lazy import metrics to avoid circular imports."""
+    try:
+        from metrics_collector import increment_metric, observe_latency
+        return increment_metric, observe_latency
+    except ImportError:
+        # Safe no-op fallbacks
+        def _noop_inc(*args, **kwargs): pass
+        def _noop_obs(*args, **kwargs): pass
+        return _noop_inc, _noop_obs
+
+# Initialize lazy metrics
+increment_metric, observe_latency = _get_metrics()
+
+# Phase 11-D: Import other dependencies
 from logging_utils import log_event, get_trace_id
 from sentry_utils import init_sentry, capture_exception_safe
 from celery_app import celery
 from redis_client import get_client, safe_redis_operation
-from metrics_collector import increment_metric, observe_latency
 
 # ------------------------------------------------------------------
-# Phase 11-D: Global Metrics Sync Startup
+# Phase 11-D: Application Initialization (No side effects at import)
 # ------------------------------------------------------------------
-try:
-    from global_metrics_store import start_background_sync  # type: ignore
-    start_background_sync(service_name="inference_server")
-    log_event(
-        service="inference_server",
-        event="global_metrics_sync_started",
-        status="info",
-        message="Background global metrics sync started for inference_server",
-        trace_id=get_trace_id()
-    )
-except Exception as e:
-    log_event(
-        service="inference_server", 
-        event="global_metrics_sync_failed", 
-        status="error",
-        message="Failed to start background metrics sync",
-        trace_id=get_trace_id(),
-        extra={"error": str(e), "stack": traceback.format_exc()}
-    )
+app = Flask(__name__)
+SERVICE_NAME = "inference_server"
+
+# Redis client for lightweight metrics (lazy initialization)
+_redis_client = None
+
+def get_redis_client():
+    """Lazy Redis client initialization."""
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = get_client()
+    return _redis_client
+
+def initialize_inference_server():
+    """Initialize inference server components - call this at startup."""
+    # Initialize Sentry
+    init_sentry()
+    
+    # Phase 11-D: Start background sync only when explicitly initialized
+    try:
+        from global_metrics_store import start_background_sync
+        start_background_sync(service_name=SERVICE_NAME)
+        log_event(
+            service=SERVICE_NAME,
+            event="global_metrics_sync_started",
+            status="info",
+            message="Background global metrics sync started for inference_server",
+            trace_id=get_trace_id()
+        )
+    except Exception as e:
+        log_event(
+            service=SERVICE_NAME, 
+            event="global_metrics_sync_failed", 
+            status="error",
+            message="Failed to start background metrics sync",
+            trace_id=get_trace_id(),
+            extra={"error": str(e), "stack": traceback.format_exc()}
+        )
 
 # ------------------------------------------------------------------
 # Phase 11-D: Circuit Breaker Support
@@ -55,7 +83,7 @@ except Exception as e:
 def _is_circuit_breaker_open(service: str = "inference") -> bool:
     """Check if circuit breaker is open for the specified service."""
     try:
-        client = get_client()
+        client = get_redis_client()
         if not client:
             return False
             
@@ -69,14 +97,6 @@ def _is_circuit_breaker_open(service: str = "inference") -> bool:
         return str(state).lower() == "open"
     except Exception:
         return False  # Proceed on circuit breaker check errors
-
-# Initialization & Config
-init_sentry()
-app = Flask(__name__)
-SERVICE_NAME = "inference_server"
-
-# Redis client for lightweight metrics
-redis_client = get_client()
 
 def validate_payload(payload: dict) -> Tuple[bool, Optional[str]]:
     """Validate basic payload schema."""
@@ -140,6 +160,7 @@ def _get_cached_result(session_id: str, input_hash: str) -> Optional[dict]:
         increment_metric("inference_circuit_breaker_hits_total")
         return None
     
+    redis_client = get_redis_client()
     if not redis_client:
         return None
         
@@ -185,6 +206,7 @@ def _set_cached_result(session_id: str, input_hash: str, result: dict, ttl: int 
     if _is_circuit_breaker_open("redis"):
         return
         
+    redis_client = get_redis_client()
     if not redis_client:
         return
         
@@ -369,6 +391,7 @@ def health():
 
         # Redis ping for metrics (non-fatal)
         redis_ok = False
+        redis_client = get_redis_client()
         if redis_client:
             try:
                 pong = safe_redis_operation(lambda: redis_client.ping())
@@ -431,6 +454,7 @@ def health_detailed():
     
     # Redis health
     redis_ok = False
+    redis_client = get_redis_client()
     if redis_client:
         try:
             pong = safe_redis_operation(lambda: redis_client.ping())
@@ -499,22 +523,14 @@ def handle_exception(e):
 
 # Local debug entry point
 if __name__ == "__main__":
+    # Initialize the server before running
+    initialize_inference_server()
+    
     log_event(
         service=SERVICE_NAME,
         event="startup",
         status="info",
-        message=f"Starting {SERVICE_NAME} on port {get_config_value('INFERENCE_PORT', 7000)}",
+        message=f"Starting {SERVICE_NAME} on port {getattr(Config, 'INFERENCE_PORT', 7000)}",
         trace_id=get_trace_id()
     )
-    app.run(host="0.0.0.0", port=int(get_config_value('INFERENCE_PORT', 7000)))
-
-"""
-PHASE 11-D COMPLIANCE VERIFIED ✅
-- Unified metrics with seconds-based latencies
-- Circuit breaker awareness for Redis and inference
-- Safe Redis operations with return value checking  
-- Structured logging with trace propagation
-- Consistent health check responses
-- Error handling with Sentry integration
-- Configuration via canonical helpers
-"""
+    app.run(host="0.0.0.0", port=int(getattr(Config, 'INFERENCE_PORT', 7000)))

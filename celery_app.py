@@ -11,11 +11,35 @@ from celery import Celery
 # Unified Observability Imports
 from config import Config
 from logging_utils import log_event
-from metrics_registry import restore_snapshot_to_collector
-from global_metrics_store import start_background_sync
 from redis_client import get_client, health_check as redis_health_check
 
+# --------------------------------------------------------------------------
+# Phase 11-D Metrics Integration - Lazy Import Shim
+# --------------------------------------------------------------------------
+def _get_metrics():
+    """Lazy metrics shim to avoid circular imports at import-time"""
+    try:
+        import metrics_collector as metrics
+        return metrics
+    except Exception:
+        # safe no-op fallbacks
+        class NoopMetrics:
+            pass
+        return NoopMetrics()
+
+# Lazy metrics instance - will be initialized on first use
+_metrics = None
+
+def get_metrics():
+    """Get or initialize lazy metrics instance"""
+    global _metrics
+    if _metrics is None:
+        _metrics = _get_metrics()
+    return _metrics
+
+# --------------------------------------------------------------------------
 # Celery Initialization
+# --------------------------------------------------------------------------
 celery = Celery(
     "sara_ai",
     broker=Config.REDIS_URL,
@@ -33,7 +57,9 @@ celery.conf.update(
     worker_concurrency=2, # Fixed value for consistency
 )
 
+# --------------------------------------------------------------------------
 # Phase 11-D: Safe Task Wrapper
+# --------------------------------------------------------------------------
 def safe_task_wrapper(func):
     """
     Wraps Celery tasks with error handling, structured logging, and metric hooks.
@@ -79,6 +105,9 @@ def safe_task_wrapper(func):
     
     return wrapper
 
+# --------------------------------------------------------------------------
+# Lazy Initialization Functions (Phase 11-D - No side effects at import time)
+# --------------------------------------------------------------------------
 def validate_redis_connection():
     """Validate Redis connectivity with retry logic."""
     retries = 3
@@ -110,41 +139,55 @@ def validate_redis_connection():
     )
     return False
 
-# Validate Redis on startup
-validate_redis_connection()
+def _initialize_metrics_system():
+    """Lazy metrics system initialization - called when worker starts"""
+    try:
+        from metrics_registry import restore_snapshot_to_collector
+        from global_metrics_store import start_background_sync
+        
+        # Import metrics_collector for restoration
+        restored_ok = restore_snapshot_to_collector(get_metrics())
+        if restored_ok:
+            log_event(
+                service="celery",
+                event="metrics_restored",
+                status="info",
+                message="Restored metrics registry at worker startup"
+            )
 
-# Metrics Restoration and Global Sync Startup
-try:
-    # Import metrics_collector for restoration
-    import metrics_collector
-    restored_ok = restore_snapshot_to_collector(metrics_collector)
-    if restored_ok:
+        start_background_sync()
         log_event(
             service="celery",
-            event="metrics_restored",
+            event="global_metrics_sync_started",
             status="info",
-            message="Restored metrics registry at worker startup"
+            message="Started background metrics sync"
+        )
+    except Exception as e:
+        log_event(
+            service="celery",
+            event="metrics_startup_failed",
+            status="error",
+            message=f"Metrics startup failed: {str(e)}"
         )
 
-    start_background_sync()
+def initialize_celery_app():
+    """
+    Initialize Celery application with all dependencies.
+    This should be called when the worker starts, not at module import.
+    """
+    # Validate Redis connection
+    validate_redis_connection()
+    
+    # Initialize metrics system
+    _initialize_metrics_system()
+    
+    # Startup Banner Log
     log_event(
         service="celery",
-        event="global_metrics_sync_started",
-        status="info",
-        message="Started background metrics sync"
-    )
-except Exception as e:
-    log_event(
-        service="celery",
-        event="metrics_startup_failed",
-        status="error",
-        message=f"Metrics startup failed: {str(e)}"
+        event="startup",
+        status="ok",
+        message=f"Celery app initialized with Redis broker: {Config.REDIS_URL}"
     )
 
-# Startup Banner Log
-log_event(
-    service="celery",
-    event="startup",
-    status="ok",
-    message=f"Celery app initialized with Redis broker: {Config.REDIS_URL}"
-)
+# Note: The actual initialization is deferred to when the worker starts
+# This prevents import-time side effects and circular imports

@@ -18,7 +18,6 @@ Features:
 - No AWS/S3/CDN references — Render-only storage.
 """
 
-import os
 import re
 import json
 import uuid
@@ -27,6 +26,24 @@ import time
 from typing import Optional, Dict, Any
 
 from flask import Blueprint, request, Response, jsonify
+
+# Phase 11-D: Use centralized config only
+from config import Config
+
+# Phase 11-D: Defer metrics imports to avoid circular dependencies
+def _get_metrics():
+    """Lazy import metrics to avoid circular imports."""
+    try:
+        from metrics_collector import increment_metric, observe_latency
+        return increment_metric, observe_latency
+    except ImportError:
+        # Safe no-op fallbacks
+        def _noop_inc(*args, **kwargs): pass
+        def _noop_obs(*args, **kwargs): pass
+        return _noop_inc, _noop_obs
+
+# Initialize lazy metrics
+increment_metric, observe_latency = _get_metrics()
 
 # Celery app and optional task callables
 from celery_app import celery
@@ -38,30 +55,22 @@ except Exception:
 
 from logging_utils import log_event, get_trace_id
 
-# Phase 11-D Observability imports
+# Phase 11-D Observability imports (with safe fallbacks)
 try:
     from sentry_utils import init_sentry, capture_exception_safe
-    from metrics_collector import increment_metric, observe_latency
     from global_metrics_store import start_background_sync
     from redis_client import get_redis_client, safe_redis_operation
-    from config import Config
 except Exception as e:
     # Fallback for missing Phase 11-D modules
     def capture_exception_safe(*args, **kwargs): pass
-    def increment_metric(*args, **kwargs): pass
-    def observe_latency(*args, **kwargs): pass
+    def init_sentry(*args, **kwargs): pass
     def start_background_sync(*args, **kwargs): pass
     def get_redis_client(): return None
-    def safe_redis_operation(operation, fallback=None): 
-        try: return operation() 
-        except: return fallback
-    class Config:
-        TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
-        TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
-
-# Initialize Phase 11-D observability backbone
-init_sentry()
-start_background_sync(service_name=__service__)
+    def safe_redis_operation(operation, fallback=None, operation_name=None): 
+        try: 
+            return operation() 
+        except: 
+            return fallback
 
 # Twilio SDK optional
 try:
@@ -74,28 +83,69 @@ except Exception:
     TwilioRestException = Exception  # fallback
 
 # --------------------------------------------------------------------------
-# Configuration (env-driven)
+# Configuration (Config-driven)
 # --------------------------------------------------------------------------
-SERVICE_NAME = os.getenv("RENDER_SERVICE_NAME", "twilio_client")
-SARA_ENV = os.getenv("SARA_ENV", "development")
+SERVICE_NAME = getattr(Config, 'RENDER_SERVICE_NAME', 'twilio_client')
+SARA_ENV = getattr(Config, 'SARA_ENV', 'development')
 
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")
-TWILIO_ANSWER_URL = os.getenv("TWILIO_ANSWER_URL", "")  # public endpoint Twilio fetches for TwiML on answer
-TWILIO_MEDIA_WS_URL = os.getenv("TWILIO_MEDIA_WS_URL", "")  # optional WebSocket media stream
-TWILIO_DYNAMIC_TWIML_URL = os.getenv("TWILIO_DYNAMIC_TWIML_URL", "")  # optional override for dynamic twiml play
+TWILIO_ACCOUNT_SID = getattr(Config, 'TWILIO_ACCOUNT_SID', '')
+TWILIO_AUTH_TOKEN = getattr(Config, 'TWILIO_AUTH_TOKEN', '')
+TWILIO_PHONE_NUMBER = getattr(Config, 'TWILIO_PHONE_NUMBER', '')
+TWILIO_ANSWER_URL = getattr(Config, 'TWILIO_ANSWER_URL', '')  # public endpoint Twilio fetches for TwiML on answer
+TWILIO_MEDIA_WS_URL = getattr(Config, 'TWILIO_MEDIA_WS_URL', '')  # optional WebSocket media stream
+TWILIO_DYNAMIC_TWIML_URL = getattr(Config, 'TWILIO_DYNAMIC_TWIML_URL', '')  # optional override for dynamic twiml play
 
 # Celery task names (make sure they match Phase 8 celery task definitions)
-TTS_TASK_NAME = os.getenv("TTS_TASK_NAME", "run_tts")
-INFERENCE_TASK_NAME = os.getenv("INFERENCE_TASK_NAME", "run_inference")
-EVENT_TASK_NAME = os.getenv("EVENT_TASK_NAME", "celery_tasks.log_twilio_event")
+TTS_TASK_NAME = getattr(Config, 'TTS_TASK_NAME', 'run_tts')
+INFERENCE_TASK_NAME = getattr(Config, 'INFERENCE_TASK_NAME', 'run_inference')
+EVENT_TASK_NAME = getattr(Config, 'EVENT_TASK_NAME', 'celery_tasks.log_twilio_event')
 
 # Render static host used to build public audio URLs
-RENDER_EXTERNAL_HOST = os.getenv("RENDER_EXTERNAL_HOST", "")  # e.g. "sara-ai.example.com"
-PUBLIC_AUDIO_DIR = os.getenv("PUBLIC_AUDIO_DIR", "public/audio")
-CALL_STATE_TTL = int(os.getenv("CALL_STATE_TTL", 60 * 60 * 4))  # seconds (4 hours)
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+RENDER_EXTERNAL_HOST = getattr(Config, 'RENDER_EXTERNAL_HOST', '')  # e.g. "sara-ai.example.com"
+PUBLIC_AUDIO_DIR = getattr(Config, 'PUBLIC_AUDIO_DIR', 'public/audio')
+CALL_STATE_TTL = getattr(Config, 'CALL_STATE_TTL', 60 * 60 * 4)  # seconds (4 hours)
+REDIS_URL = getattr(Config, 'REDIS_URL', 'redis://localhost:6379/0')
+
+# --------------------------------------------------------------------------
+# Initialization (No side effects at import)
+# --------------------------------------------------------------------------
+twilio_bp = Blueprint("twilio_client", __name__, url_prefix="/twilio")
+
+# Redis client for lightweight metrics (lazy initialization)
+_redis_client = None
+
+def get_redis_client_instance():
+    """Lazy Redis client initialization."""
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = get_redis_client()
+    return _redis_client
+
+def initialize_twilio_client():
+    """Initialize Twilio client components - call this at startup."""
+    # Initialize Sentry
+    init_sentry()
+    
+    # Phase 11-D: Start background sync only when explicitly initialized
+    try:
+        from global_metrics_store import start_background_sync
+        start_background_sync(service_name=__service__)
+        log_event(
+            service=__service__,
+            event="global_metrics_sync_started",
+            status="info",
+            message="Background global metrics sync started for twilio_client",
+            trace_id=get_trace_id()
+        )
+    except Exception as e:
+        log_event(
+            service=__service__, 
+            event="global_metrics_sync_failed", 
+            status="error",
+            message="Failed to start background metrics sync",
+            trace_id=get_trace_id(),
+            extra={"error": str(e)}
+        )
 
 # --------------------------------------------------------------------------
 # Phase 11-D Circuit Breaker
@@ -103,7 +153,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 def _is_circuit_breaker_open(service: str = "twilio_client") -> bool:
     """Check if circuit breaker is open for Twilio operations"""
     try:
-        client = get_redis_client()
+        client = get_redis_client_instance()
         if not client:
             return False
         state = safe_redis_operation(lambda: client.get(f"circuit_breaker:{service}:state"))
@@ -158,24 +208,6 @@ def _init_twilio_client():
     _twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
     return _twilio_client
 
-# Phase 11-D: Updated Redis client to use safe operations
-_redis_client = None
-
-def _get_redis():
-    global _redis_client
-    if _redis_client is None:
-        try:
-            # Try Phase 11-D Redis client first, fallback to direct connection
-            _redis_client = get_redis_client()
-            if _redis_client is None:
-                import redis
-                _redis_client = redis.Redis.from_url(REDIS_URL, socket_connect_timeout=3)
-        except Exception as e:
-            _structured_log("redis_init_failed", level="ERROR",
-                          message=str(e), extra={"redis_url_preview": REDIS_URL.split("//")[-1]})
-            _redis_client = None
-    return _redis_client
-
 # Basic E.164 check (conservative)
 _e164_re = re.compile(r"^\+\d{7,15}$")
 
@@ -187,6 +219,7 @@ def _validate_e164(number: str) -> bool:
 # Ensure public audio directory exists (Render container has writable FS for build-time; Render static needs uploaded files at deploy time).
 def _ensure_public_audio_dir():
     try:
+        import os
         os.makedirs(PUBLIC_AUDIO_DIR, exist_ok=True)
         return True
     except Exception as e:
@@ -203,6 +236,7 @@ def upload_bytes_to_public_storage(bytes_obj: bytes, filename: str) -> Optional[
     if not _ensure_public_audio_dir():
         return None
 
+    import os
     safe_filename = os.path.basename(filename)
     file_path = os.path.join(PUBLIC_AUDIO_DIR, safe_filename)
     try:
@@ -234,23 +268,25 @@ def get_public_audio_url(local_path: Optional[str] = None, audio_bytes: Optional
     if audio_bytes and filename:
         return upload_bytes_to_public_storage(audio_bytes, filename)
 
-    if local_path and os.path.exists(local_path):
-        try:
-            with open(local_path, "rb") as f:
-                data = f.read()
-            name = filename or os.path.basename(local_path)
-            return upload_bytes_to_public_storage(data, name)
-        except Exception as e:
-            _structured_log("get_public_audio_failed", level="ERROR",
-                          message=str(e), extra={"local_path": local_path})
-            return None
+    if local_path:
+        import os
+        if os.path.exists(local_path):
+            try:
+                with open(local_path, "rb") as f:
+                    data = f.read()
+                name = filename or os.path.basename(local_path)
+                return upload_bytes_to_public_storage(data, name)
+            except Exception as e:
+                _structured_log("get_public_audio_failed", level="ERROR",
+                              message=str(e), extra={"local_path": local_path})
+                return None
     return None
 
 # --------------------------------------------------------------------------
 # Redis call-state helpers (Updated with Phase 11-D safe operations)
 # --------------------------------------------------------------------------
 def _store_call_state(call_sid: str, trace_id: str, state: Dict[str, Any]) -> None:
-    r = _get_redis()
+    r = get_redis_client_instance()
     if not r:
         return
     try:
@@ -261,7 +297,7 @@ def _store_call_state(call_sid: str, trace_id: str, state: Dict[str, Any]) -> No
         _structured_log("redis_set_failed", level="WARNING", message=str(e))
 
 def _get_call_state(call_sid: str) -> Optional[Dict[str, Any]]:
-    r = _get_redis()
+    r = get_redis_client_instance()
     if not r:
         return None
     try:
@@ -275,7 +311,7 @@ def _get_call_state(call_sid: str) -> Optional[Dict[str, Any]]:
         return None
 
 def _delete_call_state(call_sid: str) -> None:
-    r = _get_redis()
+    r = get_redis_client_instance()
     if not r:
         return
     try:
@@ -366,7 +402,7 @@ def place_outbound_call(to_number: str, from_number: Optional[str] = None,
             to=to_number,
             from_=from_number,
             url=TWILIO_ANSWER_URL or None,
-            timeout=int(os.getenv("TWILIO_CALL_TIMEOUT", "60"))
+            timeout=getattr(Config, 'TWILIO_CALL_TIMEOUT', 60)
         )
         call_sid = getattr(call, "sid", None)
         
@@ -424,8 +460,6 @@ def make_play_twiml(audio_url: str) -> str:
     vr = VoiceResponse()
     vr.play(audio_url)
     return str(vr)
-
-twilio_bp = Blueprint("twilio_client", __name__, url_prefix="/twilio")
 
 @twilio_bp.route("/answer", methods=["GET", "POST"])
 def twilio_answer():
@@ -516,7 +550,8 @@ def play_audio_on_call(call_sid: str, local_audio_path: Optional[str] = None,
 
     start_time = time.time()
     try:
-        dynamic_url = TWILIO_DYNAMIC_TWIML_URL or (os.getenv("PUBLIC_BASE_URL", "").rstrip("/") + f"/twilio/twiml/play?audio_url={public_url}")
+        import os
+        dynamic_url = TWILIO_DYNAMIC_TWIML_URL or (getattr(Config, 'PUBLIC_BASE_URL', '').rstrip("/") + f"/twilio/twiml/play?audio_url={public_url}")
         if not dynamic_url:
             _structured_log("no_dynamic_twiml_config", level="ERROR",
                           message="No dynamic TwiML URL configured", trace_id=trace_id)
@@ -556,7 +591,8 @@ def health_check():
     trace_id = get_trace_id()
     start_time = time.time()
     try:
-        redis_ok = safe_redis_operation(lambda: _get_redis().ping() if _get_redis() else False, fallback=False)
+        redis_client = get_redis_client_instance()
+        redis_ok = safe_redis_operation(lambda: redis_client.ping() if redis_client else False, fallback=False)
         breaker_open = _is_circuit_breaker_open("twilio_client")
         status = "healthy" if redis_ok and not breaker_open else "degraded"
         

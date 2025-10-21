@@ -15,5 +15,8 @@ sentry-sdk==2.19.0
 twilio==9.8.0
 uvicorn==0.30.0
 websockets==12.0
-boto3>=1.34.0
+boto3==1.34.162
 prometheus-client==0.20.0
+setuptools>=68.0.0
+wheel>=0.42.0
+fastapi==0.115.0

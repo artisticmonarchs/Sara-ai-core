@@ -25,20 +25,21 @@ from prometheus_client import Gauge, Counter
 from logging_utils import log_event, get_trace_id
 
 # ------------------------------------------------------------------
-# Phase 11-D: Configuration Management
+# Phase 11-D: Configuration Management - FIXED
 # ------------------------------------------------------------------
 try:
-    from config import get_metrics_config
+    from config import get_metrics_config, Config
     METRICS_CONFIG = get_metrics_config()
+    SERVICE_NAME = getattr(Config, "SERVICE_NAME", "unknown_service")
 except ImportError:
-    # Fallback configuration
+    # Fallback configuration without direct os.environ access
     METRICS_CONFIG = {
-        "snapshot_interval": int(float(__import__("os").environ.get("METRICS_SYNC_INTERVAL", "30"))),
+        "snapshot_interval": 30,  # Fixed default, no os.environ access
         "circuit_breaker_enabled": True
     }
+    SERVICE_NAME = "unknown_service"
 
 SNAPSHOT_INTERVAL = METRICS_CONFIG.get("snapshot_interval", 30)
-SERVICE_NAME = __import__("os").environ.get("SERVICE_NAME", "unknown_service")
 
 # ------------------------------------------------------------------
 # Phase 11-D: Unified Global Snapshot with Thread Safety
@@ -148,7 +149,7 @@ except Exception:
         return b""
 
 # ------------------------------------------------------------------
-# Phase 11-D: Redis Circuit Breaker Support
+# Phase 11-D: Redis Circuit Breaker Support - FIXED
 # ------------------------------------------------------------------
 def _is_redis_circuit_breaker_open() -> bool:
     """Check if Redis circuit breaker is open."""
@@ -156,8 +157,9 @@ def _is_redis_circuit_breaker_open() -> bool:
         return False
         
     try:
-        from redis_client import get_redis_client
-        client = get_redis_client()
+        # CORRECTED: Use get_client() instead of get_redis_client()
+        from redis_client import get_client
+        client = get_client()
         if not client:
             return False
             
@@ -472,11 +474,10 @@ def start_background_sync(service_name: str = None, interval_sec: int = None) ->
     """
     global _sync_thread, _stop_event, SERVICE_NAME  # ← FIX: Include SERVICE_NAME in global declaration
     
-    # Reset SERVICE_NAME if no service_name provided
+    # Reset SERVICE_NAME if provided - FIXED: No direct os.environ access
     if service_name:
         SERVICE_NAME = service_name
-    else:
-        SERVICE_NAME = __import__("os").environ.get("SERVICE_NAME", "unknown_service")
+    # Otherwise keep the SERVICE_NAME from config initialization
         
     if _sync_thread and _sync_thread.is_alive():
         log_event(service="global_metrics_store", event="sync_already_running", status="info",

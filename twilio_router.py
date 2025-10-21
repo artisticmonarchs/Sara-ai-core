@@ -6,54 +6,92 @@ __phase__ = "11-D"
 __service__ = "twilio_router"
 __schema_version__ = "phase_11d_v1"
 
-import os
 import time
 import traceback
 from flask import Flask, request, Response, jsonify, Blueprint
-from twilio.rest import Client
 
-# Phase 11-D Observability imports
-try:
-    from logging_utils import log_event, get_trace_id
-    from metrics_collector import increment_metric, observe_latency
-    from redis_client import get_redis_client, safe_redis_operation
-    from sentry_utils import capture_exception_safe
-    from config import Config
-except Exception as e:
-    # Fallback for missing Phase 11-D modules
-    def get_trace_id(): return "unknown-trace"
-    def capture_exception_safe(*args, **kwargs): pass
-    def increment_metric(*args, **kwargs): pass
-    def observe_latency(*args, **kwargs): pass
-    def get_redis_client(): return None
-    def safe_redis_operation(operation, fallback=None, operation_name=None): 
-        try: return operation() 
-        except: return fallback
-    class Config:
-        pass
+# Phase 11-D: Lazy imports to avoid import-time side effects
+def _get_twilio_client():
+    try:
+        from twilio.rest import Client
+        return Client
+    except Exception:
+        return None
 
-# Twilio exception handling
-try:
-    from twilio.base.exceptions import TwilioRestException
-except Exception:
-    TwilioRestException = Exception
+def _get_twilio_exceptions():
+    try:
+        from twilio.base.exceptions import TwilioRestException
+        return TwilioRestException
+    except Exception:
+        return Exception
+
+# Phase 11-D Observability imports with lazy loading
+def _get_observability_modules():
+    try:
+        from logging_utils import log_event, get_trace_id
+        from metrics_collector import increment_metric, observe_latency
+        from redis_client import get_redis_client, safe_redis_operation
+        from sentry_utils import capture_exception_safe
+        from config import Config
+        return log_event, get_trace_id, increment_metric, observe_latency, get_redis_client, safe_redis_operation, capture_exception_safe, Config
+    except Exception as e:
+        # Fallback for missing Phase 11-D modules
+        def get_trace_id(): return "unknown-trace"
+        def capture_exception_safe(*args, **kwargs): pass
+        def increment_metric(*args, **kwargs): pass
+        def observe_latency(*args, **kwargs): pass
+        def get_redis_client(): return None
+        def safe_redis_operation(operation, fallback=None, operation_name=None): 
+            try: 
+                return operation() 
+            except: 
+                return fallback
+        class Config:
+            pass
+        def log_event(*args, **kwargs): 
+            # Fallback logging
+            print(f"[{kwargs.get('service', __service__)}] {kwargs.get('event', 'unknown')}: {kwargs.get('message', '')}")
+        return log_event, get_trace_id, increment_metric, observe_latency, get_redis_client, safe_redis_operation, capture_exception_safe, Config
+
+# Initialize observability modules
+log_event, get_trace_id, increment_metric, observe_latency, get_redis_client, safe_redis_operation, capture_exception_safe, Config = _get_observability_modules()
 
 # --------------------------------------------------------------------------
-# Environment (Use Config first, then env vars)
+# Configuration (Phase 11-D: Only use Config, no direct env access)
 # --------------------------------------------------------------------------
-TWILIO_ACCOUNT_SID = getattr(Config, "TWILIO_ACCOUNT_SID", os.getenv("TWILIO_ACCOUNT_SID"))
-TWILIO_AUTH_TOKEN = getattr(Config, "TWILIO_AUTH_TOKEN", os.getenv("TWILIO_AUTH_TOKEN"))
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-PUBLIC_AUDIO_BASE = getattr(Config, "PUBLIC_AUDIO_BASE", os.getenv("PUBLIC_AUDIO_BASE", "https://your-domain.com/audio")).rstrip("/")
+def _get_config_values():
+    """Get all configuration values from Config with fallbacks"""
+    return {
+        "TWILIO_ACCOUNT_SID": getattr(Config, "TWILIO_ACCOUNT_SID", None),
+        "TWILIO_AUTH_TOKEN": getattr(Config, "TWILIO_AUTH_TOKEN", None),
+        "PUBLIC_AUDIO_BASE": getattr(Config, "PUBLIC_AUDIO_BASE", "https://your-domain.com/audio").rstrip("/"),
+        "TWILIO_ROUTER_PORT": getattr(Config, "TWILIO_ROUTER_PORT", 8001)
+    }
 
-# Phase 11-D: Use safe Redis client with fallback
-try:
-    redis_client = get_redis_client()
-    if redis_client is None:
-        from redis import Redis
-        redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
-except Exception as e:
-    redis_client = None
+CONFIG = _get_config_values()
+
+# Phase 11-D: Redis client initialization deferred to avoid import-time connections
+redis_client = None
+def _get_redis_client_safe():
+    """Lazy Redis client initialization"""
+    global redis_client
+    if redis_client is not None:
+        return redis_client
+    
+    try:
+        redis_client = get_redis_client()
+        if redis_client is None:
+            # Fallback only if absolutely necessary
+            try:
+                from redis import Redis
+                redis_url = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
+                redis_client = Redis.from_url(redis_url, decode_responses=True)
+            except Exception:
+                redis_client = None
+    except Exception:
+        redis_client = None
+    
+    return redis_client
 
 # Twilio client - initialize as None, will be set by helper
 twilio_client = None
@@ -68,11 +106,18 @@ def _init_twilio_client():
     global twilio_client
     if twilio_client:
         return twilio_client
-    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+    
+    if not CONFIG["TWILIO_ACCOUNT_SID"] or not CONFIG["TWILIO_AUTH_TOKEN"]:
         _structured_log("twilio_credentials_missing", level="warning", message="Twilio creds missing")
         return None
+    
     try:
-        twilio_client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        TwilioClient = _get_twilio_client()
+        if TwilioClient is None:
+            _structured_log("twilio_library_missing", level="error", message="Twilio library not available")
+            return None
+        
+        twilio_client = TwilioClient(CONFIG["TWILIO_ACCOUNT_SID"], CONFIG["TWILIO_AUTH_TOKEN"])
         return twilio_client
     except Exception as e:
         capture_exception_safe(e, {"service": __service__, "msg": "Twilio init failed"})
@@ -86,7 +131,7 @@ def _init_twilio_client():
 def _is_circuit_breaker_open(service: str = "twilio_client") -> bool:
     """Check if circuit breaker is open for Twilio operations"""
     try:
-        r = get_redis_client()
+        r = _get_redis_client_safe()
         if not r:
             return False
         state = safe_redis_operation(
@@ -159,6 +204,7 @@ def playback():
         return jsonify({"error": "Missing session_id or trace_id", "trace_id": trace_id}), 400
 
     # Sanitize session_id for URL safety
+    import os
     safe_session_id = os.path.basename(session_id) if session_id else None
     if not safe_session_id or safe_session_id != session_id:
         _structured_log("playback_invalid_session_id", level="error",
@@ -167,8 +213,9 @@ def playback():
 
     try:
         # Phase 11-D: Safe Redis operation with bytes decoding
+        redis_client_instance = _get_redis_client_safe()
         call_sid = safe_redis_operation(
-            lambda: redis_client.get(f"twilio_call:{safe_session_id}") if redis_client else None,
+            lambda: redis_client_instance.get(f"twilio_call:{safe_session_id}") if redis_client_instance else None,
             fallback=None,
             operation_name="get_call_sid"
         )
@@ -187,7 +234,7 @@ def playback():
             return jsonify({"error": "Call SID not found", "trace_id": trace_id}), 404
 
         # Construct safe audio URL
-        audio_url = f"{PUBLIC_AUDIO_BASE}/{safe_session_id}/{trace_id}.wav"
+        audio_url = f"{CONFIG['PUBLIC_AUDIO_BASE']}/{safe_session_id}/{trace_id}.wav"
 
         # Build TwiML to play audio
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -224,24 +271,24 @@ def playback():
             "call_sid": call_sid
         }), 200
 
-    except TwilioRestException as e:
-        # Phase 11-D: Twilio-specific exception handling
-        latency_ms = (time.time() - start_time) * 1000
-        _record_metrics("playback", "failure", latency_ms, trace_id)
-        capture_exception_safe(e, {"service": __service__, "trace_id": trace_id, "session_id": safe_session_id})
-        _structured_log("twilio_playback_twilio_error", level="error",
-                      message=str(e), trace_id=trace_id, session_id=safe_session_id,
-                      traceback=traceback.format_exc(), latency_ms=latency_ms)
-        return jsonify({"error": f"Twilio API error: {str(e)}", "trace_id": trace_id}), 502
     except Exception as e:
-        # Phase 11-D: Generic exception handling
+        TwilioRestException = _get_twilio_exceptions()
+        # Phase 11-D: Exception handling
         latency_ms = (time.time() - start_time) * 1000
         _record_metrics("playback", "failure", latency_ms, trace_id)
         capture_exception_safe(e, {"service": __service__, "trace_id": trace_id, "session_id": safe_session_id})
-        _structured_log("twilio_playback_error", level="error",
-                      message=str(e), trace_id=trace_id, session_id=safe_session_id,
-                      traceback=traceback.format_exc(), latency_ms=latency_ms)
-        return jsonify({"error": str(e), "trace_id": trace_id}), 500
+        
+        # Check if it's a Twilio-specific exception
+        if isinstance(e, TwilioRestException):
+            _structured_log("twilio_playback_twilio_error", level="error",
+                          message=str(e), trace_id=trace_id, session_id=safe_session_id,
+                          traceback=traceback.format_exc(), latency_ms=latency_ms)
+            return jsonify({"error": f"Twilio API error: {str(e)}", "trace_id": trace_id}), 502
+        else:
+            _structured_log("twilio_playback_error", level="error",
+                          message=str(e), trace_id=trace_id, session_id=safe_session_id,
+                          traceback=traceback.format_exc(), latency_ms=latency_ms)
+            return jsonify({"error": str(e), "trace_id": trace_id}), 500
 
 # --------------------------------------------------------------------------
 # Health Check (Updated with Phase 11-D Observability)
@@ -254,8 +301,9 @@ def health_check():
     
     try:
         # Phase 11-D: Safe Redis ping and circuit breaker check
+        redis_client_instance = _get_redis_client_safe()
         redis_ok = safe_redis_operation(
-            lambda: redis_client.ping() if redis_client else False, 
+            lambda: redis_client_instance.ping() if redis_client_instance else False, 
             fallback=False,
             operation_name="ping_redis"
         )
@@ -316,9 +364,10 @@ def health_legacy():
 # Local Debug Entry (Preserved)
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
+    import os
     app = Flask(__name__)
     app.register_blueprint(twilio_router_bp)
-    app.run(host="0.0.0.0", port=int(os.getenv("TWILIO_ROUTER_PORT", 8001)))
+    app.run(host="0.0.0.0", port=int(CONFIG["TWILIO_ROUTER_PORT"]))
 
 # --------------------------------------------------------------------------
 # Exports

@@ -15,8 +15,8 @@ from metrics_collector import increment_metric, observe_latency
 from sentry_utils import capture_exception_safe
 from config import Config
 
-# Initialize Redis client with safe configuration
-REDIS_URL = getattr(Config, "REDIS_URL", os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+# Initialize Redis client with safe configuration - use Config only
+REDIS_URL = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
 redis_client = get_redis_client()
 
 def _structured_log(event, level, message, **extra):
@@ -180,8 +180,14 @@ def get_redis_status():
 # Maintain backward compatibility for direct script execution
 if __name__ == "__main__":
     health_result = check_redis_health()
-    print("Redis Health Check Result:")
-    for key, value in health_result.items():
-        print(f"  {key}: {value}")
+    # Replace print with structured logging for Phase 11-D compliance
+    _structured_log(
+        "redis_health_check_cli",
+        "info", 
+        "Redis health check completed via CLI",
+        health_status=health_result["status"],
+        redis_ok=health_result["redis_ok"],
+        breaker_open=health_result["breaker_open"]
+    )
 
 __all__ = ["check_redis_health", "get_redis_status", "redis_client"]

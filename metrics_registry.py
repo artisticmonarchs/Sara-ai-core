@@ -27,18 +27,24 @@ from logging_utils import get_json_logger, log_event, get_trace_id
 # Phase 11-D: Configuration & Environment Awareness
 # ------------------------------------------------------------------
 try:
-    from config import get_metrics_config
-    METRICS_CONFIG = get_metrics_config()
-except ImportError:
-    # Fallback configuration
+    from config import Config
+    # Use Config class directly to access attributes
     METRICS_CONFIG = {
-        "snapshot_interval": int(os.getenv("METRICS_SNAPSHOT_INTERVAL", "30")),
-        "redis_key_prefix": os.getenv("METRICS_REDIS_PREFIX", "prometheus"),
+        "snapshot_interval": getattr(Config, "METRICS_SNAPSHOT_INTERVAL", 30),
+        "redis_key_prefix": getattr(Config, "METRICS_REDIS_PREFIX", "prometheus"),
         "circuit_breaker_enabled": True
     }
+    SERVICE_NAME = getattr(Config, "SERVICE_NAME", "unknown_service")
+except ImportError:
+    # Fallback configuration - use os.getenv only as last resort
+    METRICS_CONFIG = {
+        "snapshot_interval": 30,
+        "redis_key_prefix": "prometheus",
+        "circuit_breaker_enabled": True
+    }
+    SERVICE_NAME = "unknown_service"
 
 SNAPSHOT_INTERVAL = METRICS_CONFIG.get("snapshot_interval", 30)
-SERVICE_NAME = os.getenv("SERVICE_NAME", "unknown_service")
 
 # ------------------------------------------------------------------
 # Phase 11-D: Unified Prometheus Registry

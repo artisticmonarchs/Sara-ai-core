@@ -3,7 +3,6 @@ sentry_utils.py — Phase 11-D (Unified Error Tracking with Circuit Breaker & Ob
 Handles Sentry initialization for centralized error tracking with full Phase 11-D compliance.
 """
 
-import os
 import logging
 from typing import Optional, Dict, Any
 
@@ -29,26 +28,27 @@ except ImportError:
         return "no_trace_id"
 
 try:
-    from config import get_sentry_config
+    from config import get_sentry_config, Config
 except ImportError:
-    # Fallback configuration
+    # Fallback configuration without direct os.environ access
     def get_sentry_config():  # type: ignore
         return {
-            "dsn": os.getenv("SENTRY_DSN"),
-            "environment": os.getenv("SENTRY_ENVIRONMENT", "development"),
-            "release": os.getenv("SENTRY_RELEASE", "unknown"),
-            "traces_sample_rate": float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "1.0")),
-            "enabled": os.getenv("SENTRY_ENABLED", "true").lower() == "true"
+            "dsn": None,  # Fixed: No direct os.getenv access
+            "environment": "development",
+            "release": "unknown",
+            "traces_sample_rate": 1.0,
+            "enabled": True
         }
 
 # ------------------------------------------------------------------
-# Phase 11-D: Circuit Breaker Support
+# Phase 11-D: Circuit Breaker Support - FIXED
 # ------------------------------------------------------------------
 def _is_sentry_circuit_breaker_open() -> bool:
     """Check if Sentry circuit breaker is open."""
     try:
-        from redis_client import get_redis_client
-        client = get_redis_client()
+        # CORRECTED: Use get_client() instead of get_redis_client()
+        from redis_client import get_client
+        client = get_client()
         if not client:
             return False
             

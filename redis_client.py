@@ -8,9 +8,6 @@ import redis
 import time
 from typing import Optional
 
-from logging_utils import log_event
-from config import Config
-
 
 # Connection Management
 _redis_client: Optional[redis.Redis] = None
@@ -20,8 +17,19 @@ _REDIS_SOCKET_TIMEOUT = 5
 _REDIS_HEALTH_CHECK_INTERVAL = 30
 
 
+def _get_logger():
+    """Lazy import logging utilities to break circular imports."""
+    try:
+        from logging_utils import log_event
+        return log_event
+    except Exception:
+        def _noop_log(*a, **k): pass
+        return _noop_log
+
+
 def _connect() -> Optional[redis.Redis]:
     """Attempt to establish a Redis connection and perform a health check."""
+    from config import Config
     url = Config.REDIS_URL
     try:
         client = redis.Redis.from_url(
@@ -33,7 +41,8 @@ def _connect() -> Optional[redis.Redis]:
         )
         # Connectivity check
         client.ping()
-        log_event(
+        log_func = _get_logger()
+        log_func(
             service="redis_client",
             event="redis_connected",
             status="ok",
@@ -41,7 +50,8 @@ def _connect() -> Optional[redis.Redis]:
         )
         return client
     except redis.exceptions.ConnectionError as e:
-        log_event(
+        log_func = _get_logger()
+        log_func(
             service="redis_client",
             event="redis_connection_failed",
             status="warn",
@@ -50,7 +60,8 @@ def _connect() -> Optional[redis.Redis]:
         )
         return None
     except Exception as e:
-        log_event(
+        log_func = _get_logger()
+        log_func(
             service="redis_client",
             event="redis_init_error",
             status="error",
@@ -72,7 +83,8 @@ def get_client() -> Optional[redis.Redis]:
         try:
             _redis_client.ping()
         except redis.exceptions.ConnectionError:
-            log_event(
+            log_func = _get_logger()
+            log_func(
                 service="redis_client",
                 event="redis_reconnect_attempt",
                 status="warn",
@@ -105,7 +117,8 @@ def increment_metric(key: str, field: str, amount: int = 1) -> None:
     try:
         client.hincrby(key, field, amount)
     except Exception as e:
-        log_event(
+        log_func = _get_logger()
+        log_func(
             service="redis_client",
             event="increment_metric_failed",
             status="warn",
@@ -123,7 +136,8 @@ def get_metric(key: str, field: str) -> int:
         val = client.hget(key, field)
         return int(val) if val else 0
     except Exception as e:
-        log_event(
+        log_func = _get_logger()
+        log_func(
             service="redis_client",
             event="get_metric_failed",
             status="warn",
@@ -135,6 +149,7 @@ def get_metric(key: str, field: str) -> int:
 
 def health_check() -> dict:
     """Return a health snapshot for diagnostics."""
+    from config import Config
     client = get_client()
     status = "ok"
     latency_ms = None
@@ -147,7 +162,8 @@ def health_check() -> dict:
             latency_ms = round((time.time() - start) * 1000, 2)
         except Exception as e:
             status = "error"
-            log_event(
+            log_func = _get_logger()
+            log_func(
                 service="redis_client",
                 event="health_check_failed",
                 status="error",

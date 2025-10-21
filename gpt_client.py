@@ -6,23 +6,36 @@ metrics integration, and fault-tolerant fallback.
 
 import os
 import uuid
-import logging
 import time
 from openai import OpenAI
 from logging_utils import log_event
 
 # --------------------------------------------------------------------------
-# Phase 11-D Metrics Integration
+# Phase 11-D Configuration Isolation
 # --------------------------------------------------------------------------
 try:
-    from metrics_collector import increment_metric, observe_latency
+    from config import Config
 except ImportError:
-    # Fallback metrics functions for backward compatibility
-    def increment_metric(metric_name: str, value: int = 1):
-        pass
-    
-    def observe_latency(metric_name: str, latency_ms: float):
-        pass
+    # Fallback config for backward compatibility
+    class Config:
+        OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+        OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+        GPT_MAX_TOKENS = int(os.getenv("GPT_MAX_TOKENS", "1000"))
+        GPT_TEMPERATURE = float(os.getenv("GPT_TEMPERATURE", "0.7"))
+
+# --------------------------------------------------------------------------
+# Phase 11-D Metrics Integration - Lazy Import Shim
+# --------------------------------------------------------------------------
+def _get_metrics():
+    """Lazy metrics shim to avoid circular imports at import-time"""
+    try:
+        from metrics_collector import increment_metric as _inc, observe_latency as _obs
+        return _inc, _obs
+    except Exception:
+        # safe no-op fallbacks
+        def _noop_inc(*a, **k): pass
+        def _noop_obs(*a, **k): pass
+        return _noop_inc, _noop_obs
 
 # --------------------------------------------------------------------------
 # Environment & Safety Fixes
@@ -38,17 +51,16 @@ for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy
 # OpenAI Client Initialization
 # --------------------------------------------------------------------------
 try:
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    client = OpenAI(api_key=Config.OPENAI_API_KEY)
 except Exception as e:
-    logging.exception("Failed to initialize OpenAI client")
+    # Replace logging.exception with structured logging
+    log_event(
+        service="gpt_client",
+        event="client_init",
+        status="error",
+        message=f"Failed to initialize OpenAI client: {e}"
+    )
     raise RuntimeError(f"OpenAI client init failed: {e}")
-
-
-# --------------------------------------------------------------------------
-# Logger Setup
-# --------------------------------------------------------------------------
-logger = logging.getLogger("gpt_client")
-logger.setLevel(logging.INFO)
 
 
 # --------------------------------------------------------------------------
@@ -61,6 +73,9 @@ def generate_reply(prompt: str, trace_id: str | None = None) -> str:
     """
     trace_id = trace_id or str(uuid.uuid4())
     start_time = time.time()
+
+    # Lazy load metrics functions
+    increment_metric, observe_latency = _get_metrics()
 
     # Phase 11-D: Increment request counter
     increment_metric("gpt_requests_total")
@@ -77,10 +92,10 @@ def generate_reply(prompt: str, trace_id: str | None = None) -> str:
     try:
         # ✅ Compatible with OpenAI SDK v1.51+
         response = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-5-mini"),
+            model=Config.OPENAI_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_completion_tokens=int(os.getenv("GPT_MAX_TOKENS", "1000")),
-            temperature=float(os.getenv("GPT_TEMPERATURE", "0.7")),
+            max_completion_tokens=Config.GPT_MAX_TOKENS,
+            temperature=Config.GPT_TEMPERATURE,
         )
 
         reply = response.choices[0].message.content.strip()
@@ -105,15 +120,18 @@ def generate_reply(prompt: str, trace_id: str | None = None) -> str:
         return reply
 
     except Exception as e:
+        # Lazy load metrics functions for error case
+        increment_metric, _ = _get_metrics()
+        
         # Phase 11-D: Record failure metrics
         increment_metric("gpt_failures_total")
         
-        logger.exception("GPT request failed")
+        # Replace logger.exception with structured logging
         log_event(
             service="gpt_client",
             event="gpt_error",
             status="failed",
-            message="GPT request failed",
+            message=f"GPT request failed: {e}",
             trace_id=trace_id,
             extra={"error": str(e)},
         )
