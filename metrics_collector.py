@@ -419,6 +419,10 @@ def increment_metric(metric_name: str, value: int = 1) -> bool:
     """Increment local counter and write per-service Redis total (best-effort).
     Also ensure metric index contains the metric_name and key TTL refreshed.
     """
+    # 🧩 Skip self-metrics to avoid recursion
+    if metric_name.startswith("metrics_collector_"):
+        return True
+        
     try:
         with _lock:
             _counters[metric_name] += int(value)
@@ -466,6 +470,10 @@ def inc_metric(name: str, amount: int = 1) -> bool:
 
 def set_metric(name: str, value: int) -> bool:
     """Overwrite local and per-service Redis metric (best-effort)."""
+    # 🧩 Skip self-metrics to avoid recursion
+    if name.startswith("metrics_collector_"):
+        return True
+        
     try:
         with _lock:
             _counters[name] = int(value)
@@ -562,6 +570,10 @@ def observe_latency(name: str, value_ms: float) -> bool:
       prometheus:metrics:<service>:latency:<name>:sum    (float ms stored)
     TTL refreshed on writes.
     """
+    # 🧩 Skip self-metrics to avoid recursion
+    if name.startswith("metrics_collector_"):
+        return True
+        
     try:
         val = float(value_ms)
         with _lock:
@@ -1050,6 +1062,9 @@ def push_snapshot_from_collector():
     Phase 11-D — Unified snapshot push handler.
     Used by external modules to trigger metrics persistence manually.
     """
+    # 🧩 Skip self-metrics to avoid recursion
+    # This function itself doesn't record metrics, but we add protection for completeness
+    
     try:
         # Use Redis lock to prevent concurrent snapshot operations
         with redis_lock(f"metrics_lock:{SERVICE_NAME}") as locked:

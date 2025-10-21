@@ -425,6 +425,11 @@ def log_event(
     Emits standardized JSON logs for observability and traceability,
     without colliding with reserved LogRecord fields.
     """
+    # 🔒 Prevent recursion: skip metrics_collector self-logging
+    if service == "metrics_collector":
+        print(f"[LOG_FALLBACK] service={service} event={event} status={status} message={message}")
+        return True
+
     return _emit_log_event(
         service=service,
         event=event,
