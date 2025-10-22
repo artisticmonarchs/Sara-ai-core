@@ -1,5 +1,5 @@
 """
-streaming_server.py — Phase 11-D (Unified Metrics Registry + Global Sync)
+streaming_server.py — Phase 11-F (Unified Metrics Registry + Global Sync)
 Sara AI Core — Streaming Service
 
 - Uses unified metrics_registry.REGISTRY as the shared Prometheus registry
@@ -523,7 +523,7 @@ def _initialize_metrics_system():
             event="global_metrics_sync_started",
             status="ok",
             message="Streaming server metrics restored and sync started",
-            extra={"phase": "11-D"}
+            extra={"phase": "11-F"}
         )
     except Exception as e:
         log_event(
@@ -531,7 +531,7 @@ def _initialize_metrics_system():
             event="metrics_startup_failed",
             status="error",
             message="Failed to initialize unified metrics",
-            extra={"error": str(e), "stack": traceback.format_exc(), "phase": "11-D"}
+            extra={"error": str(e), "stack": traceback.format_exc(), "phase": "11-F"}
         )
 
 def _initialize_metrics_restore():
@@ -665,7 +665,7 @@ def metrics_endpoint():
         return Response("# metrics_export_error 1\n", mimetype="text/plain", status=500)
 
 # --------------------------------------------------------------------------
-# /metrics_snapshot — JSON snapshot persisted to Redis (Phase 11-D)
+# /metrics_snapshot — JSON snapshot persisted to Redis (Phase 11-F)
 # --------------------------------------------------------------------------
 @app.route("/metrics_snapshot", methods=["GET"])
 def metrics_snapshot():
@@ -714,7 +714,7 @@ def metrics_snapshot():
         # Persist collector snapshot via helper (guarded)
         try:
             from metrics_collector import push_snapshot_from_collector
-            safe_redis_call(push_snapshot_from_collector, get_metrics().get_snapshot)
+            safe_redis_call(push_snapshot_from_collector, get_metrics().get_snapshot())
         except redis.exceptions.RedisError as e:
             log_event(
                 service="streaming_server",
@@ -737,10 +737,11 @@ def metrics_snapshot():
         # Also save combined payload as convenience/fallback
         try:
             from metrics_registry import save_metrics_snapshot
-            safe_redis_call(save_metrics_snapshot, payload)
-        except redis.exceptions.RedisError:
-            stream_errors_total.labels(error_type="redis_backup").inc()
-        except Exception:
+            if callable(save_metrics_snapshot):
+                safe_redis_call(save_metrics_snapshot, payload)
+        except Exception as e:
+            log_event(service="streaming_server", event="metrics_registry_backup_failed",
+                     status="warn", message=str(e))
             stream_errors_total.labels(error_type="backup_snapshot").inc()
 
         return jsonify(payload), 200
@@ -1234,20 +1235,43 @@ def recover_stream(session_id: str):
 # Entrypoint
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Initialize metrics system on startup
-    _ensure_initialized()
-    
-    # Ensure health monitor is stopped on exit
+    # Initialize metrics system on startup with delay to avoid race conditions
     import atexit
-    atexit.register(health_monitor.stop)
+    import threading
+    
+    def _delayed_init():
+        try:
+            _ensure_initialized()
+            log_event(service="streaming", event="metrics_initialized", status="ok",
+                     message="Metrics initialized successfully")
+        except Exception as e:
+            log_event(service="streaming", event="metrics_init_failed", status="error",
+                     message=str(e))
+    
+    # Delay 5s to allow Prometheus and Redis to be ready
+    threading.Timer(5.0, _delayed_init).start()
+    
+    # Enhanced cleanup handler
+    def _cleanup():
+        try:
+            health_monitor.stop()
+            log_event(service="streaming", event="shutdown", status="ok",
+                     message="Streaming server exited cleanly")
+        except Exception as e:
+            log_event(service="streaming", event="shutdown_error", status="warn",
+                     message=str(e))
+    atexit.register(_cleanup)
     
     log_event(
         service="streaming",
         event="startup",
         status="ok",
         message="Streaming server initialized with unified metrics registry",
-        extra={"phase": "11-D"}
+        extra={"phase": "11-F"}
     )
+    
+    log_event(service="streaming", event="metrics_namespace",
+             status="info", message="Per-service metric isolation deferred to 11-G")
     
     # Explicit port override to avoid conflict with main app
     port = int(os.getenv("STREAMING_PORT", "5001"))
