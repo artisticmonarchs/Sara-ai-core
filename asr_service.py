@@ -414,3 +414,9 @@ if __name__ == "__main__":
         )
     except Exception:
         print(f"[ASR] Processed final audio for call_sid={call_sid}")
+
+# === Phase 11-E FinalTouch: Safe fallback stub ===
+def update_partial_transcript(*args, **kwargs):
+    '''Fallback stub to avoid ImportError during ASR init.'''
+    import logging
+    logging.getLogger(__name__).warning('Fallback: update_partial_transcript() called but not implemented.')

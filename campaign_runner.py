@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 campaign_runner.py
-CLI tool to run an outbound campaign from a CSV file. Implements a simple rate limiter and daily-cap using Redis.
-It uses contacts_loader.enqueue_contact to actually enqueue tasks (or outbound_tasks.outbound_call_task.delay).
+CLI tool to run an outbound campaign from a CSV file. 
+SEQUENTIAL VERSION - Runs calls one by one, no parallel processing.
 
 Usage:
-    python campaign_runner.py --csv leads.csv --campaign my_campaign --rate 20 --daily-cap 300
+    python campaign_runner.py --csv leads.csv --campaign my_campaign --daily-cap 300
 """
 import argparse
 import time
@@ -42,7 +42,49 @@ def get_trace_id():
     except Exception:
         return str(uuid.uuid4())[:8]
 
-from contacts_loader import read_csv, validate_row, normalize_phone, enqueue_contact
+from contacts_loader import read_csv, validate_row, normalize_phone
+
+# NEW: Sequential call execution instead of enqueueing
+def execute_call_directly(contact_row, campaign_name: str):
+    """Execute call directly instead of enqueueing to Celery"""
+    trace_id = get_trace_id()
+    
+    try:
+        # Import the actual call execution function
+        # This assumes you have a function that makes the actual call
+        try:
+            from outbound_tasks import execute_outbound_call
+            call_function = execute_outbound_call
+        except ImportError:
+            # Fallback to the task function if direct function doesn't exist
+            from outbound_tasks import outbound_call_task
+            # Use apply() to run synchronously instead of delay() for async
+            call_function = lambda row, camp: outbound_call_task.apply(args=[row, camp])
+        
+        log_event("campaign_runner", "call_starting", "info",
+                  f"Starting sequential call to {contact_row.get('phone', 'unknown')}",
+                  campaign=campaign_name, phone=contact_row.get('phone'), trace_id=trace_id)
+        
+        start_time = time.time()
+        
+        # Execute call synchronously - this will block until call completes
+        result = call_function(contact_row, campaign_name)
+        
+        call_duration = time.time() - start_time
+        
+        log_event("campaign_runner", "call_completed", "info",
+                  f"Call completed in {call_duration:.2f}s",
+                  campaign=campaign_name, phone=contact_row.get('phone'), 
+                  duration_seconds=call_duration, trace_id=trace_id)
+        
+        return result
+        
+    except Exception as e:
+        log_event("campaign_runner", "call_execution_failed", "error",
+                  f"Call execution failed: {e}",
+                  campaign=campaign_name, phone=contact_row.get('phone'),
+                  error=str(e), trace_id=trace_id)
+        raise
 
 def campaign_daily_key(campaign_name: str, date: datetime):
     return f"campaign:{campaign_name}:count:{date.strftime('%Y%m%d')}"
@@ -141,7 +183,7 @@ def incr_daily_count(campaign_name: str, amount: int = 1, expiry_hours: int = 48
                   f"Failed to increment daily count for {campaign_name}",
                   campaign=campaign_name, amount=amount, trace_id=trace_id)
 
-def run_campaign(csv_path: str, campaign_name: str, rate_per_min: int = 20, daily_cap: int = 300, dry_run: bool = False):
+def run_campaign(csv_path: str, campaign_name: str, daily_cap: int = 300, dry_run: bool = False):
     trace_id = get_trace_id()
     campaign_start_time = time.time()
     
@@ -159,15 +201,14 @@ def run_campaign(csv_path: str, campaign_name: str, rate_per_min: int = 20, dail
     
     increment_metric("campaign.started")
     log_event("campaign_runner", "campaign_start", "info", 
-              f"Starting campaign {campaign_name} from {csv_path}", 
-              campaign=campaign_name, csv_path=csv_path, rate_per_min=rate_per_min, 
+              f"Starting SEQUENTIAL campaign {campaign_name} from {csv_path}", 
+              campaign=campaign_name, csv_path=csv_path, 
               daily_cap=daily_cap, dry_run=dry_run, trace_id=trace_id)
     
-    interval = 60.0 / max(1, rate_per_min)
     current_count = get_daily_count(campaign_name)
     
     contacts_processed = 0
-    contacts_enqueued = 0
+    contacts_called = 0
     contacts_failed = 0
 
     for row in read_csv(csv_path):
@@ -175,7 +216,8 @@ def run_campaign(csv_path: str, campaign_name: str, rate_per_min: int = 20, dail
         contact_start_time = time.time()
         
         if dry_run:
-            log_event("campaign_runner", "dry_run_row", "debug", f"DRY ROW: {row}",
+            log_event("campaign_runner", "dry_run_row", "debug", 
+                      f"DRY RUN: Would call {row.get('phone', 'unknown')}",
                       campaign=campaign_name, trace_id=trace_id)
             continue
             
@@ -195,27 +237,28 @@ def run_campaign(csv_path: str, campaign_name: str, rate_per_min: int = 20, dail
             break
             
         try:
-            # Enqueue with latency observation
-            enqueue_contact(row, campaign=campaign_name, dry_run=dry_run)
+            # NEW: Execute call directly (sequentially) instead of enqueueing
+            execute_call_directly(row, campaign_name)
             current_count += 1
-            contacts_enqueued += 1
+            contacts_called += 1
             
-            # Record successful enqueue
+            # Record successful call
             contact_latency = (time.time() - contact_start_time) * 1000
-            observe_latency("campaign.contact_enqueue_latency", contact_latency)
-            increment_metric("campaign.contact_enqueued")
+            observe_latency("campaign.contact_call_latency", contact_latency)
+            increment_metric("campaign.contact_called")
             
             # Update Redis count
             incr_daily_count(campaign_name, 1)
             
         except Exception as e:
             contacts_failed += 1
-            increment_metric("campaign.contact_enqueue_failed")
-            log_event("campaign_runner", "enqueue_failed", "error", 
-                      f"Failed to enqueue contact: {e}", 
+            increment_metric("campaign.contact_call_failed")
+            log_event("campaign_runner", "call_failed", "error", 
+                      f"Call failed for contact: {e}", 
                       campaign=campaign_name, error=str(e), trace_id=trace_id)
         
-        time.sleep(interval)
+        # NOTE: No sleep interval - calls run sequentially, one after another
+        # Each call blocks until complete before starting the next
     
     # Campaign completion metrics
     campaign_duration = (time.time() - campaign_start_time) * 1000
@@ -223,24 +266,24 @@ def run_campaign(csv_path: str, campaign_name: str, rate_per_min: int = 20, dail
     increment_metric("campaign.completed")
     
     log_event("campaign_runner", "campaign_finished", "info", 
-              f"Campaign finished. Processed {contacts_processed}, enqueued {contacts_enqueued}, failed {contacts_failed}",
+              f"SEQUENTIAL campaign finished. Processed {contacts_processed}, called {contacts_called}, failed {contacts_failed}",
               campaign=campaign_name, contacts_processed=contacts_processed,
-              contacts_enqueued=contacts_enqueued, contacts_failed=contacts_failed,
+              contacts_called=contacts_called, contacts_failed=contacts_failed,
               final_count=current_count, duration_ms=campaign_duration, trace_id=trace_id)
 
 def main():
     trace_id = get_trace_id()
     
-    p = argparse.ArgumentParser(description="Run outbound campaign from CSV")
+    p = argparse.ArgumentParser(description="Run SEQUENTIAL outbound campaign from CSV - One call at a time")
     p.add_argument("--csv", required=True)
     p.add_argument("--campaign", default="default")
-    p.add_argument("--rate", type=int, default=20, help="calls per minute")
     p.add_argument("--daily-cap", type=int, default=300)
     p.add_argument("--dry-run", action="store_true")
+    # REMOVED: --rate parameter since we're running sequentially
     args = p.parse_args()
 
     try:
-        run_campaign(args.csv, args.campaign, rate_per_min=args.rate, 
+        run_campaign(args.csv, args.campaign, 
                     daily_cap=args.daily_cap, dry_run=args.dry_run)
         
         # Final metrics - lazy loaded

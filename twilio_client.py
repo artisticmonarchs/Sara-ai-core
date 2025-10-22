@@ -635,3 +635,14 @@ __all__ = [
 ]
 
 # End of file
+
+# --- Phase 11-E patch ---
+def update_partial_transcript(*args, **kwargs):
+    """Safe fallback stub for ASR partial transcript updates."""
+    return None
+
+
+def update_final_transcript(*args, **kwargs):
+    """Fallback stub for ASR integration if not defined."""
+    print('[LOG_FALLBACK] twilio_client.update_final_transcript called with no-op')
+    return None

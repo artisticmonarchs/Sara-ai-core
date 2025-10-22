@@ -6,6 +6,15 @@ Only this module may access environment variables directly.
 
 import os
 from dotenv import load_dotenv
+from pathlib import Path
+
+# Ensure .env is loaded even when executed from subdirectories or virtualenv
+env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=env_path, override=True)
+
+# Safety check
+if not os.getenv("REDIS_URL"):
+    print(f"[WARN] .env not loaded from {env_path}. Current working dir: {os.getcwd()}")
 
 # Determine which environment file to load
 ENV_MODE = os.getenv("ENV_MODE", "local").lower()
@@ -25,7 +34,9 @@ class Config:
     SENTRY_DSN = os.getenv("SENTRY_DSN", "")
     
     # Server Configuration
-    FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))
+    HOST = os.getenv("FLASK_HOST", "0.0.0.0")
+    FLASK_PORT = int(os.getenv("FLASK_PORT", "5000"))   # Main Flask app (app.py)
+    STREAMING_PORT = int(os.getenv("STREAMING_PORT", "5001"))  # SSE + TTS server (streaming_server.py)
     
     # External Services
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -73,3 +84,23 @@ class Config:
     SNAPSHOT_INTERVAL = int(os.getenv("SNAPSHOT_INTERVAL", "60"))
     ENABLE_METRICS_PERSISTENCE = os.getenv("ENABLE_METRICS_PERSISTENCE", "true").lower() == "true"
     METRICS_ENDPOINT_ENABLED = os.getenv("METRICS_ENDPOINT_ENABLED", "true").lower() == "true"
+    
+    # Celery Configuration
+    CELERY_RETRY_MAX = 3  # default maximum retry count
+    CELERY_RETRY_BACKOFF_MAX = 600  # Phase 11-E Celery tuning (default 10 minutes max backoff)
+
+    # ────────────────────────────────────────────────────────────────
+    # TTS Configuration (Phase 11-D)
+    # ────────────────────────────────────────────────────────────────
+
+    # Maximum text length accepted for TTS generation (chars)
+    MAX_TTS_TEXT_LEN = 5000
+
+    # Default TTS engine backend (may be overridden per environment)
+    TTS_ENGINE = "gpt-tts"  # or "default", "azure-tts", etc.
+
+    # Timeout for TTS synthesis operations (seconds)
+    TTS_TIMEOUT_SEC = 60
+
+    # Retry policy for transient TTS failures
+    TTS_MAX_RETRIES = 3

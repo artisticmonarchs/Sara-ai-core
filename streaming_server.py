@@ -14,13 +14,69 @@ Sara AI Core — Streaming Service
 import json
 import time
 import uuid
+import logging_utils
 import traceback
 import asyncio
 import threading
+import os
 from typing import Generator, Optional, Dict, Any
 
 from flask import Flask, request, jsonify, Response, stream_with_context
 import redis  # for typed redis exceptions and client behaviors
+
+# --- PATCH START: Fix duplicated timeseries (streaming_server_uptime_seconds) ---
+from prometheus_client import Gauge, REGISTRY
+
+# Define a persistent uptime gauge safely (avoid duplicate registration)
+def get_or_create_uptime_gauge():
+    metric_name = "streaming_server_uptime_seconds"
+    if metric_name in REGISTRY._names_to_collectors:
+        return REGISTRY._names_to_collectors[metric_name]
+    return Gauge(
+        metric_name,
+        "Uptime of the streaming server in seconds",
+        registry=REGISTRY
+    )
+
+UPTIME_GAUGE = get_or_create_uptime_gauge()
+
+def report_health_metrics(start_time, active_streams, redis_state, redis_failures):
+    """
+    Report health metrics without duplicating gauges.
+    """
+    from time import time
+    import logging_utils
+    import metrics_collector as mc
+
+    try:
+        uptime_seconds = time() - start_time
+        UPTIME_GAUGE.set(uptime_seconds)  # reuse persistent gauge safely
+
+        mc.increment_metric("streaming.health_check.count")
+        mc.observe_latency("streaming.health_check.latency", 0.001)
+
+        logging_utils.log_event(
+        service="streaming_server",
+        event="health_reported",
+        status="ok",
+        message="Health metrics reported successfully",
+        extra={
+            "uptime_seconds": uptime_seconds,
+            "active_streams": active_streams,
+            "redis_state": redis_state,
+            "redis_failures": redis_failures
+        }
+     )
+
+    except Exception as e:
+        logging_utils.log_event(
+            service="streaming_server",
+            event="health_report_failed",
+            status="error",
+            message="Failed to report health metrics",
+            extra={"error": str(e), "stack": traceback.format_exc()},
+        )
+# --- PATCH END ---
 
 # --------------------------------------------------------------------------
 # Phase 11-D Configuration Isolation
@@ -40,8 +96,14 @@ except ImportError:
 def _get_metrics():
     """Lazy metrics shim to avoid circular imports at import-time"""
     try:
-        import metrics_collector as metrics
-        return metrics
+        # Import the module and get the MetricsCollector class or instance
+        import metrics_collector as metrics_module
+        # Check if metrics_module has a MetricsCollector class
+        if hasattr(metrics_module, 'MetricsCollector'):
+            return metrics_module.MetricsCollector()
+        else:
+            # If it's already a singleton instance, return it directly
+            return metrics_module
     except Exception:
         # safe no-op fallbacks
         class NoopMetrics:
@@ -206,7 +268,6 @@ class RedisCircuitBreaker:
                     status="info",
                     message="Circuit breaker HALF_OPEN - testing recovery",
                 )
-
         try:
             # Execute with timeout protection
             result = func(*args, **kwargs)
@@ -409,23 +470,8 @@ class HealthMonitor:
             uptime = time.time() - self.uptime_start
             active_streams = len(stream_state_mgr.active_streams)
             
-            # Report to metrics
-            Gauge("streaming_server_uptime_seconds", "Service uptime in seconds", registry=REGISTRY).set(uptime)
-            Gauge("streaming_server_active_streams", "Number of active streams", registry=REGISTRY).set(active_streams)
-            
-            # Log health status
-            log_event(
-                service="streaming_server",
-                event="health_heartbeat",
-                status="ok",
-                message="Streaming server health heartbeat",
-                extra={
-                    "uptime_seconds": uptime,
-                    "active_streams": active_streams,
-                    "redis_state": redis_cb.state,
-                    "redis_failures": redis_cb.failures
-                },
-            )
+            # Use the patched function to report health metrics safely
+            report_health_metrics(self.uptime_start, active_streams, redis_cb.state, redis_cb.failures)
             
         except Exception as e:
             log_event(
@@ -1191,8 +1237,6 @@ if __name__ == "__main__":
     # Initialize metrics system on startup
     _ensure_initialized()
     
-    port = Config.PORT
-    
     # Ensure health monitor is stopped on exit
     import atexit
     atexit.register(health_monitor.stop)
@@ -1205,4 +1249,6 @@ if __name__ == "__main__":
         extra={"phase": "11-D"}
     )
     
+    # Explicit port override to avoid conflict with main app
+    port = int(os.getenv("STREAMING_PORT", "5001"))
     app.run(host="0.0.0.0", port=port, threaded=True)

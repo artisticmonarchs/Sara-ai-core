@@ -175,3 +175,28 @@ def health_check() -> dict:
         "url": Config.REDIS_URL,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+
+# === Compatibility shim added by phase11E_autofix (Phase 11-E) ===
+def safe_redis_operation(func, fallback=None, operation_name=None):
+    """Compatibility wrapper: run a callable with a redis client or return fallback."""
+    try:
+        client = None
+        try:
+            client = get_redis_client()
+        except Exception:
+            client = None
+
+        if client is None:
+            try:
+                return func(None)
+            except TypeError:
+                return fallback
+
+        try:
+            return func(client)
+        except Exception:
+            return fallback
+    except Exception:
+        return fallback
+# === end compatibility shim ===
+

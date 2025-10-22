@@ -545,7 +545,21 @@ if __name__ == "__main__":
     # Initialize metrics on startup
     _ensure_initialized()
     
-    log_event(service="app", event="application_start", status="ok",
-              message="Sara AI Core API starting", 
-              extra={"phase": "11-D", "validated_components": len(startup_components)})
-    app.run(host="0.0.0.0", port=Config.PORT, debug=False)
+    log_event(
+        service="app",
+        event="application_start",
+        status="ok",
+        message="Sara AI Core API starting",
+        extra={
+            "phase": "11-D",
+            "validated_components": len(startup_components)
+        }
+    )
+
+    # Use dedicated config values
+    app.run(
+        host=Config.HOST,
+        port=Config.FLASK_PORT,  # <-- Changed from Config.PORT
+        debug=False,
+        threaded=True
+    )

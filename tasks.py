@@ -425,7 +425,7 @@ def perform_tts_core(payload: Any, raise_on_error: bool = True) -> Dict[str, Any
     autoretry_for=(requests.RequestException, RuntimeError,
                    botocore.exceptions.BotoCoreError, R2UploadError),
     retry_backoff=True,
-    retry_backoff_max=Config.CELERY_RETRY_BACKOFF_MAX,
+    retry_backoff_max=getattr(Config, 'CELERY_RETRY_BACKOFF_MAX', 600),
     retry_kwargs={"max_retries": Config.CELERY_RETRY_MAX},
 )
 @safe_task_wrapper  # ← ADD safe_task_wrapper decorator

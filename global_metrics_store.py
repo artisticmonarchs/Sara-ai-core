@@ -20,7 +20,83 @@ import json
 import traceback
 import copy  # ← ADD: For deep copy in get_global_snapshot()
 from typing import Optional, Dict, Any, Callable
-from prometheus_client import Gauge, Counter
+
+# ────────────────────────────────────────────────────────────────
+# Phase 11-E Metrics Registry Guard & Deduplication
+# Ensures all Prometheus metrics are registered safely and uniquely
+# ────────────────────────────────────────────────────────────────
+
+try:
+    from prometheus_client import REGISTRY as registry, Counter, Gauge, Histogram
+except ImportError:
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+    registry = CollectorRegistry()
+
+# Avoid duplicate registration of metrics
+def safe_counter(name: str, description: str):
+    """Safely register a Counter metric or reuse existing one."""
+    existing = [m for m in registry._names_to_collectors.keys() if m == name]
+    if existing:
+        # If already registered, return the existing collector
+        return registry._names_to_collectors[name]
+    return Counter(name, description, registry=registry)
+
+def safe_gauge(name: str, description: str):
+    existing = [m for m in registry._names_to_collectors.keys() if m == name]
+    if existing:
+        return registry._names_to_collectors[name]
+    return Gauge(name, description, registry=registry)
+
+def safe_histogram(name: str, description: str):
+    existing = [m for m in registry._names_to_collectors.keys() if m == name]
+    if existing:
+        return registry._names_to_collectors[name]
+    return Histogram(name, description, registry=registry)
+
+# ────────────────────────────────────────────────────────────────
+# Global Metrics (Deduplicated)
+# ────────────────────────────────────────────────────────────────
+
+# --- Safe deduplication for merge counter ---
+from prometheus_client import REGISTRY
+
+for name in list(REGISTRY._names_to_collectors.keys()):
+    if name.startswith("global_metrics_total_merges"):
+        try:
+            REGISTRY.unregister(REGISTRY._names_to_collectors[name])
+        except Exception:
+            pass
+
+try:
+    _global_metrics_total_merges = Counter(
+        "global_metrics_total_merges",
+        "Total merges performed across metrics snapshots (deduplicated)"
+    )
+except ValueError:
+    _global_metrics_total_merges = REGISTRY._names_to_collectors.get("global_metrics_total_merges")
+
+global_metrics_total_merges_created = safe_counter(
+    "global_metrics_total_merges_created",
+    "Total number of merges created during runtime"
+)
+
+# If the following was redundant, it will now safely reuse the existing one
+global_metrics_total_merges_total = safe_counter(
+    "global_metrics_total_merges_total",
+    "Aggregated merges counter (safe duplicate alias)"
+)
+
+_global_metrics_last_sync_timestamp = safe_gauge(
+    "global_metrics_last_sync_timestamp",
+    "Last successful metrics sync timestamp (UNIX epoch seconds)"
+)
+
+# Initialize global metrics timestamp
+global_metrics_last_sync_timestamp = time.time()
+
+def update_global_metrics_timestamp():
+    global global_metrics_last_sync_timestamp
+    global_metrics_last_sync_timestamp = time.time()
 
 from logging_utils import log_event, get_trace_id
 
@@ -64,30 +140,21 @@ except Exception:
     def register_metric(metric):  # type: ignore
         return False
 
-# Register self-monitoring metrics
+# Register self-monitoring metrics safely
 if REGISTRY:
-    _global_metrics_last_sync_timestamp = Gauge(
-        'global_metrics_last_sync_timestamp',
-        'Timestamp of the last successful global metrics sync',
-        registry=REGISTRY
-    )
-    
-    _global_metrics_total_merges = Counter(
+    _global_metrics_total_merges = safe_counter(
         'global_metrics_total_merges',
-        'Total number of metric merge operations',
-        registry=REGISTRY
+        'Total number of metric merge operations'
     )
-    
-    _global_metrics_merge_failures_total = Counter(
+
+    _global_metrics_merge_failures_total = safe_counter(
         'global_metrics_merge_failures_total',
-        'Total number of metric merge failures',
-        registry=REGISTRY
+        'Total number of metric merge failures'
     )
-    
-    _global_metrics_redis_sync_failures_total = Counter(
+
+    _global_metrics_redis_sync_failures_total = safe_counter(
         'global_metrics_redis_sync_failures_total',
-        'Total number of Redis sync failures',
-        registry=REGISTRY
+        'Total number of Redis sync failures'
     )
 
 # ------------------------------------------------------------------
@@ -348,7 +415,8 @@ def _sync_once() -> bool:
         try:
             save_metrics_snapshot(snap)
             saved = True
-            _safe_set_time(globals().get('_global_metrics_last_sync_timestamp'))  # ← FIX: Safe metric update
+            _safe_set_time(_global_metrics_last_sync_timestamp)  # ← FIX: Use the correct gauge variable
+            update_global_metrics_timestamp()  # Update the global timestamp
             log_event(service="global_metrics_store", event="saved_snapshot", status="info",
                       message="Saved combined snapshot via save_metrics_snapshot",
                       extra={"trace_id": get_trace_id()})
@@ -542,3 +610,14 @@ def export_prometheus_snapshot() -> str:
             extra={"error": str(e), "trace_id": get_trace_id()}
         )
         return "# metrics_export_error 1\n"
+
+# === Phase 11-E FinalTouch: Duplicate metric guard ===
+try:
+    if 'global_metrics_last_sync_timestamp' not in registry._names_to_collectors:
+        global_metrics_last_sync_timestamp = Gauge(
+            'global_metrics_last_sync_timestamp', 'Last successful global metrics sync timestamp'
+        )
+        registry.register(global_metrics_last_sync_timestamp)
+except Exception as e:
+    import logging
+    logging.getLogger(__name__).warning(f'Metric guard applied: {e}')
