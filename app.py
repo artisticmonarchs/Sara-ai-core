@@ -187,7 +187,7 @@ startup_components = validate_system_dependencies()
 # --------------------------------------------------------------------------
 @app.route("/healthz", methods=["GET"])
 def healthz():
-    trace_id = get_trace_id(request)
+    trace_id = get_trace_id()
     try:
         get_metrics().inc_metric("api_healthz_requests_total")
         
@@ -234,7 +234,7 @@ def healthz():
 
 @app.route("/system_status", methods=["GET"])
 def system_status():
-    trace_id = get_trace_id(request)
+    trace_id = get_trace_id()
     try:
         get_metrics().inc_metric("api_system_status_requests_total")
         
@@ -330,7 +330,7 @@ def check_r2_connection(trace_id=None, session_id=None):
 
 @app.route("/r2_status", methods=["GET"])
 def r2_status():
-    trace_id = get_trace_id(request)
+    trace_id = get_trace_id()
     get_metrics().inc_metric("api_r2_status_requests_total")
     result = check_r2_connection(trace_id=trace_id)
     return jsonify({**result, "trace_id": trace_id}), (200 if result.get("status") == "ok" else 500)
@@ -341,7 +341,7 @@ def r2_status():
 # --------------------------------------------------------------------------
 @app.route("/metrics_snapshot", methods=["POST"])
 def metrics_snapshot():
-    trace_id = get_trace_id(request)
+    trace_id = get_trace_id()
     try:
         get_metrics().inc_metric("api_metrics_snapshot_requests_total")
         restore_metrics_snapshot()
@@ -450,7 +450,7 @@ def metrics_endpoint():
 # --------------------------------------------------------------------------
 @app.route("/tts_test", methods=["POST"])
 def tts_test():
-    trace_id = get_trace_id(request)
+    trace_id = get_trace_id()
     try:
         get_metrics().inc_metric("api_tts_test_requests_total")
         data = request.get_json(force=True)
@@ -476,7 +476,7 @@ def tts_test():
 @app.route("/ready", methods=["GET"])
 def readiness_probe():
     """Kubernetes-style readiness probe with component checks."""
-    trace_id = get_trace_id(request)
+    trace_id = get_trace_id()
     try:
         get_metrics().inc_metric("api_ready_requests_total")
         
