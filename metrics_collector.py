@@ -1,7 +1,7 @@
 """
-metrics_collector.py — Phase 11-D (Unified Registry + Redis persistence, fixed)
+metrics_collector.py — Phase 11-F (Unified Registry + Redis persistence, fixed)
 
-Key fixes (Phase 11-D):
+Key fixes (Phase 11-F):
  - get_metric_total() now returns authoritative Redis-summed global total when Redis is present.
  - export_prometheus() now exposes a single canonical metric per logical metric name:
      - uses a temporary CollectorRegistry and registers Gauges with the merged/global values.
@@ -9,7 +9,7 @@ Key fixes (Phase 11-D):
  - observe_latency persists counts & sums to Redis so global latencies are available.
  - Adds metric index (SADD) for discovery and TTL refresh on writes.
  - Adds rate-limited Redis error logging.
- - Phase 11-D enhancements: structured logging, config integration, circuit breaker awareness,
+ - Phase 11-F enhancements: structured logging, config integration, circuit breaker awareness,
    health metrics, fault-tolerant sync loop, and Prometheus endpoint compatibility.
 """
 
@@ -27,7 +27,7 @@ import uuid
 from contextlib import contextmanager
 
 # --------------------------------------------------------------------------
-# Phase 11-D Configuration Integration
+# Phase 11-F Configuration Integration
 # --------------------------------------------------------------------------
 try:
     from config import Config
@@ -44,7 +44,6 @@ try:
 except ImportError:
     # Fallback configuration for backward compatibility
     class FallbackConfig:
-        SERVICE_NAME = os.getenv("SERVICE_NAME", "unknown_service")
         ENABLE_METRICS_SYNC = os.getenv("ENABLE_METRICS_SYNC", "true").lower() == "true"
         METRICS_SYNC_INTERVAL = int(os.getenv("METRICS_SYNC_INTERVAL", "30"))
         SNAPSHOT_INTERVAL = int(os.getenv("SNAPSHOT_INTERVAL", "60"))
@@ -137,7 +136,25 @@ def _get_logger():
         return _noop_log
 
 # --------------------------------------------------------------------------
-# Phase 11-D Health Metrics
+# Lazy service name resolver to avoid import-time race conditions
+# --------------------------------------------------------------------------
+def get_service_name() -> str:
+    """
+    Return the configured service name at runtime.
+    Reads environment variables dynamically so it reflects the actual
+    container/service name even if this module was imported early.
+    """
+    env_name = os.getenv("SERVICE_NAME")
+    if env_name:
+        return env_name
+
+    try:
+        return getattr(config, "SERVICE_NAME")
+    except Exception:
+        return "unknown_service"
+
+# --------------------------------------------------------------------------
+# Phase 11-F Health Metrics
 # --------------------------------------------------------------------------
 _health_metrics = {
     "metrics_collector_start_time": time.time(),
@@ -153,7 +170,7 @@ _health_metrics = {
 # In-process counters & latency buckets (thread-safe)
 # --------------------------------------------------------------------------
 _DEFAULT_ROLLING_WINDOW = 1000  # samples per latency metric
-_lock = threading.RLock()  # Upgraded to RLock for Phase 11-D thread safety
+_lock = threading.RLock()  # Upgraded to RLock for Phase 11-F thread safety
 _counters: Dict[str, int] = defaultdict(int)
 _latency_buckets: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=_DEFAULT_ROLLING_WINDOW))
 
@@ -161,8 +178,6 @@ _latency_buckets: Dict[str, Deque[float]] = defaultdict(lambda: deque(maxlen=_DE
 REDIS_METRIC_PREFIX = "prometheus:metrics:"  # prometheus:metrics:<service>:<metric>
 LATENCY_SUBPREFIX = "latency"               # prometheus:metrics:<service>:latency:<name>:count|sum
 REDIS_INDEX_KEY = "prometheus:metrics:index"  # set of metric names for quick discovery
-
-SERVICE_NAME = getattr(config, "SERVICE_NAME", os.getenv("SERVICE_NAME", "unknown_service"))
 
 # TTL for metric keys (days -> seconds)
 REDIS_METRIC_TTL_DAYS = int(os.getenv("REDIS_METRIC_TTL_DAYS", "30"))
@@ -175,7 +190,7 @@ REDIS_METRIC_SNAPSHOT_KEY = os.getenv("REDIS_METRIC_SNAPSHOT_KEY", "global_metri
 _redis_error_timestamps: Dict[str, float] = {}
 _REDIS_LOG_RATE_LIMIT_SEC = int(os.getenv("REDIS_LOG_RATE_LIMIT_SEC", "60"))
 
-# Phase 11-D Sync Control
+# Phase 11-F Sync Control
 _sync_enabled = get_metrics_config()["enable_sync"]
 _sync_interval = get_metrics_config()["sync_interval"]
 _snapshot_interval = get_metrics_config()["snapshot_interval"]
@@ -184,10 +199,10 @@ _sync_running = False
 _sync_lock = threading.Lock()
 
 # --------------------------------------------------------------------------
-# Phase 11-D Structured Logging Helpers
+# Phase 11-F Structured Logging Helpers
 # --------------------------------------------------------------------------
 def _log_metric_event(event: str, status: str, message: str, **extra):
-    """Structured logging for metric events with Phase 11-D context."""
+    """Structured logging for metric events with Phase 11-F context."""
     log_func = _get_logger()
     log_func(
         service="metrics_collector",
@@ -195,7 +210,7 @@ def _log_metric_event(event: str, status: str, message: str, **extra):
         status=status,
         message=message,
         extra={
-            "service_name": SERVICE_NAME,
+            "service_name": get_service_name(),
             "sync_enabled": _sync_enabled,
             "sync_interval": _sync_interval,
             **extra
@@ -229,7 +244,7 @@ def _log_sync_activity(event: str, status: str, message: str, **extra):
     )
 
 # --------------------------------------------------------------------------
-# Phase 11-D Fault-Tolerant Sync Loop
+# Phase 11-F Fault-Tolerant Sync Loop
 # --------------------------------------------------------------------------
 def _start_sync_loop():
     """Start the background metrics sync loop."""
@@ -344,10 +359,10 @@ def _sync_metrics_to_redis() -> bool:
         return False
 
 def _create_and_save_snapshot() -> bool:
-    """Create and save a metrics snapshot with Phase 11-D persistence."""
+    """Create and save a metrics snapshot with Phase 11-F persistence."""
     try:
         snapshot = get_snapshot()
-        snapshot_key = f"metrics_snapshot:{SERVICE_NAME}:{int(time.time())}"
+        snapshot_key = f"metrics_snapshot:{get_service_name()}:{int(time.time())}"
         
         _, _, _, _, _, save_snapshot, _, _, has_redis = _get_redis_utils()
         success = save_snapshot(
@@ -390,12 +405,12 @@ def _create_and_save_snapshot() -> bool:
 # --------------------------------------------------------------------------
 def _redis_key(metric_name: str) -> str:
     """Return a Redis key namespaced with the service name (legacy per-service totals)."""
-    return f"{REDIS_METRIC_PREFIX}{SERVICE_NAME}:{metric_name}"
+    return f"{REDIS_METRIC_PREFIX}{get_service_name()}:{metric_name}"
 
 def _redis_latency_keys(metric_name: str) -> Tuple[str, str]:
     """Return (count_key, sum_key) for a latency metric for this service."""
     # e.g. prometheus:metrics:<service>:latency:<name>:count
-    base = f"{REDIS_METRIC_PREFIX}{SERVICE_NAME}:{LATENCY_SUBPREFIX}:{metric_name}"
+    base = f"{REDIS_METRIC_PREFIX}{get_service_name()}:{LATENCY_SUBPREFIX}:{metric_name}"
     return (f"{base}:count", f"{base}:sum")
 
 # --------------------------------------------------------------------------
@@ -432,7 +447,7 @@ def increment_metric(metric_name: str, value: int = 1) -> bool:
 
     if _has_redis():
         try:
-            # Use Phase 11-D safe Redis operation
+            # Use Phase 11-F safe Redis operation
             safe_redis_operation, _, _, _, _, _, _, _, _ = _get_redis_utils()
             success = safe_redis_operation("increment_metric_persist")(
                 lambda client: client.incrby(_redis_key(metric_name), int(value))
@@ -653,7 +668,7 @@ def _compute_latency_stats(samples: List[float]) -> Dict[str, float]:
     }
 
 def get_snapshot() -> Dict[str, Any]:
-    """Get comprehensive metrics snapshot with Phase 11-D health metrics."""
+    """Get comprehensive metrics snapshot with Phase 11-F health metrics."""
     try:
         with _lock:
             counters_copy = dict(_counters)
@@ -661,7 +676,7 @@ def get_snapshot() -> Dict[str, Any]:
 
         latencies_stats = {n: _compute_latency_stats(v) for n, v in latencies_copy.items()}
 
-        # Include Phase 11-D health metrics
+        # Include Phase 11-F health metrics
         health_info = {
             "uptime_seconds": time.time() - _health_metrics["metrics_collector_start_time"],
             "sync_success_total": _health_metrics["metrics_sync_success_total"],
@@ -967,7 +982,7 @@ def pull_metrics_snapshot_from_redis() -> dict:
         return {}
 
 # --------------------------------------------------------------------------
-# Phase 11-D Utility Functions for Duplicate Prevention and Safe Operations
+# Phase 11-F Utility Functions for Duplicate Prevention and Safe Operations
 # --------------------------------------------------------------------------
 def safe_register_metric(metric, registry):
     """Avoid duplicate metric registration in the same registry."""
@@ -1023,7 +1038,7 @@ def save_metrics_snapshot(snapshot):
                                 message="Redis not configured; snapshot not saved.")
         return False
         
-    key = f"prometheus:registry_snapshot:{SERVICE_NAME}"
+    key = f"prometheus:registry_snapshot:{get_service_name()}"
     
     try:
         safe_redis_operation, _, _, _, _, _, _, _, _ = _get_redis_utils()
@@ -1044,7 +1059,7 @@ def save_metrics_snapshot(snapshot):
         )
         
         if success:
-            _log_metric_event("snapshot_saved", "info", f"Metrics snapshot updated for {SERVICE_NAME}")
+            _log_metric_event("snapshot_saved", "info", f"Metrics snapshot updated for {get_service_name()}")
         else:
             _rate_limited_redis_log("snapshot_save_failed", "warn",
                                     message="Failed to save metrics snapshot (circuit breaker)")
@@ -1059,7 +1074,7 @@ def save_metrics_snapshot(snapshot):
 
 def push_snapshot_from_collector():
     """
-    Phase 11-D — Unified snapshot push handler.
+    Phase 11-F — Unified snapshot push handler.
     Used by external modules to trigger metrics persistence manually.
     """
     # 🧩 Skip self-metrics to avoid recursion
@@ -1067,7 +1082,7 @@ def push_snapshot_from_collector():
     
     try:
         # Use Redis lock to prevent concurrent snapshot operations
-        with redis_lock(f"metrics_lock:{SERVICE_NAME}") as locked:
+        with redis_lock(f"metrics_lock:{get_service_name()}") as locked:
             if not locked:
                 _log_metric_event("snapshot_skipped", "warn", 
                                  "Metrics collector lock already held; skipping snapshot push.")
@@ -1091,10 +1106,10 @@ def push_snapshot_from_collector():
         return {"status": "error", "error": str(e)}
 
 # --------------------------------------------------------------------------
-# Phase 11-D Initialization
+# Phase 11-F Initialization
 # --------------------------------------------------------------------------
 def initialize_metrics_collector():
-    """Initialize the metrics collector with Phase 11-D features."""
+    """Initialize the metrics collector with Phase 11-F features."""
     metrics_config = get_metrics_config()
     
     _log_metric_event(
@@ -1133,7 +1148,7 @@ def get_health_status() -> Dict[str, Any]:
         "last_successful_persistence": _health_metrics["last_successful_persistence"],
         "sync_loop_running": _sync_running,
         "circuit_breaker_state": _get_redis_utils()[-2]()["state"],  # get_circuit_breaker_status
-        "service_name": SERVICE_NAME,
+        "service_name": get_service_name(),
     }
 
 # Initialize on module import - moved to prevent circular imports
