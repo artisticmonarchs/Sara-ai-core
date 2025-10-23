@@ -149,9 +149,13 @@ def get_service_name() -> str:
         return env_name
 
     try:
-        return getattr(config, "SERVICE_NAME")
-    except Exception:
-        return "unknown_service"
+        # Handle only expected attribute/config errors, not all exceptions
+        if hasattr(config, "SERVICE_NAME"):
+            return getattr(config, "SERVICE_NAME")
+        # fallback to environment or sane default
+        return os.getenv("SERVICE_NAME", "sara-ai-core")
+    except (AttributeError, ImportError):
+        return os.getenv("SERVICE_NAME", "sara-ai-core")
 
 # --------------------------------------------------------------------------
 # Phase 11-F Health Metrics

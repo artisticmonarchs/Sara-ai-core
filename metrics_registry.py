@@ -28,21 +28,15 @@ from logging_utils import get_json_logger, log_event, get_trace_id
 # ------------------------------------------------------------------
 try:
     from config import Config
-    # Use Config class directly to access attributes
-    METRICS_CONFIG = {
-        "snapshot_interval": getattr(Config, "METRICS_SNAPSHOT_INTERVAL", 30),
-        "redis_key_prefix": getattr(Config, "METRICS_REDIS_PREFIX", "prometheus"),
-        "circuit_breaker_enabled": True
-    }
-    SERVICE_NAME = getattr(Config, "SERVICE_NAME", "unknown_service")
+    SERVICE_NAME = getattr(Config, "SERVICE_NAME", os.getenv("SERVICE_NAME", "sara-ai-core"))
 except ImportError:
-    # Fallback configuration - use os.getenv only as last resort
-    METRICS_CONFIG = {
-        "snapshot_interval": 30,
-        "redis_key_prefix": "prometheus",
-        "circuit_breaker_enabled": True
-    }
-    SERVICE_NAME = "unknown_service"
+    SERVICE_NAME = os.getenv("SERVICE_NAME", "sara-ai-core")
+
+METRICS_CONFIG = {
+    "snapshot_interval": 30,
+    "redis_key_prefix": "prometheus",
+    "circuit_breaker_enabled": True
+}
 
 SNAPSHOT_INTERVAL = METRICS_CONFIG.get("snapshot_interval", 30)
 
