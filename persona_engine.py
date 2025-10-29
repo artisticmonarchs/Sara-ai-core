@@ -1,19 +1,19 @@
 """
-persona_engine.py — Phase 11-F (Final, Static-Load)
+persona_engine.py — Phase 11-F (Final, Static-Load, assets-aware)
 
 Phase 11-F production Persona Engine for Sara AI Core.
 
 Behavior:
-- Loads the six governance JSONs from the repository root *once at startup* and caches them in memory.
+- Loads the six governance JSONs from the `assets/` folder once at startup and caches them in memory.
 - Validates that each JSON declares `upgrade_metadata.phase == "11-F"` (warning + metric on mismatch).
-- Exposes a deterministic `get_system_prompt()` that returns a fully-merged prompt dict and a textual system prompt suitable for passing to GPT as a system message.
+- Exposes deterministic `get_system_prompt()` and `get_system_prompt_text()` for GPT system messages.
 - Emits structured logs for load success/failure, off-scope detections, and persona realignment events.
-- Provides a manual `reload_persona()` for controlled refresh during maintenance (NOT used automatically in production).
+- Provides `reload_persona()` for controlled refresh during maintenance.
 
-Design notes:
-- Static-loading approach chosen for production stability (no mid-call drift).
-- Uses lazy imports for logging and metrics to avoid circular import issues at module import time.
-- Fails gracefully: missing/invalid files produce warnings and safe defaults rather than raising.
+Design:
+- Static-loading ensures stability (no mid-call drift).
+- Lazy imports prevent circular dependencies.
+- Missing/invalid files emit warnings and safe defaults.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ import threading
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-# Governance filenames (located in repository root)
+# Governance filenames (now in /assets)
 GOV_FILES = {
     "callflow": "Sara_CallFlow.json",
     "knowledge": "Sara_KnowledgeBase.json",
@@ -34,8 +34,10 @@ GOV_FILES = {
 
 REQUIRED_PHASE = "11-F"
 PERSONA_IDENTITY = "Sara Hayes"
-# assume persona_engine.py sits at repo root; adjust if different
+
+# Base path for assets folder
 ROOT_DIR = Path(__file__).resolve().parent
+ASSETS_DIR = ROOT_DIR / "assets"
 
 
 class PersonaEngineError(Exception):
@@ -43,33 +45,19 @@ class PersonaEngineError(Exception):
 
 
 class PersonaEngine:
-    """Singleton persona engine with static startup load.
-
-    Usage:
-        PersonaEngine.initialize()  # load once at startup
-        pe = PersonaEngine.get_instance()
-        prompt_dict = pe.get_system_prompt()
-        prompt_text = pe.get_system_prompt_text()
-    """
+    """Singleton persona engine with static startup load."""
 
     _instance: Optional["PersonaEngine"] = None
     _lock = threading.Lock()
 
     def __init__(self) -> None:
-        # Private constructor; use initialize()
-        self._loaded: bool = False
+        self._loaded = False
         self._raw: Dict[str, Dict[str, Any]] = {}
         self._phase_ok: Dict[str, bool] = {}
 
-    # ----------------
-    # Lifecycle
-    # ----------------
+    # ---------------- Lifecycle ----------------
     @classmethod
     def initialize(cls) -> "PersonaEngine":
-        """Initialize the singleton and load all governance JSONs statically.
-
-        Safe to call multiple times; will only load once unless reload_persona() is used.
-        """
         with cls._lock:
             if cls._instance is None:
                 cls._instance = PersonaEngine()
@@ -82,170 +70,73 @@ class PersonaEngine:
             raise PersonaEngineError("PersonaEngine not initialized. Call PersonaEngine.initialize() first.")
         return cls._instance
 
-    # ----------------
-    # Internal helpers (lazy imports for logging/metrics)
-    # ----------------
+    # ---------------- Lazy imports ----------------
     def _get_logger(self):
-        """Lazy import logging_utils.get_json_logger(__name__); fallback to simple printer logger."""
         try:
             import importlib
 
             lu = importlib.import_module("logging_utils")
-            # prefer structured JSON logger if provided
             if hasattr(lu, "get_json_logger"):
                 return lu.get_json_logger(__name__)
-            # fallback to module-level logger object if available
             if hasattr(lu, "logger"):
                 return lu.logger
         except Exception:
             pass
 
-        # fallback simple logger
         class _Fallback:
-            def info(self, *a, **k):
-                print("INFO:", *a)
-
-            def warning(self, *a, **k):
-                print("WARN:", *a)
-
-            def error(self, *a, **k):
-                print("ERROR:", *a)
-
-            def debug(self, *a, **k):
-                print("DEBUG:", *a)
-
+            def info(self, *a, **k): print("INFO:", *a)
+            def warning(self, *a, **k): print("WARN:", *a)
+            def error(self, *a, **k): print("ERROR:", *a)
+            def debug(self, *a, **k): print("DEBUG:", *a)
         return _Fallback()
 
     def _get_metrics_module(self):
-        """Lazy import metrics_collector; return module or None."""
         try:
             import importlib
-
-            mod = importlib.import_module("metrics_collector")
-            return mod
+            return importlib.import_module("metrics_collector")
         except Exception:
             return None
 
-    # ----------------
-    # Loading & Validation
-    # ----------------
+    # ---------------- Load Governance ----------------
     def _do_load_all(self) -> None:
-        """Load all governance JSON files from repository root ONCE.
-
-        Records phase validity and logs structured events. Does not raise on missing/invalid files.
-        """
         log = self._get_logger()
         metrics = self._get_metrics_module()
-
-        self._raw = {}
-        self._phase_ok = {}
+        self._raw, self._phase_ok = {}, {}
 
         for key, fname in GOV_FILES.items():
-            path = ROOT_DIR / fname
+            path = ASSETS_DIR / fname
             if not path.exists():
-                try:
-                    log.warning(
-                        {
-                            "event": "governance_missing",
-                            "file": fname,
-                            "source": "persona_engine",
-                        }
-                    )
-                except Exception:
-                    pass
-                self._raw[key] = {}
-                self._phase_ok[key] = False
+                log.warning({"event": "governance_missing", "file": str(path), "source": "persona_engine"})
+                self._raw[key], self._phase_ok[key] = {}, False
                 continue
 
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     payload = json.load(f)
             except Exception as e:
-                try:
-                    log.error(
-                        {
-                            "event": "governance_load_error",
-                            "file": fname,
-                            "error": str(e),
-                            "source": "persona_engine",
-                        }
-                    )
-                except Exception:
-                    pass
-                self._raw[key] = {}
-                self._phase_ok[key] = False
-                # best-effort metrics snapshot
-                try:
-                    if metrics and hasattr(metrics, "push_snapshot_from_collector"):
-                        metrics.push_snapshot_from_collector()
-                except Exception:
-                    try:
-                        log.debug({"event": "metrics_snapshot_failed", "file": fname})
-                    except Exception:
-                        pass
+                log.error({"event": "governance_load_error", "file": str(path), "error": str(e)})
+                self._raw[key], self._phase_ok[key] = {}, False
                 continue
 
-            # Phase validation
-            detected = None
-            try:
-                detected = payload.get("upgrade_metadata", {}).get("phase")
-            except Exception:
-                detected = None
-
-            ok = detected == REQUIRED_PHASE
-            if not ok:
-                try:
-                    log.warning(
-                        {
-                            "event": "governance_phase_mismatch",
-                            "file": fname,
-                            "detected_phase": detected,
-                            "required_phase": REQUIRED_PHASE,
-                            "source": "persona_engine",
-                        }
-                    )
-                except Exception:
-                    pass
+            phase = payload.get("upgrade_metadata", {}).get("phase") if isinstance(payload, dict) else None
+            ok = phase == REQUIRED_PHASE
+            if ok:
+                log.info({"event": "governance_loaded", "file": str(path), "phase": phase})
             else:
-                try:
-                    log.info(
-                        {
-                            "event": "governance_loaded",
-                            "file": fname,
-                            "phase": detected,
-                            "source": "persona_engine",
-                        }
-                    )
-                except Exception:
-                    pass
+                log.warning({"event": "governance_phase_mismatch", "file": str(path), "detected": phase})
 
-            self._raw[key] = payload if isinstance(payload, dict) else {}
-            self._phase_ok[key] = ok
+            self._raw[key], self._phase_ok[key] = payload if isinstance(payload, dict) else {}, ok
 
-        # mark loaded
         self._loaded = True
 
-        # emit final load metric
-        try:
-            if metrics and hasattr(metrics, "increment"):
-                # use a safe metric name
-                try:
-                    metrics.increment("persona_loaded_total")
-                except Exception:
-                    pass
-        except Exception:
+        if metrics and hasattr(metrics, "increment"):
             try:
-                log = self._get_logger()
-                log.debug({"event": "persona_metric_emit_failed"})
+                metrics.increment("persona_loaded_total")
             except Exception:
-                pass
+                log.debug({"event": "persona_metric_emit_failed"})
 
+    # ---------------- API ----------------
     def reload_persona(self) -> None:
-        """Manually reload persona files. Use only for maintenance and testing.
-
-        This will replace the cached governance payloads atomically.
-        """
-        # use class lock for atomic reload
         with self._lock:
             self._do_load_all()
 
@@ -253,24 +144,16 @@ class PersonaEngine:
         return dict(self._phase_ok)
 
     def validate_governance(self) -> bool:
-        """Return True if all governance files exist and are marked as the required phase."""
         if not self._loaded:
             raise PersonaEngineError("PersonaEngine not initialized")
-        return all(self._phase_ok.get(k, False) for k in GOV_FILES.keys())
+        return all(self._phase_ok.get(k, False) for k in GOV_FILES)
 
-    # ----------------
-    # Prompt assembly
-    # ----------------
+    # ---------------- Prompt Assembly ----------------
     def get_system_prompt(self) -> Dict[str, Any]:
-        """Return a merged prompt dict suitable for programmatic use.
-
-        The dict contains: persona_identity, callflow, knowledge, objections, opening, playbook, systemprompt
-        """
         if not self._loaded:
             raise PersonaEngineError("PersonaEngine not initialized")
 
-        # Start with safe defaults
-        merged: Dict[str, Any] = {
+        merged = {
             "persona_identity": PERSONA_IDENTITY,
             "callflow": {},
             "knowledge": {},
@@ -280,74 +163,52 @@ class PersonaEngine:
             "systemprompt": {},
         }
 
-        # Merge raw payload content conservatively (support older shaping)
         merged["callflow"] = self._raw.get("callflow", {}).get("callflow") or self._raw.get("callflow", {})
         merged["knowledge"] = self._raw.get("knowledge", {}).get("knowledge_base") or self._raw.get("knowledge", {})
-        merged["objections"] = (
-            self._raw.get("objections", {}).get("objection_patterns") or self._raw.get("objections", {})
-        )
-        merged["opening"] = (
-            self._raw.get("opening", {}).get("decision_maker_openers") or self._raw.get("opening", {})
-        )
+        merged["objections"] = self._raw.get("objections", {}).get("objection_patterns") or self._raw.get("objections", {})
+        merged["opening"] = self._raw.get("opening", {}).get("decision_maker_openers") or self._raw.get("opening", {})
         merged["playbook"] = self._raw.get("playbook", {}).get("playbook") or self._raw.get("playbook", {})
         merged["systemprompt"] = self._raw.get("systemprompt", {})
 
         return merged
 
     def get_system_prompt_text(self) -> str:
-        """Return a textual system prompt built from the governance payloads suitable for sending as a system message to GPT.
-
-        This function is intentionally deterministic and stable: it does not read files from disk at call time.
-        """
         pd = self.get_system_prompt()
-
-        # Build a concise human-readable system prompt that enforces identity, guardrails, and output format
         lines: List[str] = [f"You are {pd.get('persona_identity', PERSONA_IDENTITY)}."]
 
         sp = pd.get("systemprompt", {}) or {}
-        sara_identity = sp.get("sara_identity") or sp.get("persona_lock") or None
+        sara_identity = sp.get("sara_identity") or sp.get("persona_lock")
         if sara_identity:
             lines.append(f"Identity directive: {sara_identity}")
 
-        # Add high-level guardrails
-        guardrails: List[Any] = []
-        # try system-level guardrails from callflow or systemprompt
-        cf = pd.get("callflow", {}) or {}
+        # Guardrails
+        guardrails = []
+        cf = pd.get("callflow", {})
         if isinstance(cf, dict):
             g = cf.get("system_guardrails") or cf.get("cognitive_restriction_protocols")
-            if g:
-                guardrails.append(g)
+            if g: guardrails.append(g)
         if isinstance(sp, dict):
             g2 = sp.get("cognitive_restriction_protocols") or sp.get("system_guardrails")
-            if g2:
-                guardrails.append(g2)
+            if g2: guardrails.append(g2)
 
         if guardrails:
             lines.append("Guardrails:")
             for g in guardrails:
-                if isinstance(g, (list, dict)):
-                    try:
-                        lines.append(json.dumps(g, ensure_ascii=False))
-                    except Exception:
-                        lines.append(str(g))
-                else:
+                try:
+                    lines.append(json.dumps(g, ensure_ascii=False) if isinstance(g, (list, dict)) else str(g))
+                except Exception:
                     lines.append(str(g))
 
-        # Add short cheat-sheet from playbook
         pb = pd.get("playbook", {}) or {}
         if isinstance(pb, dict):
             tone = pb.get("tone_rules") or pb.get("persona_identity")
             if tone:
                 lines.append("Tone rules:")
-                if isinstance(tone, (list, dict)):
-                    try:
-                        lines.append(json.dumps(tone, ensure_ascii=False))
-                    except Exception:
-                        lines.append(str(tone))
-                else:
+                try:
+                    lines.append(json.dumps(tone, ensure_ascii=False) if isinstance(tone, (list, dict)) else str(tone))
+                except Exception:
                     lines.append(str(tone))
 
-        # Enforce output format if provided
         jfmt = sp.get("json_output_format") if isinstance(sp, dict) else None
         if jfmt:
             lines.append("JSON Output Format:")
@@ -356,140 +217,63 @@ class PersonaEngine:
             except Exception:
                 lines.append(str(jfmt))
 
-        # Always include a final persona lock reminder
         lines.append("Always maintain the Sara Hayes persona and do not reveal you are an AI.")
-
         return "\n\n".join(lines)
 
-    # ----------------
-    # Off-scope detection and handling
-    # ----------------
+    # ---------------- Off-scope Detection ----------------
     def is_off_scope(self, user_utterance: str) -> bool:
-        """Conservative off-scope detector using systemprompt deflection keywords if present."""
         if not self._loaded:
             return False
         sp = self._raw.get("systemprompt", {}) or {}
         def_patterns = sp.get("deflection_patterns") or sp.get("deflection_keywords") or []
-
-        # fallback to playbook fail_safes
         if not def_patterns:
             pb = self._raw.get("playbook", {}) or {}
-            persona_identity_block = pb.get("persona_identity") if isinstance(pb, dict) else {}
-            fail = pb.get("fail_safes") or (persona_identity_block.get("fail_safes") if isinstance(persona_identity_block, dict) else None)
+            fail = pb.get("fail_safes") or pb.get("persona_identity", {}).get("fail_safes", [])
             def_patterns = fail or []
-
-        # normalize patterns to list of strings/patterns
-        patterns: List[Any] = []
-        if isinstance(def_patterns, list):
-            patterns = def_patterns
-        elif isinstance(def_patterns, dict):
-            # if dict, treat its values as patterns list-ish
-            try:
-                patterns = list(def_patterns.values())
-            except Exception:
-                patterns = [str(def_patterns)]
-        else:
-            # single string or other; coerce to list
-            patterns = [def_patterns]
-
+        patterns = def_patterns if isinstance(def_patterns, list) else [def_patterns]
         ut = (user_utterance or "").lower()
         for d in patterns:
-            if not d:
-                continue
-            kw = None
-            if isinstance(d, dict):
-                kw = d.get("keyword") or d.get("pattern")
-            else:
-                kw = d
-            if not kw:
-                continue
+            kw = d.get("keyword") if isinstance(d, dict) else d
             if isinstance(kw, str) and kw.lower() in ut:
                 return True
         return False
 
     def handle_off_scope(self, user_utterance: str) -> Dict[str, Any]:
-        """Emit logs & metrics and return the deflection response (best-effort)."""
         log = self._get_logger()
         metrics = self._get_metrics_module()
-
-        try:
-            log.warning(
-                {
-                    "event": "off_scope_violation",
-                    "source": "Sara_JSON_Layer",
-                    "level": "warning",
-                    "utterance": user_utterance,
-                    "persona": PERSONA_IDENTITY,
-                }
-            )
-        except Exception:
-            pass
-
-        # metrics (best-effort)
+        log.warning({"event": "off_scope_violation", "utterance": user_utterance, "persona": PERSONA_IDENTITY})
         try:
             if metrics and hasattr(metrics, "increment"):
                 metrics.increment("cognitive_scope_violations_total")
-            if metrics and hasattr(metrics, "push_snapshot_from_collector"):
-                metrics.push_snapshot_from_collector()
         except Exception:
-            try:
-                log.debug({"event": "metrics_emit_failed"})
-            except Exception:
-                pass
-
-        # deflection response
+            pass
         sp = self._raw.get("systemprompt", {}) or {}
-        deflections = sp.get("deflection_responses") or {}
-        default_resp: Optional[str] = None
-        if isinstance(deflections, dict):
-            default_resp = deflections.get("default")
-        if default_resp:
-            return {"type": "deflection", "response": default_resp}
+        def_resp = sp.get("deflection_responses", {}).get("default") if isinstance(sp, dict) else None
+        if def_resp:
+            return {"type": "deflection", "response": def_resp}
         return {"type": "deflection", "response": "I can’t help with that topic — let’s focus on business growth and how Noblecom helps."}
 
-    # ----------------
-    # Persona realignment event
-    # ----------------
+    # ---------------- Persona Realign ----------------
     def emit_persona_realign(self, reason: str) -> None:
         log = self._get_logger()
         metrics = self._get_metrics_module()
-        try:
-            log.info(
-                {
-                    "event": "persona_realign",
-                    "source": "persona_engine",
-                    "persona": PERSONA_IDENTITY,
-                    "reason": reason,
-                }
-            )
-        except Exception:
-            pass
+        log.info({"event": "persona_realign", "persona": PERSONA_IDENTITY, "reason": reason})
         try:
             if metrics and hasattr(metrics, "increment"):
                 metrics.increment("persona_realign_events_total")
-            if metrics and hasattr(metrics, "push_snapshot_from_collector"):
-                metrics.push_snapshot_from_collector()
         except Exception:
-            try:
-                log.debug({"event": "persona_realign_metric_failed"})
-            except Exception:
-                pass
+            pass
 
 
-# Module-level helpers
 def initialize_persona_engine() -> PersonaEngine:
     return PersonaEngine.initialize()
 
 
-# Initialize on import time (static-load)
+# Static load on import
 try:
     _ENGINE = PersonaEngine.initialize()
 except Exception:
-    # swallow errors on import; initialization can be retried manually via initialize_persona_engine()
     _ENGINE = None
 
 
-__all__ = [
-    "PersonaEngine",
-    "initialize_persona_engine",
-]
+__all__ = ["PersonaEngine", "initialize_persona_engine"]
