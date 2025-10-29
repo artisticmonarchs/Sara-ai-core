@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 # Governance filenames (located in repository root)
 GOV_FILES = {
@@ -34,6 +34,7 @@ GOV_FILES = {
 
 REQUIRED_PHASE = "11-F"
 PERSONA_IDENTITY = "Sara Hayes"
+# assume persona_engine.py sits at repo root; adjust if different
 ROOT_DIR = Path(__file__).resolve().parent
 
 
@@ -56,7 +57,7 @@ class PersonaEngine:
 
     def __init__(self) -> None:
         # Private constructor; use initialize()
-        self._loaded = False
+        self._loaded: bool = False
         self._raw: Dict[str, Dict[str, Any]] = {}
         self._phase_ok: Dict[str, bool] = {}
 
@@ -85,27 +86,43 @@ class PersonaEngine:
     # Internal helpers (lazy imports for logging/metrics)
     # ----------------
     def _get_logger(self):
+        """Lazy import logging_utils.get_json_logger(__name__); fallback to simple printer logger."""
         try:
             import importlib
-n            lu = importlib.import_module("logging_utils")
-            return lu.get_json_logger(__name__)
+
+            lu = importlib.import_module("logging_utils")
+            # prefer structured JSON logger if provided
+            if hasattr(lu, "get_json_logger"):
+                return lu.get_json_logger(__name__)
+            # fallback to module-level logger object if available
+            if hasattr(lu, "logger"):
+                return lu.logger
         except Exception:
-            # fallback simple logger
-            class _Fallback:
-                def info(self, *a, **k):
-                    print("INFO:", *a)
-                def warning(self, *a, **k):
-                    print("WARN:", *a)
-                def error(self, *a, **k):
-                    print("ERROR:", *a)
-                def debug(self, *a, **k):
-                    print("DEBUG:", *a)
-            return _Fallback()
+            pass
+
+        # fallback simple logger
+        class _Fallback:
+            def info(self, *a, **k):
+                print("INFO:", *a)
+
+            def warning(self, *a, **k):
+                print("WARN:", *a)
+
+            def error(self, *a, **k):
+                print("ERROR:", *a)
+
+            def debug(self, *a, **k):
+                print("DEBUG:", *a)
+
+        return _Fallback()
 
     def _get_metrics_module(self):
+        """Lazy import metrics_collector; return module or None."""
         try:
             import importlib
-            return importlib.import_module("metrics_collector")
+
+            mod = importlib.import_module("metrics_collector")
+            return mod
         except Exception:
             return None
 
@@ -126,11 +143,16 @@ n            lu = importlib.import_module("logging_utils")
         for key, fname in GOV_FILES.items():
             path = ROOT_DIR / fname
             if not path.exists():
-                log.warning({
-                    "event": "governance_missing",
-                    "file": fname,
-                    "source": "persona_engine",
-                })
+                try:
+                    log.warning(
+                        {
+                            "event": "governance_missing",
+                            "file": fname,
+                            "source": "persona_engine",
+                        }
+                    )
+                except Exception:
+                    pass
                 self._raw[key] = {}
                 self._phase_ok[key] = False
                 continue
@@ -139,12 +161,17 @@ n            lu = importlib.import_module("logging_utils")
                 with open(path, "r", encoding="utf-8") as f:
                     payload = json.load(f)
             except Exception as e:
-                log.error({
-                    "event": "governance_load_error",
-                    "file": fname,
-                    "error": str(e),
-                    "source": "persona_engine",
-                })
+                try:
+                    log.error(
+                        {
+                            "event": "governance_load_error",
+                            "file": fname,
+                            "error": str(e),
+                            "source": "persona_engine",
+                        }
+                    )
+                except Exception:
+                    pass
                 self._raw[key] = {}
                 self._phase_ok[key] = False
                 # best-effort metrics snapshot
@@ -152,29 +179,47 @@ n            lu = importlib.import_module("logging_utils")
                     if metrics and hasattr(metrics, "push_snapshot_from_collector"):
                         metrics.push_snapshot_from_collector()
                 except Exception:
-                    log.debug({"event": "metrics_snapshot_failed", "file": fname})
+                    try:
+                        log.debug({"event": "metrics_snapshot_failed", "file": fname})
+                    except Exception:
+                        pass
                 continue
 
             # Phase validation
-            detected = payload.get("upgrade_metadata", {}).get("phase")
+            detected = None
+            try:
+                detected = payload.get("upgrade_metadata", {}).get("phase")
+            except Exception:
+                detected = None
+
             ok = detected == REQUIRED_PHASE
             if not ok:
-                log.warning({
-                    "event": "governance_phase_mismatch",
-                    "file": fname,
-                    "detected_phase": detected,
-                    "required_phase": REQUIRED_PHASE,
-                    "source": "persona_engine",
-                })
+                try:
+                    log.warning(
+                        {
+                            "event": "governance_phase_mismatch",
+                            "file": fname,
+                            "detected_phase": detected,
+                            "required_phase": REQUIRED_PHASE,
+                            "source": "persona_engine",
+                        }
+                    )
+                except Exception:
+                    pass
             else:
-                log.info({
-                    "event": "governance_loaded",
-                    "file": fname,
-                    "phase": detected,
-                    "source": "persona_engine",
-                })
+                try:
+                    log.info(
+                        {
+                            "event": "governance_loaded",
+                            "file": fname,
+                            "phase": detected,
+                            "source": "persona_engine",
+                        }
+                    )
+                except Exception:
+                    pass
 
-            self._raw[key] = payload
+            self._raw[key] = payload if isinstance(payload, dict) else {}
             self._phase_ok[key] = ok
 
         # mark loaded
@@ -183,15 +228,24 @@ n            lu = importlib.import_module("logging_utils")
         # emit final load metric
         try:
             if metrics and hasattr(metrics, "increment"):
-                metrics.increment("persona_loaded_total")
+                # use a safe metric name
+                try:
+                    metrics.increment("persona_loaded_total")
+                except Exception:
+                    pass
         except Exception:
-            log.debug({"event": "persona_metric_emit_failed"})
+            try:
+                log = self._get_logger()
+                log.debug({"event": "persona_metric_emit_failed"})
+            except Exception:
+                pass
 
     def reload_persona(self) -> None:
         """Manually reload persona files. Use only for maintenance and testing.
 
         This will replace the cached governance payloads atomically.
         """
+        # use class lock for atomic reload
         with self._lock:
             self._do_load_all()
 
@@ -226,11 +280,15 @@ n            lu = importlib.import_module("logging_utils")
             "systemprompt": {},
         }
 
-        # Merge raw payload content conservatively
+        # Merge raw payload content conservatively (support older shaping)
         merged["callflow"] = self._raw.get("callflow", {}).get("callflow") or self._raw.get("callflow", {})
         merged["knowledge"] = self._raw.get("knowledge", {}).get("knowledge_base") or self._raw.get("knowledge", {})
-        merged["objections"] = self._raw.get("objections", {}).get("objection_patterns") or self._raw.get("objections", {})
-        merged["opening"] = self._raw.get("opening", {}).get("decision_maker_openers") or self._raw.get("opening", {})
+        merged["objections"] = (
+            self._raw.get("objections", {}).get("objection_patterns") or self._raw.get("objections", {})
+        )
+        merged["opening"] = (
+            self._raw.get("opening", {}).get("decision_maker_openers") or self._raw.get("opening", {})
+        )
         merged["playbook"] = self._raw.get("playbook", {}).get("playbook") or self._raw.get("playbook", {})
         merged["systemprompt"] = self._raw.get("systemprompt", {})
 
@@ -244,17 +302,17 @@ n            lu = importlib.import_module("logging_utils")
         pd = self.get_system_prompt()
 
         # Build a concise human-readable system prompt that enforces identity, guardrails, and output format
-        lines = [f"You are {pd.get('persona_identity', PERSONA_IDENTITY)}."]
+        lines: List[str] = [f"You are {pd.get('persona_identity', PERSONA_IDENTITY)}."]
 
-        sp = pd.get("systemprompt", {})
+        sp = pd.get("systemprompt", {}) or {}
         sara_identity = sp.get("sara_identity") or sp.get("persona_lock") or None
         if sara_identity:
             lines.append(f"Identity directive: {sara_identity}")
 
         # Add high-level guardrails
-        guardrails = []
+        guardrails: List[Any] = []
         # try system-level guardrails from callflow or systemprompt
-        cf = pd.get("callflow", {})
+        cf = pd.get("callflow", {}) or {}
         if isinstance(cf, dict):
             g = cf.get("system_guardrails") or cf.get("cognitive_restriction_protocols")
             if g:
@@ -267,7 +325,6 @@ n            lu = importlib.import_module("logging_utils")
         if guardrails:
             lines.append("Guardrails:")
             for g in guardrails:
-                # if guardrail is a dict/list, attempt to make readable
                 if isinstance(g, (list, dict)):
                     try:
                         lines.append(json.dumps(g, ensure_ascii=False))
@@ -277,13 +334,16 @@ n            lu = importlib.import_module("logging_utils")
                     lines.append(str(g))
 
         # Add short cheat-sheet from playbook
-        pb = pd.get("playbook", {})
+        pb = pd.get("playbook", {}) or {}
         if isinstance(pb, dict):
             tone = pb.get("tone_rules") or pb.get("persona_identity")
             if tone:
                 lines.append("Tone rules:")
                 if isinstance(tone, (list, dict)):
-                    lines.append(json.dumps(tone, ensure_ascii=False))
+                    try:
+                        lines.append(json.dumps(tone, ensure_ascii=False))
+                    except Exception:
+                        lines.append(str(tone))
                 else:
                     lines.append(str(tone))
 
@@ -308,19 +368,39 @@ n            lu = importlib.import_module("logging_utils")
         """Conservative off-scope detector using systemprompt deflection keywords if present."""
         if not self._loaded:
             return False
-        sp = self._raw.get("systemprompt", {})
+        sp = self._raw.get("systemprompt", {}) or {}
         def_patterns = sp.get("deflection_patterns") or sp.get("deflection_keywords") or []
+
+        # fallback to playbook fail_safes
         if not def_patterns:
-            # fallback to playbook fail_safes
-            pb = self._raw.get("playbook", {})
-            fail = pb.get("fail_safes") or pb.get("persona_identity", {}).get("fail_safes") if isinstance(pb, dict) else None
+            pb = self._raw.get("playbook", {}) or {}
+            persona_identity_block = pb.get("persona_identity") if isinstance(pb, dict) else {}
+            fail = pb.get("fail_safes") or (persona_identity_block.get("fail_safes") if isinstance(persona_identity_block, dict) else None)
             def_patterns = fail or []
 
-        ut = user_utterance.lower()
-        for d in def_patterns:
-            kw = d
+        # normalize patterns to list of strings/patterns
+        patterns: List[Any] = []
+        if isinstance(def_patterns, list):
+            patterns = def_patterns
+        elif isinstance(def_patterns, dict):
+            # if dict, treat its values as patterns list-ish
+            try:
+                patterns = list(def_patterns.values())
+            except Exception:
+                patterns = [str(def_patterns)]
+        else:
+            # single string or other; coerce to list
+            patterns = [def_patterns]
+
+        ut = (user_utterance or "").lower()
+        for d in patterns:
+            if not d:
+                continue
+            kw = None
             if isinstance(d, dict):
                 kw = d.get("keyword") or d.get("pattern")
+            else:
+                kw = d
             if not kw:
                 continue
             if isinstance(kw, str) and kw.lower() in ut:
@@ -332,27 +412,35 @@ n            lu = importlib.import_module("logging_utils")
         log = self._get_logger()
         metrics = self._get_metrics_module()
 
-        log.warning({
-            "event": "off_scope_violation",
-            "source": "Sara_JSON_Layer",
-            "level": "warning",
-            "utterance": user_utterance,
-            "persona": PERSONA_IDENTITY,
-        })
+        try:
+            log.warning(
+                {
+                    "event": "off_scope_violation",
+                    "source": "Sara_JSON_Layer",
+                    "level": "warning",
+                    "utterance": user_utterance,
+                    "persona": PERSONA_IDENTITY,
+                }
+            )
+        except Exception:
+            pass
 
-        # metrics
+        # metrics (best-effort)
         try:
             if metrics and hasattr(metrics, "increment"):
                 metrics.increment("cognitive_scope_violations_total")
             if metrics and hasattr(metrics, "push_snapshot_from_collector"):
                 metrics.push_snapshot_from_collector()
         except Exception:
-            log.debug({"event": "metrics_emit_failed"})
+            try:
+                log.debug({"event": "metrics_emit_failed"})
+            except Exception:
+                pass
 
         # deflection response
-        sp = self._raw.get("systemprompt", {})
+        sp = self._raw.get("systemprompt", {}) or {}
         deflections = sp.get("deflection_responses") or {}
-        default_resp = None
+        default_resp: Optional[str] = None
         if isinstance(deflections, dict):
             default_resp = deflections.get("default")
         if default_resp:
@@ -365,19 +453,27 @@ n            lu = importlib.import_module("logging_utils")
     def emit_persona_realign(self, reason: str) -> None:
         log = self._get_logger()
         metrics = self._get_metrics_module()
-        log.info({
-            "event": "persona_realign",
-            "source": "persona_engine",
-            "persona": PERSONA_IDENTITY,
-            "reason": reason,
-        })
+        try:
+            log.info(
+                {
+                    "event": "persona_realign",
+                    "source": "persona_engine",
+                    "persona": PERSONA_IDENTITY,
+                    "reason": reason,
+                }
+            )
+        except Exception:
+            pass
         try:
             if metrics and hasattr(metrics, "increment"):
                 metrics.increment("persona_realign_events_total")
             if metrics and hasattr(metrics, "push_snapshot_from_collector"):
                 metrics.push_snapshot_from_collector()
         except Exception:
-            log.debug({"event": "persona_realign_metric_failed"})
+            try:
+                log.debug({"event": "persona_realign_metric_failed"})
+            except Exception:
+                pass
 
 
 # Module-level helpers
@@ -389,6 +485,7 @@ def initialize_persona_engine() -> PersonaEngine:
 try:
     _ENGINE = PersonaEngine.initialize()
 except Exception:
+    # swallow errors on import; initialization can be retried manually via initialize_persona_engine()
     _ENGINE = None
 
 
