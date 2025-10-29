@@ -677,3 +677,15 @@ if __name__ == "__main__":
 
 # Auto-initialize on module import
 initialize_logging_system()
+
+# --- Phase 11-F Compatibility Shim (Non-destructive) ---
+# This ensures older modules that still reference get_logger() remain functional.
+# Do not modify existing logic or imports above this line.
+
+def get_logger(name=None):
+    """
+    Backward compatibility wrapper for unified logging interface.
+    Returns a structured logger using get_json_logger().
+    Safe to remove once all modules are updated to use logging_utils.get_json_logger().
+    """
+    return get_json_logger(name)
