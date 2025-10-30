@@ -44,6 +44,7 @@ class Config:
     TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
     TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
     TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")
+    TWILIO_APP_SID = os.getenv("TWILIO_APP_SID", "")
     
     # R2/S3 Configuration
     R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID", "")
@@ -104,3 +105,8 @@ class Config:
 
     # Retry policy for transient TTS failures
     TTS_MAX_RETRIES = 3
+    
+    # Phase 11-D constants
+REDIS_URL = "redis://localhost:6379/0"
+LOG_PATH = "./logs"
+MAX_TTS_TEXT_LEN = 5000  # or 3000 if your TTS service limits shorter input

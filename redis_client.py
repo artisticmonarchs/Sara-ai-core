@@ -1,6 +1,10 @@
+# redis_client.py
 """
-redis_client.py — Phase 11-D Compliant
+redis_client.py — Phase 11-D Compliant (with Phase 11-F compatibility aliases)
 Centralized, telemetry-aware Redis client with self-healing connections.
+This file preserves all existing Phase 11-D logic and adds a non-invasive
+compatibility shim so older importers (expecting `RedisClient` or
+`RedisCircuitClient`) continue to work.
 """
 
 import os
@@ -8,8 +12,21 @@ import redis
 import time
 from typing import Optional
 
+# --------------------------------------------------------------------------
+# Phase 11-D: Lazy dotenv support (safe, non-invasive)
+# --------------------------------------------------------------------------
+try:
+    # keep this optional; won't break if dotenv isn't installed
+    from dotenv import load_dotenv  # type: ignore
+    root_env = os.path.join(os.getcwd(), ".env")
+    if os.path.exists(root_env):
+        load_dotenv(root_env)
+except Exception:
+    pass
 
+# --------------------------------------------------------------------------
 # Connection Management
+# --------------------------------------------------------------------------
 _redis_client: Optional[redis.Redis] = None
 
 _REDIS_CONNECT_TIMEOUT = 5
@@ -29,8 +46,12 @@ def _get_logger():
 
 def _connect() -> Optional[redis.Redis]:
     """Attempt to establish a Redis connection and perform a health check."""
-    from config import Config
-    url = Config.REDIS_URL
+    try:
+        from config import Config
+        url = Config.REDIS_URL
+    except Exception:
+        url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
     try:
         client = redis.Redis.from_url(
             url,
@@ -98,13 +119,14 @@ def get_client() -> Optional[redis.Redis]:
 redis_client: Optional[redis.Redis] = get_client()
 
 # Phase 11-D Compatibility Alias
-# Ensures backward compatibility for modules importing get_redis_client
 def get_redis_client() -> Optional[redis.Redis]:
     """Alias for get_client() to maintain import compatibility."""
     return get_client()
 
+
 __all__ = ["get_client", "get_redis_client", "redis_client",
-           "increment_metric", "get_metric", "health_check"]
+           "increment_metric", "get_metric", "health_check",
+           "safe_redis_operation", "RedisClient", "RedisCircuitClient"]
 
 
 def increment_metric(key: str, field: str, amount: int = 1) -> None:
@@ -149,7 +171,12 @@ def get_metric(key: str, field: str) -> int:
 
 def health_check() -> dict:
     """Return a health snapshot for diagnostics."""
-    from config import Config
+    try:
+        from config import Config
+        url = Config.REDIS_URL
+    except Exception:
+        url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
     client = get_client()
     status = "ok"
     latency_ms = None
@@ -172,9 +199,10 @@ def health_check() -> dict:
     return {
         "status": status,
         "latency_ms": latency_ms,
-        "url": Config.REDIS_URL,
+        "url": url,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+
 
 # === Compatibility shim added by phase11E_autofix (Phase 11-E) ===
 def safe_redis_operation(func, fallback=None, operation_name=None):
@@ -200,3 +228,52 @@ def safe_redis_operation(func, fallback=None, operation_name=None):
         return fallback
 # === end compatibility shim ===
 
+
+# --------------------------------------------------------------------------
+# Phase 11-F Compatibility Alias Class (Non-invasive)
+# --------------------------------------------------------------------------
+class RedisClient:
+    """
+    Lightweight compatibility wrapper for older importers that expect a class.
+    This wrapper delegates to the module-level functions and keeps no state beyond
+    holding a reference to the underlying redis client.
+    """
+    def __init__(self):
+        # store underlying redis client instance (may be None)
+        self.client = get_client()
+
+    # connection accessors
+    def get_client(self):
+        return self.client
+
+    def get_redis_client(self):
+        return get_redis_client()
+
+    # health and diagnostics
+    def health_check(self):
+        return health_check()
+
+    # metrics helpers (delegates to existing functions)
+    def increment_metric(self, key: str, field: str, amount: int = 1):
+        return increment_metric(key, field, amount)
+
+    def get_metric(self, key: str, field: str):
+        return get_metric(key, field)
+
+    # convenience wrappers used by some legacy code
+    def ping(self) -> bool:
+        c = self.get_client()
+        if not c:
+            return False
+        try:
+            c.ping()
+            return True
+        except Exception:
+            return False
+
+    # safe executor for arbitrary operations
+    def safe_operation(self, func, fallback=None):
+        return safe_redis_operation(func, fallback=fallback)
+
+# Alias for older module checks that still expect this symbol name
+RedisCircuitClient = RedisClient

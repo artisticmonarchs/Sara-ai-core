@@ -179,6 +179,27 @@ except Exception as e:
               message="Failed to initialize Redis client",
               extra={"error": str(e), "stack": traceback.format_exc()})
 
+# --------------------------------------------------------------------------
+# Twilio Integration (Phase 11-D)
+# --------------------------------------------------------------------------
+try:
+    from twilio_router import twilio_bp  # unified router blueprint
+    app.register_blueprint(twilio_bp, url_prefix="/twilio")
+    log_event(
+        service="app",
+        event="twilio_router_registered",
+        status="ok",
+        message="Twilio router blueprint registered successfully"
+    )
+except Exception as e:
+    log_event(
+        service="app",
+        event="twilio_router_registration_failed",
+        status="error",
+        message="Failed to register Twilio router blueprint",
+        extra={"error": str(e), "stack": traceback.format_exc()}
+    )
+
 # Phase 11-D: Run system validation at startup
 startup_components = validate_system_dependencies()
 

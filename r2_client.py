@@ -418,3 +418,28 @@ def check_r2_connection_legacy():
 
 # Maintain backward compatibility for old callers (optional)
 check_r2_connection_simple = check_r2_connection_legacy
+
+# --------------------------------------------------------------------------
+# Phase 11-F Compatibility Alias (Non-breaking)
+# --------------------------------------------------------------------------
+class R2Client:
+    """
+    Lightweight compatibility wrapper for Phase 11-F test scripts.
+    Provides get_client() and check_connection() methods mapped to
+    existing Phase 11-D functions.
+    """
+    def __init__(self):
+        self.client = get_r2_client()
+
+    def check_connection(self, bucket=None):
+        return check_r2_connection(self.client, bucket=bucket)
+
+    def upload(self, bucket, key, data, content_type=None):
+        return upload_to_r2(self.client, bucket, key, data, content_type)
+
+    def download(self, bucket, key):
+        return download_from_r2(self.client, bucket, key)
+
+# --- Phase 11-F compatibility aliases ---
+RedisClient = RedisCircuitClient
+
