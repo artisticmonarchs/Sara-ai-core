@@ -9,6 +9,7 @@ import time
 import traceback
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
+from redis_client import RedisCircuitClient
 
 # --------------------------------------------------------------------------
 # Phase 11-D: Metrics Integration
