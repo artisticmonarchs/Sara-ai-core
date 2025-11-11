@@ -182,6 +182,10 @@ def resilient_task(func=None, **decorator_kwargs):
     def decorator(task_func):
         # compute a stable name once
         task_name_full = f"{task_func.__module__}.{task_func.__name__}"
+        
+        # Resolve max_retries with backward compatibility
+        max_retries = getattr(config, 'CELERY_TASK_MAX_RETRIES', 
+                             getattr(config, 'CELERY_MAX_RETRIES', 3))
 
         @wraps(task_func)
         @shared_task(
@@ -192,7 +196,7 @@ def resilient_task(func=None, **decorator_kwargs):
             retry_backoff=True,
             retry_backoff_max=config.CELERY_RETRY_BACKOFF_MAX,  # added
             retry_jitter=True,
-            max_retries=config.CELERY_MAX_RETRIES,
+            max_retries=max_retries,
             soft_time_limit=config.CELERY_SOFT_TIME_LIMIT,
             name=task_name_full,                               # added
             **decorator_kwargs

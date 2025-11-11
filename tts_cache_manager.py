@@ -7,6 +7,7 @@ import hashlib
 import json
 import time
 import os
+import base64  # needed for Redis decode in _get_from_redis
 from typing import Optional, Dict, Any, Tuple, List
 import traceback
 from datetime import datetime
@@ -434,7 +435,6 @@ class TTSCacheManager:
             meta_key = f"{Config.TTS_CACHE_REDIS_PREFIX}:meta:{content_hash}"
             
             # Encode audio data as base64 for Redis
-            import base64
             audio_data_b64 = base64.b64encode(audio_data).decode('utf-8')
             
             # Prepare metadata
@@ -461,20 +461,18 @@ class TTSCacheManager:
             
             return safe_redis_operation(
                 lambda client: (
-                    # atomic: set value only if not exists AND attach TTL in one call
-                    (set_success := client.set(redis_key, audio_data_b64, ex=ttl_seconds, nx=True)) and
-                    (client.setex(meta_key, ttl_seconds, json.dumps(meta_data))) and
-                    (logger.debug("SET(NX,EX) cache write successful", extra={
-                        "content_hash": content_hash[:16],
-                        "service": "tts_cache_manager"
-                    })) and
-                    True
+                    (set_success := client.set(redis_key, audio_data_b64, ex=ttl_seconds, nx=True))
+                    and client.setex(meta_key, ttl_seconds, json.dumps(meta_data))
+                    and (logger.debug(
+                        "SET(NX,EX) cache write successful",
+                        extra={"content_hash": content_hash[:16], "service": "tts_cache_manager"}
+                    ) or True)
                 ) or (
-                    (logger.debug("SET(NX,EX) cache write skipped - key exists", extra={
-                        "content_hash": content_hash[:16],
-                        "service": "tts_cache_manager"
-                    })) and
-                    (existing := client.get(redis_key)) is not None
+                    (logger.debug(
+                        "SET(NX,EX) cache write skipped - key exists",
+                        extra={"content_hash": content_hash[:16], "service": "tts_cache_manager"}
+                    ) or True)
+                    and (client.get(redis_key) is not None)
                 ),
                 operation_name="redis_setnx_dedupe",
                 trace_id=trace_id,
@@ -669,20 +667,23 @@ class TTSCacheManager:
             return
             
         try:
+            def _op(client):
+                redis_key = f"{Config.TTS_CACHE_REDIS_PREFIX}:upload:{content_hash}"
+                mapping = {
+                    "upload_status": status,
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+                if status == "pending":
+                    mapping["created_at"] = datetime.utcnow().isoformat()
+                    metrics.increment_metric("tts.cache.upload_pending.count")
+                if status == "complete" and r2_key:
+                    mapping["r2_key"] = r2_key
+                client.hset(redis_key, mapping=mapping)
+                client.expire(redis_key, 3 * 24 * 60 * 60)
+                return True
+
             safe_redis_operation(
-                lambda client: (
-                    (redis_key := f"{Config.TTS_CACHE_REDIS_PREFIX}:upload:{content_hash}") and
-                    (mapping := {
-                        "upload_status": status,
-                        "updated_at": datetime.utcnow().isoformat()
-                    }) and
-                    (status == "pending" and (mapping.update({"created_at": datetime.utcnow().isoformat()}) or metrics.increment_metric("tts.cache.upload_pending.count"))) and
-                    (status == "complete" and r2_key and (mapping.update({"r2_key": r2_key}))) and
-                    client.hset(redis_key, mapping=mapping) and
-                    # ensure the status hash expires (3 days operational TTL)
-                    client.expire(redis_key, 3 * 24 * 60 * 60) and
-                    True
-                ),
+                _op,
                 operation_name="set_upload_status",
                 trace_id=trace_id,
                 fallback=False
@@ -736,21 +737,28 @@ class TTSCacheManager:
         """Get cached audio from Redis with Phase 12 resilience"""
         if not self.redis_client:
             return None
-        
+
         try:
+            def op(client):
+                value = client.get(f"{Config.TTS_CACHE_REDIS_PREFIX}:{content_hash}")
+                if not value:
+                    return None
+                # decode base64 → bytes
+                if isinstance(value, bytes):
+                    value = value.decode("utf-8")
+                audio_bytes = base64.b64decode(value)
+                # touch metadata (access count / last_accessed) using same client
+                self._update_redis_metadata_sync(
+                    client, f"{Config.TTS_CACHE_REDIS_PREFIX}:meta:{content_hash}"
+                )
+                return audio_bytes
+
             return safe_redis_operation(
-                lambda client: (
-                    (audio_data_b64 := client.get(f"{Config.TTS_CACHE_REDIS_PREFIX}:{content_hash}")) and
-                    (self._update_redis_metadata_sync(client, f"{Config.TTS_CACHE_REDIS_PREFIX}:meta:{content_hash}")) and
-                    (import base64) and  # This won't work in lambda - need to refactor
-                    (audio_data := base64.b64decode(audio_data_b64.decode('utf-8') if isinstance(audio_data_b64, bytes) else audio_data_b64)) and
-                    audio_data
-                ) if audio_data_b64 else None,
+                op,
                 operation_name="redis_get_audio",
                 trace_id=trace_id,
-                fallback=None
+                fallback=None,
             )
-            
         except Exception as e:
             logger.debug("Redis cache get failed", extra={
                 "content_hash": content_hash[:16],

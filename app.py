@@ -76,7 +76,15 @@ from celery_app import celery
 from logging_utils import log_event, get_trace_id
 from redis_client import get_client
 from r2_client import get_r2_client, check_r2_connection as r2_check  # type: ignore
-from utils import increment_metric, restore_metrics_snapshot
+from utils import increment_metric
+# Not all branches define this symbol; provide a safe shim so Gunicorn boot never fails.
+try:
+    from utils import restore_metrics_snapshot  # type: ignore
+except Exception:
+    def restore_metrics_snapshot(*_args, **_kwargs) -> int:
+        # Why: keep boot resilient if metrics snapshotting isn't implemented.
+        return 0
+
 
 # --------------------------------------------------------------------------
 # Lazy Initialization Functions (Phase 11-D - No side effects at import time)
