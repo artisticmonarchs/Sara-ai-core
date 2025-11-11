@@ -19,7 +19,7 @@ import requests
 # Phase 12: Use shared_task with proper resilience decorators
 from celery import shared_task
 
-from gpt_client import generate_reply
+from gpt_client import generate_reply_sync as generate_reply
 from logging_utils import log_event
 
 # --------------------------------------------------------------------------
@@ -51,6 +51,9 @@ except ImportError:
 CELERY_TASK_MAX_RETRIES = getattr(config, "CELERY_TASK_MAX_RETRIES", getattr(config, "CELERY_MAX_RETRIES", 3))
 CELERY_RETRY_BACKOFF_MAX = getattr(config, "CELERY_RETRY_BACKOFF_MAX", 600)
 CELERY_SOFT_TIME_LIMIT = getattr(config, "CELERY_SOFT_TIME_LIMIT", 300)
+
+# Bucket name compatibility (env may use R2_BUCKET or R2_BUCKET_NAME)
+R2_BUCKET_NAME = getattr(config, "R2_BUCKET_NAME", None) or getattr(config, "R2_BUCKET", None)
 
 # Phase 12: Transient error detection
 class TransientError(Exception):
@@ -191,11 +194,10 @@ def resilient_task(func=None, **decorator_kwargs):
         # Use the safe configuration variable
         max_retries = CELERY_TASK_MAX_RETRIES
 
-        @wraps(task_func)
+        # Remove @wraps(task_func) to avoid AttributeError with Celery proxy
         @shared_task(
             bind=True,
             acks_late=True,
-            acks_on_failure_or_timeout=False,                 # Celery task option name
             autoretry_for=(Exception,),
             retry_backoff=True,
             retry_backoff_max=CELERY_RETRY_BACKOFF_MAX,
@@ -610,13 +612,13 @@ def upload_to_r2(session_id: str, trace_id: str, audio_bytes: bytes) -> Tuple[st
 
     try:
         s3.put_object(
-            Bucket=config.R2_BUCKET_NAME,
+            Bucket=R2_BUCKET_NAME,
             Key=key,
             Body=audio_bytes,
             ContentType="audio/wav",  # Already correct - kept for consistency
         )
         duration_ms = round((time.time() - start) * 1000, 2)
-        url = make_public_url(config.R2_BUCKET_NAME, key)
+        url = make_public_url(R2_BUCKET_NAME, key)
         inc_metric, obs_latency = get_metrics()
         inc_metric("tts_uploads_total", labels={"op": "r2_put"})
         obs_latency("r2_upload_ms", duration_ms, labels={"op": "r2_put"})

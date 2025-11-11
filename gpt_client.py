@@ -8,6 +8,7 @@ import os
 import uuid
 import time
 import asyncio
+import json
 from typing import AsyncGenerator, Optional, Dict, Any
 from openai import OpenAI, AsyncOpenAI
 from logging_utils import log_event
@@ -52,7 +53,6 @@ except ImportError:
     class Config:
         OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
         OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
-        OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
         # TODO: Move hardcoded URL to config.py
         MODEL_VERSION = os.getenv("MODEL_VERSION", "v2")
         GPT_MAX_TOKENS = int(os.getenv("GPT_MAX_TOKENS", "1000"))
@@ -83,7 +83,7 @@ def _get_metrics():
 # Phase 2: External API Wrapper Import - UPDATED TO with_external_api
 # --------------------------------------------------------------------------
 try:
-    from core.utils.external_api import with_external_api
+    from external_api import with_external_api
 except ImportError:
     # Fallback to direct call if with_external_api not available
     def with_external_api(service, trace_id=None, retry_check=None):
@@ -171,6 +171,47 @@ def _validate_prompt_size(prompt: str, trace_id: str | None = None) -> tuple[boo
     return True, estimated_tokens
 
 # --------------------------------------------------------------------------
+# Responses API Helper Functions
+# --------------------------------------------------------------------------
+def _use_responses_api() -> bool:
+    """
+    We use Responses API if the env/base url includes '/responses'
+    OR an explicit flag is set. Client base_url should remain at '/v1'.
+    """
+    base = os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_URL", "")
+    flag = os.getenv("USE_OPENAI_RESPONSES", "").lower() in ("1", "true", "yes")
+    return flag or base.rstrip("/").endswith("/responses")
+
+USE_RESPONSES = _use_responses_api()
+
+def _extract_from_responses(data) -> str:
+    """Extract text from Responses API response (supports SDK object or dict)."""
+    # 1) SDK object path
+    txt = getattr(data, "output_text", None)
+    if isinstance(txt, str) and txt.strip():
+        return txt.strip()
+    out = getattr(data, "output", None)
+    if out:
+        # list of dicts/objects: {type: "output_text", content: "..."}
+        for item in out:
+            itype = getattr(item, "type", None) if not isinstance(item, dict) else item.get("type")
+            if itype == "output_text":
+                content = getattr(item, "content", None) if not isinstance(item, dict) else item.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+    # 2) Dict path
+    if isinstance(data, dict):
+        seq = data.get("output") or []
+        for item in seq:
+            if item.get("type") == "output_text":
+                c = item.get("content", "")
+                if isinstance(c, str) and c.strip():
+                    return c.strip()
+        if isinstance(data.get("output_text"), str):
+            return data["output_text"].strip()
+    return ""
+
+# --------------------------------------------------------------------------
 # Environment & Safety Fixes
 # --------------------------------------------------------------------------
 # Render and some CI/CD environments inject proxy variables automatically.
@@ -203,18 +244,23 @@ class RetryConfig:
 if not getattr(Config, 'OPENAI_API_KEY', None):
     raise EnvironmentError("Missing OPENAI_API_KEY in environment or config.py")
 
+ROOT_BASE_URL = (os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_URL") or "https://api.openai.com/v1")
+# Normalize to the root (strip trailing '/responses' if present)
+if ROOT_BASE_URL.rstrip("/").endswith("/responses"):
+    ROOT_BASE_URL = ROOT_BASE_URL.rsplit("/responses", 1)[0]
+
 try:
     # Synchronous client for non-streaming operations
     client = OpenAI(
         api_key=Config.OPENAI_API_KEY,
-        base_url=getattr(Config, 'OPENAI_BASE_URL', 'https://api.openai.com/v1'),
-        timeout=getattr(Config, 'GPT_TIMEOUT', 30)
+        base_url=ROOT_BASE_URL,
+        timeout=getattr(Config, 'GPT_TIMEOUT', 30),
     )
     # Async client for streaming operations
     async_client = AsyncOpenAI(
         api_key=Config.OPENAI_API_KEY,
-        base_url=getattr(Config, 'OPENAI_BASE_URL', 'https://api.openai.com/v1'),
-        timeout=getattr(Config, 'GPT_TIMEOUT', 30)
+        base_url=ROOT_BASE_URL,
+        timeout=getattr(Config, 'GPT_TIMEOUT', 30),
     )
 except Exception as e:
     # Replace logging.exception with structured logging
@@ -258,27 +304,29 @@ class TokenLatencyTracker:
         """Get latency metrics in milliseconds"""
         if not self.start_time:
             return {}
-        
+
         current_time = time.time()
         metrics = {
             "total_latency_ms": (current_time - self.start_time) * 1000,
             "token_count": self.token_count
         }
-        
+
         if self.first_token_time:
             metrics["first_token_latency_ms"] = (self.first_token_time - self.start_time) * 1000
-            metrics["tokens_per_second"] = self.token_count / (current_time - self.first_token_time) if current_time > self.first_token_time else 0
-        
-        # Calculate token-level latencies
+            metrics["tokens_per_second"] = (
+                self.token_count / (current_time - self.first_token_time)
+                if current_time > self.first_token_time else 0
+            )
+
         if len(self.token_timestamps) > 1:
-            token_latencies = []
-            for i in range(1, len(self.token_timestamps)):
-                token_latencies.append((self.token_timestamps[i] - self.token_timestamps[i-1]) * 1000)
-            
+            token_latencies = [
+                (self.token_timestamps[i] - self.token_timestamps[i-1]) * 1000
+                for i in range(1, len(self.token_timestamps))
+            ]
             if token_latencies:
                 metrics["avg_token_latency_ms"] = sum(token_latencies) / len(token_latencies)
                 metrics["max_token_latency_ms"] = max(token_latencies)
-        
+
         return metrics
 
 # --------------------------------------------------------------------------
@@ -358,20 +406,39 @@ async def generate_reply(prompt: str, trace_id: str | None = None, persona: str 
         # Use client.with_options for explicit per-call timeout enforcement (seconds)
         timeout_client = async_client.with_options(timeout=getattr(Config, 'GPT_TIMEOUT', 30))
         
-        @with_external_api("openai", trace_id=trace_id, retry_check=_is_retryable_error)
-        async def create_completion():
-            return await timeout_client.chat.completions.create(
-                model=Config.OPENAI_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                max_completion_tokens=getattr(Config, 'GPT_MAX_TOKENS', 1000),
-                temperature=getattr(Config, 'GPT_TEMPERATURE', 0.7),
-                stream=False  # Non-streaming for this function
-            )
+        # Check if we should use Responses API
+        if USE_RESPONSES:
+            @with_external_api("openai", trace_id=trace_id, retry_check=_is_retryable_error)
+            async def create_completion():
+                response = await timeout_client.responses.create(
+                    model=Config.OPENAI_MODEL,
+                    input=prompt,
+                    max_output_tokens=getattr(Config, 'GPT_MAX_TOKENS', 1000),
+                    temperature=getattr(Config, 'GPT_TEMPERATURE', 0.7),
+                    metadata={"trace_id": trace_id} if trace_id else None
+                )
+                return response
+            
+            response = await create_completion()
+            reply = _extract_from_responses(response)
+            if not reply:
+                raise RuntimeError("No text output from Responses API")
+        else:
+            # Fallback to Chat Completions
+            @with_external_api("openai", trace_id=trace_id, retry_check=_is_retryable_error)
+            async def create_completion():
+                return await timeout_client.chat.completions.create(
+                    model=Config.OPENAI_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=getattr(Config, 'GPT_MAX_TOKENS', 1000),
+                    temperature=getattr(Config, 'GPT_TEMPERATURE', 0.7),
+                    stream=False  # Non-streaming for this function
+                )
 
-        # ✅ Compatible with OpenAI SDK v1.51+ with GPT-5 API v2
-        response = await create_completion()
+            # ✅ Compatible with OpenAI SDK v1.51+ with GPT-5 API v2
+            response = await create_completion()
+            reply = response.choices[0].message.content.strip()
 
-        reply = response.choices[0].message.content.strip()
         latency_ms = (time.time() - start_time) * 1000
 
         # Phase 11-D: Record success metrics
@@ -379,7 +446,7 @@ async def generate_reply(prompt: str, trace_id: str | None = None, persona: str 
         observe_latency("gpt_response_latency_ms", latency_ms)
         increment_metric("gpt_calls_total", labels={"model": Config.OPENAI_MODEL, "persona": persona})
         
-        # Record token usage metrics
+        # Record token usage metrics (only available in Chat Completions)
         if hasattr(response, 'usage') and response.usage:
             # Use separate counters for token metrics
             increment_metric("gpt_prompt_tokens_total", value=response.usage.prompt_tokens)
@@ -501,12 +568,23 @@ async def generate_reply_streaming(
         # Use client.with_options for explicit per-call timeout enforcement (seconds)
         timeout_client = async_client.with_options(timeout=getattr(Config, 'GPT_TIMEOUT', 30))
         
+        # Check if we should use Responses API (streaming not yet supported in Responses API)
+        if USE_RESPONSES:
+            # Responses API doesn't support streaming yet, fall back to Chat Completions for streaming
+            log_event(
+                service="gpt_client",
+                event="gpt_streaming_fallback",
+                status="info",
+                message="Streaming not supported in Responses API, falling back to Chat Completions",
+                trace_id=trace_id
+            )
+
         @with_external_api("openai", trace_id=trace_id, retry_check=_is_retryable_error)
         async def create_streaming_completion():
             return await timeout_client.chat.completions.create(
                 model=Config.OPENAI_MODEL,
                 messages=[{"role": "user", "content": prompt}],
-                max_completion_tokens=getattr(Config, 'GPT_MAX_TOKENS', 1000),
+                max_tokens=getattr(Config, 'GPT_MAX_TOKENS', 1000),
                 temperature=getattr(Config, 'GPT_TEMPERATURE', 0.7),
                 stream=True  # Enable streaming
             )
@@ -649,18 +727,35 @@ async def validate_gpt_connection(trace_id: str | None = None) -> bool:
         # Use client.with_options for explicit per-call timeout enforcement (seconds)
         timeout_client = async_client.with_options(timeout=getattr(Config, 'GPT_TIMEOUT', 30))
         
-        @with_external_api("openai", trace_id=trace_id, retry_check=_is_retryable_error)
-        async def create_test_completion():
-            return await timeout_client.chat.completions.create(
-                model=Config.OPENAI_MODEL,
-                messages=[{"role": "user", "content": test_prompt}],
-                max_completion_tokens=5,
-                temperature=0.1
-            )
+        # Check if we should use Responses API
+        if USE_RESPONSES:
+            @with_external_api("openai", trace_id=trace_id, retry_check=_is_retryable_error)
+            async def create_test_completion():
+                response = await timeout_client.responses.create(
+                    model=Config.OPENAI_MODEL,
+                    input=test_prompt,
+                    max_output_tokens=5,
+                    temperature=0.1,
+                    metadata={"trace_id": trace_id} if trace_id else None
+                )
+                return response
+            
+            response = await create_test_completion()
+            result = _extract_from_responses(response)
+        else:
+            # Fallback to Chat Completions
+            @with_external_api("openai", trace_id=trace_id, retry_check=_is_retryable_error)
+            async def create_test_completion():
+                return await timeout_client.chat.completions.create(
+                    model=Config.OPENAI_MODEL,
+                    messages=[{"role": "user", "content": test_prompt}],
+                    max_tokens=5,
+                    temperature=0.1
+                )
+            
+            response = await create_test_completion()
+            result = response.choices[0].message.content.strip()
         
-        response = await create_test_completion()
-        
-        result = response.choices[0].message.content.strip()
         return result.upper() == "OK"
         
     except Exception as e:
@@ -706,7 +801,8 @@ def get_model_info() -> Dict[str, Any]:
         "streaming_enabled": getattr(Config, 'GPT_STREAMING_ENABLED', True),
         "max_retries": getattr(Config, 'GPT_MAX_RETRIES', 3),
         "timeout": getattr(Config, 'GPT_TIMEOUT', 30),
-        "openai_errors_available": OPENAI_ERRORS_AVAILABLE
+        "openai_errors_available": OPENAI_ERRORS_AVAILABLE,
+        "api_type": "responses" if USE_RESPONSES else "chat_completions"
     }
 
 # --------------------------------------------------------------------------
