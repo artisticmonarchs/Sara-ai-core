@@ -14,9 +14,21 @@ from logging_utils import log_event, get_trace_id
 from metrics_collector import increment_metric, observe_latency
 from sentry_utils import capture_exception_safe
 from config import Config
+import signal
+import sys
+
+def _graceful_shutdown(signum, frame):
+    """Phase 12: Graceful shutdown handler"""
+    logger.info(f"Received signal {{signum}}, shutting down gracefully...")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, _graceful_shutdown)
+signal.signal(signal.SIGTERM, _graceful_shutdown)
+
 
 # Initialize Redis client with safe configuration - use Config only
 REDIS_URL = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
+# TODO: Move hardcoded port number to config.py
 redis_client = get_redis_client()
 
 def _structured_log(event, level, message, **extra):
@@ -41,6 +53,7 @@ def _record_metrics(event_type, status, latency_ms=None):
         observe_latency(
             "check_redis_operation_latency_seconds", 
             latency_ms / 1000.0,
+            # TODO: Move hardcoded port number to config.py
             labels={"phase": "11-D", "service": "check_redis"}
         )
 
@@ -157,6 +170,7 @@ def check_redis_health():
     finally:
         # Calculate and record latency
         latency_ms = (time.time() - start_time) * 1000
+        # TODO: Move hardcoded port number to config.py
         health_data["latency_ms"] = round(latency_ms, 2)
         _record_metrics("health_check", health_data["status"], latency_ms)
 

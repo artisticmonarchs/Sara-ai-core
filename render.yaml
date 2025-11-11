@@ -1,164 +1,147 @@
-# ==========================
-# Render Configuration — Phase 10I
-# ==========================
-volumes:
-  - name: shared-audio
-    mountPath: /opt/render/project/src/public/audio
+# render.yaml — Sara AI Core (Phase 12, Production)
+# Matches existing services:
+# - Web API:    Sara-ai-core-app        (Docker Web, Ohio)
+# - Streaming:  Sara-ai-core-streaming  (Docker Web, Ohio)
+# - Worker:     Sara-ai-core-worker     (Docker Worker, Ohio)
+# - Redis:      Existing Valkey instance (internal URL provided below)
 
 services:
-
-  # ==========================
-  # 1️⃣ Flask Web App Service
-  # ==========================
+  # 1) Web API (Flask/Gunicorn)
   - type: web
-    name: sara-ai-core-app
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --workers 2 --threads 4 --bind 0.0.0.0:$PORT --timeout 120 --log-level info
+    name: Sara-ai-core-app
+    env: docker
+    region: ohio
+    plan: standard
+    autoDeploy: true
+    runtime:
+      dockerfilePath: ./Dockerfile
+      dockerContext: .
+      # Render UI currently sets this; mirroring here for IaC parity:
+      dockerCommand: >-
+        gunicorn app:app --workers 2 --threads 4 --bind 0.0.0.0:$PORT --timeout 120 --log-level info
     healthCheckPath: /healthz
     envVars:
-      - key: ENV_MODE
-        value: render
-      - key: REDIS_URL
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379
-      - key: CELERY_BROKER_URL
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
-      - key: CELERY_RESULT_BACKEND
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
-      - key: SERVER_URL
-        value: https://sara-ai-core-app.onrender.com
-      - key: PUBLIC_STREAMING_URL
-        value: wss://sara-ai-core-streaming.onrender.com/ws
-      - key: DEEPGRAM_API_KEY
-        sync: false
-      - key: DEEPGRAM_SPEAK_MODEL
-        value: aura-2-asteria-en
-      - key: DEEPGRAM_LISTEN_MODEL
-        value: nova-3
-      - key: OPENAI_API_KEY
-        sync: false
-      - key: SARA_NAME
-        value: Sara Hayes
-      - key: SARA_ROLE
-        value: Senior Growth Consultant at Noblecom Solutions
-
-      # 🔹 Cloudflare R2 (for app + worker + streaming consistency)
-      - key: R2_BUCKET_NAME
-        value: sara-ai-audio
-      - key: R2_ACCOUNT_ID
-        value: 6970388a67efe7f4ca9feed97b7838b6
-      - key: R2_REGION
-        value: auto
-      - key: R2_ACCESS_KEY_ID
-        sync: false
-      - key: R2_SECRET_ACCESS_KEY
-        sync: false
-      - key: PUBLIC_AUDIO_HOST
-        value: https://pub-dc4b36bcc13f45a3aa77dc092e3b2cd4.r2.dev
-      - key: PUBLIC_AUDIO_INCLUDE_BUCKET
-        value: "true"
-
-    volumes:
-      - name: shared-audio
-        mountPath: /opt/render/project/src/public/audio
-
-
-  # ==========================
-  # 2️⃣ Celery Worker Service
-  # ==========================
-  - type: web
-    name: sara-ai-core-worker
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: celery -A celery_app.celery worker --loglevel=info --concurrency=1
-    envVars:
+      - key: ENV
+        value: production
       - key: PORT
-        value: 10002
-      - key: ENV_MODE
-        value: render
-      - key: REDIS_URL
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379
-      - key: CELERY_BROKER_URL
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
-      - key: CELERY_RESULT_BACKEND
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
-      - key: DEEPGRAM_API_KEY
-        sync: false
-      - key: DEEPGRAM_SPEAK_MODEL
-        value: aura-2-asteria-en
-      - key: DEEPGRAM_LISTEN_MODEL
-        value: nova-3
+        value: "5000"
+      # ---- Core secrets (set values in Render Dashboard) ----
       - key: OPENAI_API_KEY
         sync: false
-
-      # 🔹 Cloudflare R2 configuration
-      - key: R2_BUCKET_NAME
-        value: sara-ai-audio
-      - key: R2_ACCOUNT_ID
-        value: 6970388a67efe7f4ca9feed97b7838b6
-      - key: R2_REGION
-        value: auto
-      - key: R2_ACCESS_KEY_ID
+      - key: DEEPGRAM_API_KEY
         sync: false
-      - key: R2_SECRET_ACCESS_KEY
+      - key: ELEVENLABS_API_KEY
         sync: false
-      - key: PUBLIC_AUDIO_HOST
-        value: https://pub-dc4b36bcc13f45a3aa77dc092e3b2cd4.r2.dev
-      - key: PUBLIC_AUDIO_INCLUDE_BUCKET
-        value: "true"
-
-    volumes:
-      - name: shared-audio
-        mountPath: /opt/render/project/src/public/audio
-
-
-  # ==========================
-  # 3️⃣ Streaming Service
-  # ==========================
-  - type: web
-    name: sara-ai-core-streaming
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn streaming_server:app --workers 2 --threads 4 --bind 0.0.0.0:$PORT --timeout 120 --log-level info
-    healthCheckPath: /healthz
-    envVars:
-      - key: ENV_MODE
-        value: render
-      - key: REDIS_URL
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379
-      - key: CELERY_BROKER_URL
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/0
-      - key: CELERY_RESULT_BACKEND
-        value: redis://red-d3ip3vodl3ps73dd24o0:6379/1
-      - key: PUBLIC_STREAMING_URL
-        value: wss://sara-ai-core-streaming.onrender.com/ws
       - key: TWILIO_ACCOUNT_SID
         sync: false
       - key: TWILIO_AUTH_TOKEN
         sync: false
-      - key: TWILIO_PHONE_NUMBER
-        value: +13094502249
-      - key: DEEPGRAM_API_KEY
+      - key: TWILIO_CALLER_ID
         sync: false
-      - key: DEEPGRAM_LISTEN_MODEL
-        value: nova-3
-
-      # 🔹 Cloudflare R2 credentials for audio upload
-      - key: R2_BUCKET_NAME
-        value: sara-ai-audio
+      - key: TWILIO_MEDIA_STREAM_URL
+        sync: false
+      # ---- Redis / Celery (use your existing Valkey internal URL) ----
+      - key: REDIS_URL
+        value: "redis://red-d43ertemcj7s73b0qrcg:6379"
+      - key: CELERY_BROKER_URL
+        value: "redis://red-d43ertemcj7s73b0qrcg:6379/0"
+      - key: CELERY_RESULT_BACKEND
+        value: "redis://red-d43ertemcj7s73b0qrcg:6379/1"
+      # ---- Cloudflare R2 ----
       - key: R2_ACCOUNT_ID
-        value: 6970388a67efe7f4ca9feed97b7838b6
-      - key: R2_REGION
-        value: auto
+        sync: false
       - key: R2_ACCESS_KEY_ID
         sync: false
       - key: R2_SECRET_ACCESS_KEY
         sync: false
-      - key: PUBLIC_AUDIO_HOST
-        value: https://pub-dc4b36bcc13f45a3aa77dc092e3b2cd4.r2.dev
-      - key: PUBLIC_AUDIO_INCLUDE_BUCKET
-        value: "true"
+      - key: R2_BUCKET
+        sync: false
+      # ---- Observability ----
+      - key: SENTRY_DSN
+        sync: false
+      - key: PROMETHEUS_PORT
+        value: "9000"
 
-    volumes:
-      - name: shared-audio
-        mountPath: /opt/render/project/src/public/audio
+  # 2) Streaming Web Service (Twilio Media Streams ingress)
+  - type: web
+    name: Sara-ai-core-streaming
+    env: docker
+    region: ohio
+    plan: standard
+    autoDeploy: true
+    runtime:
+      dockerfilePath: ./Dockerfile
+      dockerContext: .
+      dockerCommand: >-
+        python -m streaming_server
+    healthCheckPath: /healthz
+    envVars:
+      - key: ENV
+        value: production
+      - key: PORT
+        value: "5000"
+      # Core secrets needed by streaming path
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_CALLER_ID
+        sync: false
+      - key: TWILIO_MEDIA_STREAM_URL
+        sync: false
+      # Redis
+      - key: REDIS_URL
+        value: "redis://red-d43ertemcj7s73b0qrcg:6379"
+      # Observability
+      - key: SENTRY_DSN
+        sync: false
+      - key: PROMETHEUS_PORT
+        value: "9000"
+
+  # 3) Celery Worker
+  - type: worker
+    name: Sara-ai-core-worker
+    env: docker
+    region: ohio
+    plan: standard
+    autoDeploy: true
+    runtime:
+      dockerfilePath: ./Dockerfile
+      dockerContext: .
+      dockerCommand: >-
+        celery -A celery_app.celery worker --loglevel=info --concurrency=1
+    envVars:
+      - key: ENV
+        value: production
+      # Broker/Backend via Valkey
+      - key: REDIS_URL
+        value: "redis://red-d43ertemcj7s73b0qrcg:6379"
+      - key: CELERY_BROKER_URL
+        value: "redis://red-d43ertemcj7s73b0qrcg:6379/0"
+      - key: CELERY_RESULT_BACKEND
+        value: "redis://red-d43ertemcj7s73b0qrcg:6379/1"
+      # Secrets often needed by tasks
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+      - key: PROMETHEUS_PORT
+        value: "9000"

@@ -434,14 +434,17 @@ def init_redis_client(*args, **kwargs) -> None:
 # --------------------------------------------------------------------------
 # Counter helpers
 # --------------------------------------------------------------------------
-def increment_metric(metric_name: str, value: int = 1) -> bool:
-    """Increment local counter and write per-service Redis total (best-effort).
-    Also ensure metric index contains the metric_name and key TTL refreshed.
+def increment_metric(metric_name: str, value: int = 1, **kwargs) -> bool:
+    """
+    Increment local counter and write per-service Redis total (best-effort).
+    Now Phase 12 compatible: accepts arbitrary keyword args (service, labels, etc.)
     """
     # 🧩 Skip self-metrics to avoid recursion
     if metric_name.startswith("metrics_collector_"):
         return True
-        
+
+    service = kwargs.get("service", get_service_name())
+
     try:
         with _lock:
             _counters[metric_name] += int(value)
@@ -472,6 +475,7 @@ def increment_metric(metric_name: str, value: int = 1) -> bool:
                     "Metric incremented successfully",
                     metric_name=metric_name,
                     value=value,
+                    service=service,
                     new_total=_counters[metric_name]
                 )
             else:
@@ -484,15 +488,17 @@ def increment_metric(metric_name: str, value: int = 1) -> bool:
                                     extra={"metric": metric_name, "value": value, "error": str(e)})
     return True
 
-def inc_metric(name: str, amount: int = 1) -> bool:
-    return increment_metric(name, amount)
+def inc_metric(name: str, amount: int = 1, **kwargs) -> bool:
+    return increment_metric(name, amount, **kwargs)
 
-def set_metric(name: str, value: int) -> bool:
+def set_metric(name: str, value: int, **kwargs) -> bool:
     """Overwrite local and per-service Redis metric (best-effort)."""
     # 🧩 Skip self-metrics to avoid recursion
     if name.startswith("metrics_collector_"):
         return True
         
+    service = kwargs.get("service", get_service_name())
+
     try:
         with _lock:
             _counters[name] = int(value)
@@ -516,7 +522,8 @@ def set_metric(name: str, value: int) -> bool:
                     "info",
                     "Metric set successfully",
                     metric_name=name,
-                    value=value
+                    value=value,
+                    service=service
                 )
             else:
                 _rate_limited_redis_log("redis_set_failed", "warn",
@@ -581,18 +588,16 @@ def get_metric_total(metric_name: str) -> int:
 # --------------------------------------------------------------------------
 # Latency handling (local + persisted aggregates)
 # --------------------------------------------------------------------------
-def observe_latency(name: str, value_ms: float) -> bool:
+def observe_latency(name: str, value_ms: float, **kwargs) -> bool:
     """
     Record latency sample locally and persist aggregated count & sum to Redis (best-effort).
-    Redis keys per service:
-      prometheus:metrics:<service>:latency:<name>:count  (integer)
-      prometheus:metrics:<service>:latency:<name>:sum    (float ms stored)
-    TTL refreshed on writes.
+    Phase 12 compatible: accepts service or labels keyword args.
     """
-    # 🧩 Skip self-metrics to avoid recursion
     if name.startswith("metrics_collector_"):
         return True
-        
+
+    service = kwargs.get("service", get_service_name())
+
     try:
         val = float(value_ms)
         with _lock:
@@ -633,7 +638,8 @@ def observe_latency(name: str, value_ms: float) -> bool:
                     "info",
                     "Latency observed and persisted",
                     latency_name=name,
-                    value_ms=value_ms
+                    value_ms=value_ms,
+                    service=service
                 )
                 
         except Exception as e:
@@ -641,6 +647,75 @@ def observe_latency(name: str, value_ms: float) -> bool:
                                     message="Failed to persist latency aggregates (best-effort)",
                                     extra={"latency": name, "value_ms": value_ms, "error": str(e)})
     return True
+
+# --------------------------------------------------------------------------
+# New Duplex & Outbound Workflow Metrics
+# --------------------------------------------------------------------------
+def observe_duplex_latency(value_ms: float, **kwargs) -> bool:
+    """Record duplex workflow latency."""
+    return observe_latency("duplex_latency_ms", value_ms, **kwargs)
+
+def increment_tts_cache_hits(value: int = 1, **kwargs) -> bool:
+    """Increment TTS cache hits counter."""
+    return increment_metric("tts_cache_hits_total", value, **kwargs)
+
+def increment_conversation_interrupts(value: int = 1, **kwargs) -> bool:
+    """Increment conversation interrupts counter."""
+    return increment_metric("conversation_interrupts_total", value, **kwargs)
+
+def increment_outbound_call_attempts(value: int = 1, **kwargs) -> bool:
+    """Increment outbound call attempts counter."""
+    return increment_metric("outbound_call_attempts_total", value, **kwargs)
+
+def increment_outbound_call_failures(value: int = 1, **kwargs) -> bool:
+    """Increment outbound call failures counter."""
+    return increment_metric("outbound_call_failures_total", value, **kwargs)
+
+# --------------------------------------------------------------------------
+# Health Monitoring Metrics
+# --------------------------------------------------------------------------
+def set_collector_health_status(healthy: bool = True, **kwargs) -> bool:
+    """Set metrics collector health status (1=healthy, 0=unhealthy)."""
+    value = 1 if healthy else 0
+    return set_metric("metrics_collector_health_status", value, **kwargs)
+
+def get_collector_health_status() -> int:
+    """Get current metrics collector health status."""
+    return get_metric_total("metrics_collector_health_status")
+
+# --------------------------------------------------------------------------
+# Human-likeness speech metrics (Phase 11-F)
+# --------------------------------------------------------------------------
+def observe_speech_latency(value_ms: float, **kwargs) -> bool:
+    """
+    Latency between end of user utterance and start of Sara's first audio frame (ms).
+    Records locally and persists aggregated count & sum to Redis (best-effort).
+    """
+    return observe_latency("speech_latency_ms", value_ms, **kwargs)
+
+def observe_tts_response_time(value_ms: float, **kwargs) -> bool:
+    """
+    Time taken for TTS to start producing audio after receiving text tokens (ms).
+    """
+    return observe_latency("tts_response_time_ms", value_ms, **kwargs)
+
+def record_pause_timing(value_ms: float, **kwargs) -> bool:
+    """
+    Micro-pause durations inserted by Sara (ms). Useful for variance analysis.
+    """
+    return observe_latency("pause_timing_ms", value_ms, **kwargs)
+
+def record_speech_overlap(value_ms: float, **kwargs) -> bool:
+    """
+    Duration (ms) of unwanted overlap (Sara speaking while user also speaking).
+    """
+    return observe_latency("speech_overlap_ms", value_ms, **kwargs)
+
+def increment_interruption_event(value: int = 1, **kwargs) -> bool:
+    """
+    Count user interruption events (how many times user interrupted Sara).
+    """
+    return increment_metric("interruption_events_total", value, **kwargs)
 
 # --------------------------------------------------------------------------
 # Snapshot
@@ -1154,6 +1229,71 @@ def get_health_status() -> Dict[str, Any]:
         "circuit_breaker_state": _get_redis_utils()[-2]()["state"],  # get_circuit_breaker_status
         "service_name": get_service_name(),
     }
+
+# --------------------------------------------------------------------------
+# Phase 11-F Unified Metrics API Wrappers
+# --------------------------------------------------------------------------
+
+def increment(metric_name: str, value: int = 1):
+    """Unified Phase 11-F increment wrapper."""
+    try:
+        # Safe call with explicit parameter names to avoid any signature issues
+        return increment_metric(metric_name, value)
+    except TypeError as e:
+        # Handle signature mismatch gracefully
+        if "missing 1 required positional argument" in str(e):
+            # Fallback: try with keyword arguments
+            try:
+                return increment_metric(metric_name=metric_name, value=value)
+            except Exception:
+                print(f"[WARN] increment() failed for {metric_name}: {e}")
+                return None
+        else:
+            print(f"[WARN] increment() failed for {metric_name}: {e}")
+            return None
+    except Exception as e:
+        print(f"[WARN] increment() failed for {metric_name}: {e}")
+        return None
+
+def observe(metric_name: str, value: float):
+    """Unified Phase 11-F latency/observation wrapper."""
+    try:
+        return observe_latency(metric_name, value)
+    except TypeError as e:
+        # Handle signature mismatch gracefully
+        if "missing 1 required positional argument" in str(e):
+            # Fallback: try with keyword arguments
+            try:
+                return observe_latency(name=metric_name, value_ms=value)
+            except Exception:
+                print(f"[WARN] observe() failed for {metric_name}: {e}")
+                return None
+        else:
+            print(f"[WARN] observe() failed for {metric_name}: {e}")
+            return None
+    except Exception as e:
+        print(f"[WARN] observe() failed for {metric_name}: {e}")
+        return None
+
+def set_value(metric_name: str, value: float):
+    """Unified Phase 11-F gauge setter."""
+    try:
+        return set_metric(metric_name, float(value))
+    except TypeError as e:
+        # Handle signature mismatch gracefully
+        if "missing 1 required positional argument" in str(e):
+            # Fallback: try with keyword arguments
+            try:
+                return set_metric(name=metric_name, value=float(value))
+            except Exception:
+                print(f"[WARN] set_value() failed for {metric_name}: {e}")
+                return None
+        else:
+            print(f"[WARN] set_value() failed for {metric_name}: {e}")
+            return None
+    except Exception as e:
+        print(f"[WARN] set_value() failed for {metric_name}: {e}")
+        return None
 
 # Initialize on module import - moved to prevent circular imports
 # initialize_metrics_collector() is intentionally NOT called at import-time to avoid import cycles.

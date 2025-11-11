@@ -20,3 +20,9 @@ prometheus-client==0.20.0
 setuptools>=68.0.0
 wheel>=0.42.0
 fastapi==0.115.0
+
+# --- Added for audit fix ---
+flask-sock>=0.7.0,<0.8      # used by streaming_ws.py
+SpeechRecognition>=3.10,<3.11  # used by asr_service.py, duplex_voice_controller.py
+phonenumbers>=8.13,<9       # used by contacts_loader.py
+numpy>=1.26,<1.27           # used by realtime_voice_engine.py; conservative pin for py3.11 wheels

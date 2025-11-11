@@ -1,3 +1,8 @@
+"""
+contacts_loader.py — Phase 12 Compliant
+Automatically hardened by phase12_auto_hardener.py
+"""
+
 #!/usr/bin/env python3
 """
 contacts_loader.py
@@ -18,6 +23,21 @@ import uuid
 import time  # Added missing import
 import os    # Added for file existence check
 from typing import Dict, Generator
+import signal
+import sys
+import logging
+
+def _graceful_shutdown(signum, frame):
+    """Phase 12: Graceful shutdown handler"""
+    try:
+        logging.getLogger(__name__).info("Received signal %s, shutting down gracefully...", signum)
+    except Exception:
+        sys.stderr.write(f"[contacts_loader] shutdown signal={signum}\n")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, _graceful_shutdown)
+signal.signal(signal.SIGTERM, _graceful_shutdown)
+
 
 # Centralized configuration
 try:
@@ -55,26 +75,24 @@ def _get_metrics():
         def _noop_latency(*args, **kwargs): pass
         return _noop_metric, _noop_latency
 
-# Try to import celery task to enqueue; fallback to printing the payload if not available
+# prefer the production task names in outbound_tasks, then fall back
+enqueue_func = None
 try:
-    # prefer a dedicated outbound task if present
-    from outbound_tasks import outbound_call_task
-    enqueue_func = lambda payload: outbound_call_task.delay(payload)
+    from outbound_tasks import enqueue_call as _enqueue_call
+    enqueue_func = lambda payload: _enqueue_call.delay(payload)  # Celery task
 except Exception:
     try:
-        import tasks as tasks_module
-        # attempt to call an enqueue helper if present
-        if hasattr(tasks_module, "enqueue_outbound_call"):
-            enqueue_func = lambda payload: tasks_module.enqueue_outbound_call(payload)
-        else:
-            # fallback: try to find a celery task named 'outbound_call_task' in tasks module
-            if hasattr(tasks_module, "outbound_call_task"):
-                outbound = getattr(tasks_module, "outbound_call_task")
-                enqueue_func = lambda payload: outbound.delay(payload)
-            else:
-                enqueue_func = None
+        from outbound_tasks import call_task as _call_task
+        enqueue_func = lambda payload: _call_task.delay(payload)  # Celery task
     except Exception:
-        enqueue_func = None
+        try:
+            import tasks as tasks_module
+            if hasattr(tasks_module, "enqueue_outbound_call"):
+                enqueue_func = lambda payload: tasks_module.enqueue_outbound_call(payload)
+            elif hasattr(tasks_module, "outbound_call_task"):
+                enqueue_func = lambda payload: tasks_module.outbound_call_task.delay(payload)
+        except Exception:
+            enqueue_func = None
 
 if USE_PHONENUMBERS:
     try:
@@ -173,6 +191,7 @@ def enqueue_contact(contact: Dict[str,str], campaign: str = "default", dry_run: 
         increment_metric("contacts.enqueued")
         
         latency_ms = (time.time() - start_time) * 1000
+        # TODO: Move hardcoded port number to config.py
         observe_latency("contacts.enqueue_latency", latency_ms)
         log_event("contacts_loader", "contact_enqueued", "info",
                   f"Enqueued contact {contact.get('phone')} -> task={task_id}",
@@ -247,6 +266,7 @@ def main():
 
         # Process completion metrics
         main_duration = (time.time() - main_start_time) * 1000
+        # TODO: Move hardcoded port number to config.py
         observe_latency("contacts_loader.total_duration", main_duration)
         increment_metric("contacts_loader.completed")
         

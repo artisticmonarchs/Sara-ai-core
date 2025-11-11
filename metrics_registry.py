@@ -19,8 +19,7 @@ import json
 import time
 import threading
 import traceback
-from typing import Dict, Any, Optional
-from prometheus_client import CollectorRegistry, Counter, Gauge
+from typing import Dict, Any, Optional, Set, Tuple
 from logging_utils import get_json_logger, log_event, get_trace_id
 
 # ------------------------------------------------------------------
@@ -41,43 +40,124 @@ METRICS_CONFIG = {
 SNAPSHOT_INTERVAL = METRICS_CONFIG.get("snapshot_interval", 30)
 
 # ------------------------------------------------------------------
-# Phase 11-D: Unified Prometheus Registry
+# Phase 11-D: Unified Prometheus Registry with Fallback Shim
 # ------------------------------------------------------------------
-REGISTRY = CollectorRegistry(auto_describe=True)
+# Track registered metric names for collision detection
+_registered_metric_names: Set[str] = set()
+_registry_active = False
+_redis_snapshotting_available = False
+
+try:
+    from prometheus_client import CollectorRegistry, Counter, Gauge
+    
+    # Create registry and log success
+    REGISTRY = CollectorRegistry(auto_describe=True)
+    _registry_active = True
+    
+    log_event(
+        service="metrics_registry",
+        event="registry_creation_success",
+        status="info",
+        message="Prometheus registry created successfully",
+        extra={"service_name": SERVICE_NAME}
+    )
+    
+except ImportError as e:
+    # Fallback shim when Prometheus client is not available
+    class CollectorRegistry:
+        def __init__(self, auto_describe=True):
+            self._collectors = []
+            
+        def register(self, collector):
+            self._collectors.append(collector)
+            
+        def unregister(self, collector):
+            self._collectors = [c for c in self._collectors if c != collector]
+    
+    class Counter:
+        def __init__(self, name, documentation, registry=None, labelnames=()):
+            self._name = name
+            self._value = 0
+            
+        def inc(self, amount=1):
+            self._value += amount
+            
+        def labels(self, **labels):
+            return self
+    
+    class Gauge:
+        def __init__(self, name, documentation, registry=None, labelnames=()):
+            self._name = name
+            self._value = 0
+            
+        def inc(self, amount=1):
+            self._value += amount
+            
+        def dec(self, amount=1):
+            self._value -= amount
+            
+        def set(self, value):
+            self._value = value
+            
+        def set_to_current_time(self):
+            self._value = time.time()
+            
+        def labels(self, **labels):
+            return self
+    
+    REGISTRY = CollectorRegistry(auto_describe=True)
+    
+    log_event(
+        service="metrics_registry",
+        event="registry_creation_fallback",
+        status="warn",
+        message="Prometheus client not available; using fallback shim",
+        extra={"error": str(e), "service_name": SERVICE_NAME}
+    )
+
 logger = get_json_logger("sara-ai-core-metrics-registry")
 
 # ------------------------------------------------------------------
 # Phase 11-D: Registry Self-Monitoring Metrics
 # ------------------------------------------------------------------
-_registry_snapshot_push_total = Counter(
-    'registry_snapshot_push_total',
-    'Total number of snapshot push operations',
-    registry=REGISTRY
-)
+# Wrap metric definitions in try/except to handle fallback scenario
+try:
+    _registry_snapshot_push_total = Counter(
+        'registry_snapshot_push_total',
+        'Total number of snapshot push operations',
+        registry=REGISTRY
+    )
 
-_registry_snapshot_failures_total = Counter(
-    'registry_snapshot_failures_total',
-    'Total number of snapshot push failures',
-    registry=REGISTRY
-)
+    _registry_snapshot_failures_total = Counter(
+        'registry_snapshot_failures_total',
+        'Total number of snapshot push failures',
+        registry=REGISTRY
+    )
 
-_registry_restore_failures_total = Counter(
-    'registry_restore_failures_total',
-    'Total number of snapshot restore failures',
-    registry=REGISTRY
-)
+    _registry_restore_failures_total = Counter(
+        'registry_restore_failures_total',
+        'Total number of snapshot restore failures',
+        registry=REGISTRY
+    )
 
-_registry_last_snapshot_timestamp = Gauge(
-    'registry_last_snapshot_timestamp',
-    'Timestamp of the last successful snapshot',
-    registry=REGISTRY
-)
+    _registry_last_snapshot_timestamp = Gauge(
+        'registry_last_snapshot_timestamp',
+        'Timestamp of the last successful snapshot',
+        registry=REGISTRY
+    )
+except NameError:
+    # Fallback metric instances for when Prometheus client is not available
+    _registry_snapshot_push_total = Counter('registry_snapshot_push_total', 'Total number of snapshot push operations')
+    _registry_snapshot_failures_total = Counter('registry_snapshot_failures_total', 'Total number of snapshot push failures')
+    _registry_restore_failures_total = Counter('registry_restore_failures_total', 'Total number of snapshot restore failures')
+    _registry_last_snapshot_timestamp = Gauge('registry_last_snapshot_timestamp', 'Timestamp of the last successful snapshot')
 
 # ------------------------------------------------------------------
 # Redis Setup with Circuit Breaker Awareness
 # ------------------------------------------------------------------
 try:
     from redis_client import redis_client as _redis_client  # type: ignore
+    _redis_snapshotting_available = _redis_client is not None
 except Exception:
     _redis_client = None
 
@@ -424,15 +504,56 @@ def stop_background_sync():
     )
 
 # ------------------------------------------------------------------
-# Phase 11-D: Metric Registration Helper
+# Phase 11-D: Metric Registration Helper with Enhanced Collision Detection
 # ------------------------------------------------------------------
 def register_metric(metric):
     """
     Safely register a metric with the unified registry.
     """
     try:
+        # Proactive collision detection
+        metric_name = getattr(metric, '_name', None)
+        metric_type = type(metric).__name__
+        
+        if metric_name and metric_name in _registered_metric_names:
+            log_event(
+                service="metrics_registry",
+                event="metric_name_collision",
+                status="warn",
+                message="Metric name collision detected during registration",
+                extra={
+                    "metric_name": metric_name,
+                    "metric_type": metric_type,
+                    "service_name": SERVICE_NAME
+                }
+            )
+            return False
+            
         REGISTRY.register(metric)
+        
+        # Track successful registration
+        if metric_name:
+            _registered_metric_names.add(metric_name)
+            
         return True
+    except ValueError as e:
+        # Handle registry-level collisions (duplicate collectors)
+        if "Duplicated" in str(e):
+            metric_name = getattr(metric, '_name', 'unknown')
+            metric_type = type(metric).__name__
+            log_event(
+                service="metrics_registry",
+                event="metric_registry_collision",
+                status="error",
+                message="Duplicate metric collector detected in registry",
+                extra={
+                    "metric_name": metric_name,
+                    "metric_type": metric_type,
+                    "error": str(e),
+                    "service_name": SERVICE_NAME
+                }
+            )
+        return False
     except Exception as e:
         log_event(
             service="metrics_registry",
@@ -442,6 +563,22 @@ def register_metric(metric):
             extra={"error": str(e), "service_name": SERVICE_NAME}
         )
         return False
+
+# ------------------------------------------------------------------
+# Phase 11-D: Lightweight Health Check
+# ------------------------------------------------------------------
+def get_health_status() -> Dict[str, Any]:
+    """
+    Lightweight health check for the metrics registry module.
+    Returns whether REGISTRY is active and if Redis snapshotting is available.
+    """
+    return {
+        "registry_active": _registry_active,
+        "redis_snapshotting_available": _redis_snapshotting_available and not _is_redis_circuit_breaker_open(),
+        "circuit_breaker_open": _is_redis_circuit_breaker_open(),
+        "registered_metrics_count": len(_registered_metric_names),
+        "service_name": SERVICE_NAME
+    }
 
 # ------------------------------------------------------------------
 # Phase 11-D: Temporary Collector for Global Exposition

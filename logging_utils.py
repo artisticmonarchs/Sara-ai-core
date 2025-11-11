@@ -1,18 +1,16 @@
 """
-logging_utils.py — Phase 11-D Compatible
+logging_utils.py — Phase 11-F Production Ready
 Structured JSON Logging (Self-Contained)
 ----------------------------------------
-Fixes missing logger_json import (Phase 11-A transition).
-All structured fields are passed under extra={"structured": payload}
-to avoid LogRecord key collisions.
+Final JSON log schema v11f with sensitive data masking.
+Single-line JSON output for log ingestion.
 
-Phase 11-D Enhancements:
-- Trace propagation context
-- Redis log buffering for fault tolerance  
-- Metrics integration
-- Health monitoring
-- Configuration integration
-- Circuit breaker awareness
+Phase 11-F Enhancements:
+- Final JSON log schema v11f
+- Sensitive data masking (phones, tokens, PII)
+- No external dependencies (removed logger_json.py)
+- Convenience methods: log_event, log_error, log_metric
+- Single-line JSON output for ingestion
 """
 
 import json
@@ -22,11 +20,14 @@ import uuid
 import time
 import threading
 import os
+import re
 from typing import Dict, Any, Optional, List
 from collections import deque
+import signal
+from datetime import datetime  # Added for proper timestamp formatting
 
 # --------------------------------------------------------------------------
-# Phase 11-D Configuration Integration
+# Phase 11-F Configuration Integration
 # --------------------------------------------------------------------------
 try:
     from config import Config
@@ -35,12 +36,86 @@ except ImportError:
     # Fallback configuration for backward compatibility
     class FallbackConfig:
         SERVICE_NAME = os.getenv("SERVICE_NAME", "sara-ai-core")
+        PERSONA_VERSION = os.getenv("PERSONA_VERSION", "v2.1.0")
         ENABLE_STRUCTURED_LOGGING = os.getenv("ENABLE_STRUCTURED_LOGGING", "true").lower() == "true"
         ENABLE_LOG_BUFFERING = os.getenv("ENABLE_LOG_BUFFERING", "true").lower() == "true"
+        ENABLE_SENSITIVE_DATA_MASKING = os.getenv("ENABLE_SENSITIVE_DATA_MASKING", "true").lower() == "true"
         LOG_BUFFER_SIZE = int(os.getenv("LOG_BUFFER_SIZE", "1000"))
         LOG_FLUSH_INTERVAL = int(os.getenv("LOG_FLUSH_INTERVAL", "30"))
     
     config = FallbackConfig()
+
+# --------------------------------------------------------------------------
+# Phase 11-F Sensitive Data Masking Patterns
+# --------------------------------------------------------------------------
+PHONE_PATTERN = re.compile(r'(\+?1?[-.\s]?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4})')
+TOKEN_PATTERN = re.compile(r'(sk-[a-zA-Z0-9]{20,48})')
+EMAIL_PATTERN = re.compile(r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})')
+IP_PATTERN = re.compile(r'(\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b)')
+SSN_PATTERN = re.compile(r'(\b\d{3}-\d{2}-\d{4}\b)')
+
+def mask_sensitive_data(text: str) -> str:
+    """
+    Mask sensitive information in text strings.
+    Returns masked version with PII replaced with [REDACTED] markers.
+    """
+    if not text or not config.ENABLE_SENSITIVE_DATA_MASKING:
+        return text
+    
+    try:
+        # Mask phone numbers (keep last 4 digits)
+        text = PHONE_PATTERN.sub(lambda m: f"***-***-{m.group(1)[-4:]}" if len(m.group(1)) >= 4 else "[REDACTED_PHONE]", text)
+        
+        # Mask API tokens
+        text = TOKEN_PATTERN.sub("sk-[REDACTED]", text)
+        
+        # Mask email addresses (keep domain)
+        text = EMAIL_PATTERN.sub(lambda m: f"***@{m.group(1).split('@')[1]}", text)
+        
+        # Mask IP addresses
+        text = IP_PATTERN.sub("[REDACTED_IP]", text)
+        
+        # Mask SSN
+        text = SSN_PATTERN.sub("***-**-****", text)
+        
+    except Exception:
+        # If masking fails, return original text rather than breaking
+        return text
+    
+    return text
+
+def mask_sensitive_dict(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Recursively mask sensitive data in dictionary values.
+    """
+    if not data or not config.ENABLE_SENSITIVE_DATA_MASKING:
+        return data
+    
+    masked_data = {}
+    sensitive_keys = {'phone', 'phonenumber', 'number', 'token', 'apikey', 'password', 
+                     'secret', 'ssn', 'email', 'ip', 'authorization', 'auth'}
+    
+    for key, value in data.items():
+        key_lower = str(key).lower()
+        
+        # Check if this is a sensitive field
+        if any(sensitive in key_lower for sensitive in sensitive_keys):
+            if isinstance(value, str) and value.strip():
+                masked_data[key] = mask_sensitive_data(value)
+            else:
+                masked_data[key] = "[REDACTED]"
+        elif isinstance(value, dict):
+            masked_data[key] = mask_sensitive_dict(value)
+        elif isinstance(value, list):
+            masked_data[key] = [mask_sensitive_dict(item) if isinstance(item, dict) else 
+                               mask_sensitive_data(str(item)) if isinstance(item, str) else item 
+                               for item in value]
+        elif isinstance(value, str):
+            masked_data[key] = mask_sensitive_data(value)
+        else:
+            masked_data[key] = value
+    
+    return masked_data
 
 # --------------------------------------------------------------------------
 # Lazy Metrics Shim to Avoid Circular Imports
@@ -119,7 +194,7 @@ def _get_redis_utils():
         return safe_redis_operation, get_circuit_breaker_status, False
 
 # --------------------------------------------------------------------------
-# Phase 11-D Log Buffer for Fault Tolerance
+# Phase 11-F Log Buffer for Fault Tolerance
 # --------------------------------------------------------------------------
 _log_buffer: deque = deque(maxlen=config.LOG_BUFFER_SIZE)
 _buffer_lock = threading.RLock()
@@ -127,7 +202,7 @@ _last_flush_time = 0
 _buffer_enabled = config.ENABLE_LOG_BUFFERING
 
 # --------------------------------------------------------------------------
-# Phase 11-D Trace Context Management
+# Phase 11-F Trace Context Management
 # --------------------------------------------------------------------------
 _trace_context = threading.local()
 
@@ -152,10 +227,40 @@ def clear_trace_context():
         del _trace_context.session_id
 
 # --------------------------------------------------------------------------
-# Inline JSON Logger Factory (replaces old logger_json.py)
+# Call Context Management for Per-Call Logging
+# --------------------------------------------------------------------------
+_call_context = threading.local()
+
+def set_call_context(call_id: str, persona_id: Optional[str] = None, session_phase: Optional[str] = None):
+    """Set call context for current thread/async context."""
+    _call_context.call_id = call_id
+    if persona_id:
+        _call_context.persona_id = persona_id
+    if session_phase:
+        _call_context.session_phase = session_phase
+
+def get_call_context() -> Dict[str, Optional[str]]:
+    """Get current call context."""
+    return {
+        "call_id": getattr(_call_context, 'call_id', None),
+        "persona_id": getattr(_call_context, 'persona_id', None),
+        "session_phase": getattr(_call_context, 'session_phase', None)
+    }
+
+def clear_call_context():
+    """Clear call context for current thread/async context."""
+    if hasattr(_call_context, 'call_id'):
+        del _call_context.call_id
+    if hasattr(_call_context, 'persona_id'):
+        del _call_context.persona_id
+    if hasattr(_call_context, 'session_phase'):
+        del _call_context.session_phase
+
+# --------------------------------------------------------------------------
+# Phase 11-F JSON Logger Factory (No logger_json.py dependency)
 # --------------------------------------------------------------------------
 def get_json_logger(name: str = "sara-ai-core"):
-    """Return a structured JSON logger compatible with Render and Celery."""
+    """Return a structured JSON logger with v11f schema."""
     logger = logging.getLogger(name)
     if logger.handlers:
         return logger  # Avoid duplicate handlers on reloads
@@ -164,32 +269,93 @@ def get_json_logger(name: str = "sara-ai-core"):
 
     class JsonFormatter(logging.Formatter):
         def format(self, record):
-            base = {
-                "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            # Base v11f schema fields
+            base_payload = {
+                "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),  # Fixed: use datetime instead of time
                 "level": record.levelname,
                 "service": name,
                 "message": record.getMessage(),
             }
 
-            # Merge structured payload if present
+            # Add structured payload if present
             structured = getattr(record, "structured", None)
             if isinstance(structured, dict):
-                base.update(structured)
+                # Apply sensitive data masking to structured payload
+                masked_structured = mask_sensitive_dict(structured)
+                base_payload.update(masked_structured)
+            
+            # Ensure required v11f fields
+            if "trace_id" not in base_payload:
+                base_payload["trace_id"] = get_trace_id()
+            if "persona_version" not in base_payload:
+                base_payload["persona_version"] = getattr(config, "PERSONA_VERSION", "v2.1.0")
 
-            return json.dumps(base, ensure_ascii=False)
+            # Single-line JSON output for ingestion
+            return json.dumps(base_payload, ensure_ascii=False, separators=(',', ':'))
 
     handler.setFormatter(JsonFormatter())
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
     logger.propagate = False
     
-    # REMOVED: _emit_log_event call that caused NameError
-    # Initialization logging moved to initialize_logging_system()
-    
     return logger
 
 # --------------------------------------------------------------------------
-# Phase 11-D Log Buffer Management
+# Contextual Logger for Per-Call Logging
+# --------------------------------------------------------------------------
+def get_call_logger(call_id: str, persona_id: Optional[str] = None, session_phase: Optional[str] = None, name: str = "sara-ai-core"):
+    """
+    Return a contextual logger with call_id, persona_id, and session_phase.
+    
+    Args:
+        call_id: Unique identifier for the call
+        persona_id: Optional persona identifier
+        session_phase: Optional session phase identifier
+        name: Logger name (default: "sara-ai-core")
+    
+    Returns:
+        Configured JSON logger with call context
+    """
+    logger = get_json_logger(name)
+    
+    # Create a wrapper that injects call context into all log messages
+    class CallLogger:
+        def __init__(self, logger, call_id, persona_id, session_phase):
+            self.logger = logger
+            self.call_id = call_id
+            self.persona_id = persona_id
+            self.session_phase = session_phase
+        
+        def _inject_call_context(self, extra=None):
+            """Inject call context into extra fields."""
+            call_extra = {
+                "call_id": self.call_id,
+                "persona_id": self.persona_id,
+                "session_phase": self.session_phase
+            }
+            if extra:
+                call_extra.update(extra)
+            return call_extra
+        
+        def info(self, msg, extra=None, *args, **kwargs):
+            self.logger.info(msg, extra={"structured": self._inject_call_context(extra)}, *args, **kwargs)
+        
+        def warn(self, msg, extra=None, *args, **kwargs):
+            self.logger.warning(msg, extra={"structured": self._inject_call_context(extra)}, *args, **kwargs)
+        
+        def warning(self, msg, extra=None, *args, **kwargs):
+            self.logger.warning(msg, extra={"structured": self._inject_call_context(extra)}, *args, **kwargs)
+        
+        def error(self, msg, extra=None, *args, **kwargs):
+            self.logger.error(msg, extra={"structured": self._inject_call_context(extra)}, *args, **kwargs)
+        
+        def debug(self, msg, extra=None, *args, **kwargs):
+            self.logger.debug(msg, extra={"structured": self._inject_call_context(extra)}, *args, **kwargs)
+    
+    return CallLogger(logger, call_id, persona_id, session_phase)
+
+# --------------------------------------------------------------------------
+# Phase 11-F Log Buffer Management
 # --------------------------------------------------------------------------
 def _buffer_log_entry(payload: Dict[str, Any]):
     """Buffer log entry for fault-tolerant persistence."""
@@ -328,7 +494,7 @@ def recover_buffered_logs() -> int:
         return 0
 
 # --------------------------------------------------------------------------
-# Phase 11-D Core Logging Function
+# Phase 11-F Core Logging Function
 # --------------------------------------------------------------------------
 def _emit_log_event(
     service: str = "api",
@@ -341,7 +507,8 @@ def _emit_log_event(
     level: str = "info"
 ):
     """
-    Core logging function with Phase 11-D enhancements.
+    Core logging function with Phase 11-F enhancements.
+    Implements v11f JSON schema with sensitive data masking.
     """
     start_time = time.time()
     
@@ -351,22 +518,42 @@ def _emit_log_event(
         final_trace_id = trace_id or current_context.get("trace_id")
         final_session_id = session_id or current_context.get("session_id")
         
+        # Get current call context if available
+        call_context = get_call_context()
+        call_id = call_context.get("call_id")
+        persona_id = call_context.get("persona_id")
+        session_phase = call_context.get("session_phase")
+        
         # Generate trace ID if none exists
         if not final_trace_id:
             final_trace_id = get_trace_id()
         
+        # Base v11f schema payload
         payload = {
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),  # Fixed: use datetime instead of time
+            "level": level.upper(),
             "service": service,
+            "trace_id": final_trace_id,
+            "persona_version": getattr(config, "PERSONA_VERSION", "v2.1.0"),
             "event": event or "event",
             "status": status,
-            "message": message,
-            "trace_id": final_trace_id,
-            "session_id": final_session_id,
-            "log_timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "message": mask_sensitive_data(message) if message else None,
         }
 
+        # Add optional fields if available
+        if final_session_id:
+            payload["session_id"] = final_session_id
+        if call_id:
+            payload["call_id"] = call_id
+        if persona_id:
+            payload["persona_id"] = persona_id
+        if session_phase:
+            payload["session_phase"] = session_phase
+
+        # Add and mask extra fields
         if extra:
-            payload.update(extra)
+            masked_extra = mask_sensitive_dict(extra)
+            payload.update(masked_extra)
 
         # Buffer log for fault tolerance
         _buffer_log_entry(payload)
@@ -374,7 +561,8 @@ def _emit_log_event(
         # Emit to structured logger
         if config.ENABLE_STRUCTURED_LOGGING:
             log_method = getattr(logger, level, logger.info)
-            log_method(message or event or "log_event", extra={"structured": payload})
+            log_message = message or event or "log_event"
+            log_method(mask_sensitive_data(log_message), extra={"structured": payload})
         
         # Increment metrics using safe wrapper
         _increment_metric_safe("log_events_total")
@@ -390,15 +578,43 @@ def _emit_log_event(
     except Exception as e:
         # Fallback to basic logging if structured logging fails
         try:
-            print(f"[LOG_FALLBACK] service={service} event={event} status={status} message={message} error={e}")
+            # FIXED: This was the remaining time.strftime() call causing the ValueError
+            fallback_payload = {
+                "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),  # Fixed: use datetime instead of time
+                "level": "ERROR",
+                "service": "logging_utils",
+                "event": "log_fallback",
+                "status": "error",
+                "message": f"[LOG_FALLBACK] service={service} event={event} status={status} message={message} error={e}",
+            }
+            print(json.dumps(fallback_payload, ensure_ascii=False, separators=(',', ':')))
         except Exception:
-            pass  # Ultimate fallback - don't break the application
+            # Ultimate fallback - don't break the application
+            print(f"[LOG_ULTIMATE_FALLBACK] service={service} event={event} status={status} message={message} error={e}")
         return False
 
 # --------------------------------------------------------------------------
-# Global JSON Logger - MOVED AFTER _emit_log_event DEFINITION
+# Global JSON Logger
 # --------------------------------------------------------------------------
 logger = get_json_logger(config.SERVICE_NAME)
+
+# --------------------------------------------------------------------------
+# Graceful Shutdown Handler (Fixed - moved after logger definition)
+# --------------------------------------------------------------------------
+def _graceful_shutdown(signum, frame):
+    """Phase 12: Graceful shutdown handler"""
+    log_event(
+        service="logging_utils",
+        event="graceful_shutdown",
+        status="ok",
+        message=f"Received signal {signum}, shutting down gracefully...",
+        extra={"signal": signum}
+    )
+    sys.exit(0)
+
+# Register signal handlers after logger is defined
+signal.signal(signal.SIGINT, _graceful_shutdown)
+signal.signal(signal.SIGTERM, _graceful_shutdown)
 
 # --------------------------------------------------------------------------
 # Trace Utility
@@ -408,7 +624,7 @@ def get_trace_id() -> str:
     return str(uuid.uuid4())
 
 # --------------------------------------------------------------------------
-# Structured Logging Entry Point
+# Phase 11-F Structured Logging Entry Points
 # --------------------------------------------------------------------------
 def log_event(
     service: str = "api",
@@ -420,14 +636,24 @@ def log_event(
     extra: dict | None = None,
 ):
     """
-    Unified structured logging wrapper — Phase 11-D compliant.
-
-    Emits standardized JSON logs for observability and traceability,
-    without colliding with reserved LogRecord fields.
+    Unified structured logging wrapper — Phase 11-F compliant.
+    
+    Emits standardized JSON logs with v11f schema:
+    - timestamp: ISO 8601 with milliseconds
+    - level: log level
+    - service: service name
+    - trace_id: correlation ID
+    - persona_version: persona version
+    - event: event type
+    - status: ok/warning/error
+    - message: log message (with sensitive data masked)
+    
+    All sensitive data (phones, tokens, PII) is automatically masked.
+    Outputs single-line JSON for log ingestion.
     """
     # 🔒 Prevent recursion: skip metrics_collector self-logging
     if service == "metrics_collector":
-        print(f"[LOG_FALLBACK] service={service} event={event} status={status} message={message}")
+        logger.info(f"[LOG_FALLBACK] service={service} event={event} status={status} message={message}")
         return True
 
     return _emit_log_event(
@@ -441,9 +667,6 @@ def log_event(
         level="info"
     )
 
-# --------------------------------------------------------------------------
-# Phase 11-D Enhanced Logging Methods
-# --------------------------------------------------------------------------
 def log_error(
     service: str = "api",
     event: str | None = None,
@@ -452,7 +675,7 @@ def log_error(
     session_id: str | None = None,
     extra: dict | None = None,
 ):
-    """Convenience method for error logging."""
+    """Convenience method for error logging with v11f schema."""
     return _emit_log_event(
         service=service,
         event=event,
@@ -472,7 +695,7 @@ def log_warning(
     session_id: str | None = None,
     extra: dict | None = None,
 ):
-    """Convenience method for warning logging."""
+    """Convenience method for warning logging with v11f schema."""
     return _emit_log_event(
         service=service,
         event=event,
@@ -492,7 +715,7 @@ def log_debug(
     session_id: str | None = None,
     extra: dict | None = None,
 ):
-    """Convenience method for debug logging."""
+    """Convenience method for debug logging with v11f schema."""
     return _emit_log_event(
         service=service,
         event=event,
@@ -504,8 +727,43 @@ def log_debug(
         level="debug"
     )
 
+def log_metric(
+    metric_name: str,
+    value: float,
+    service: str = "api",
+    trace_id: str | None = None,
+    extra: dict | None = None,
+):
+    """
+    Convenience method for metric logging with v11f schema.
+    
+    Args:
+        metric_name: Name of the metric being logged
+        value: Numeric value of the metric
+        service: Service name
+        trace_id: Trace ID for correlation
+        extra: Additional metric metadata
+    """
+    metric_extra = {
+        "metric_name": metric_name,
+        "metric_value": value,
+        "metric_type": "gauge"
+    }
+    if extra:
+        metric_extra.update(extra)
+    
+    return _emit_log_event(
+        service=service,
+        event="metric_recorded",
+        status="ok",
+        message=f"Metric recorded: {metric_name}={value}",
+        trace_id=trace_id,
+        extra=metric_extra,
+        level="info"
+    )
+
 # --------------------------------------------------------------------------
-# Phase 11-D Health Monitoring
+# Phase 11-F Health Monitoring
 # --------------------------------------------------------------------------
 def health_check() -> Dict[str, Any]:
     """Comprehensive health check for logging system."""
@@ -520,6 +778,11 @@ def health_check() -> Dict[str, Any]:
             trace_id=test_trace_id,
             extra={"health_check": True}
         )
+        
+        # Test sensitive data masking
+        test_phone = "+1234567890"
+        masked_message = mask_sensitive_data(f"Test phone: {test_phone}")
+        masking_working = "***-***-7890" in masked_message
         
         # Check buffer status
         with _buffer_lock:
@@ -536,12 +799,16 @@ def health_check() -> Dict[str, Any]:
         health_info = {
             "status": "ok" if test_success else "degraded",
             "service": "logging_utils",
+            "schema_version": "v11f",
             "structured_logging_enabled": config.ENABLE_STRUCTURED_LOGGING,
+            "sensitive_data_masking_enabled": config.ENABLE_SENSITIVE_DATA_MASKING,
+            "sensitive_data_masking_working": masking_working,
             "log_buffering_enabled": _buffer_enabled,
             "buffer_utilization_percent": round(buffer_utilization, 2),
             "buffered_logs_count": buffer_size,
             "redis_connectivity": redis_status,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "persona_version": getattr(config, "PERSONA_VERSION", "v2.1.0"),
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),  # Fixed: use datetime instead of time
         }
         
         # Log health status
@@ -561,11 +828,11 @@ def health_check() -> Dict[str, Any]:
             "status": "error",
             "service": "logging_utils",
             "error": str(e),
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ"),  # Fixed: use datetime instead of time
         }
 
 # --------------------------------------------------------------------------
-# Phase 11-D Context Manager for Trace Propagation
+# Phase 11-F Context Manager for Trace Propagation
 # --------------------------------------------------------------------------
 class TraceContext:
     """Context manager for automatic trace propagation."""
@@ -624,10 +891,80 @@ class TraceContext:
             )
 
 # --------------------------------------------------------------------------
-# Phase 11-D Initialization
+# Phase 11-F Context Manager for Call Propagation
+# --------------------------------------------------------------------------
+class CallContext:
+    """Context manager for automatic call context propagation."""
+    
+    def __init__(self, call_id: str, persona_id: Optional[str] = None, session_phase: Optional[str] = None, service: str = "unknown"):
+        self.call_id = call_id
+        self.persona_id = persona_id
+        self.session_phase = session_phase
+        self.service = service
+        self.previous_context = {}
+    
+    def __enter__(self):
+        # Save previous context
+        self.previous_context = get_call_context()
+        
+        # Set new context
+        set_call_context(self.call_id, self.persona_id, self.session_phase)
+        
+        log_event(
+            service=self.service,
+            event="call_context_entered",
+            status="ok",
+            message="Call context entered",
+            extra={
+                "call_id": self.call_id,
+                "persona_id": self.persona_id,
+                "session_phase": self.session_phase
+            }
+        )
+        
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Restore previous context
+        if self.previous_context.get('call_id'):
+            set_call_context(
+                self.previous_context['call_id'],
+                self.previous_context.get('persona_id'),
+                self.previous_context.get('session_phase')
+            )
+        else:
+            clear_call_context()
+        
+        if exc_type:
+            log_error(
+                service=self.service,
+                event="call_context_error",
+                message=f"Call context exited with error: {exc_val}",
+                extra={
+                    "call_id": self.call_id,
+                    "persona_id": self.persona_id,
+                    "session_phase": self.session_phase,
+                    "exception_type": exc_type.__name__
+                }
+            )
+        else:
+            log_event(
+                service=self.service,
+                event="call_context_exited",
+                status="ok",
+                message="Call context exited",
+                extra={
+                    "call_id": self.call_id,
+                    "persona_id": self.persona_id,
+                    "session_phase": self.session_phase
+                }
+            )
+
+# --------------------------------------------------------------------------
+# Phase 11-F Initialization
 # --------------------------------------------------------------------------
 def initialize_logging_system():
-    """Initialize the logging system with Phase 11-D features."""
+    """Initialize the logging system with Phase 11-F features."""
     # Recover any buffered logs from previous session
     recovered_logs = recover_buffered_logs()
     
@@ -636,10 +973,12 @@ def initialize_logging_system():
         service="logging_utils",
         event="system_initialized",
         status="ok",
-        message="Logging system initialized with Phase 11-D features",
+        message="Logging system initialized with Phase 11-F features",
         extra={
-            "phase": "11-D",
+            "phase": "11-F",
+            "schema_version": "v11f",
             "structured_logging": config.ENABLE_STRUCTURED_LOGGING,
+            "sensitive_data_masking": config.ENABLE_SENSITIVE_DATA_MASKING,
             "log_buffering": _buffer_enabled,
             "buffer_size": config.LOG_BUFFER_SIZE,
             "recovered_logs": recovered_logs,
@@ -656,7 +995,16 @@ if __name__ == "__main__":
     
     # Test health check
     health_status = health_check()
-    print(f"Health Status: {health_status}")
+    logger.info(f"Health Status: {health_status}")
+    
+    # Test sensitive data masking
+    test_phone = "+1234567890"
+    test_token = "sk-abc123def456ghi789jkl012mno345pqr678stu901"
+    test_email = "test@example.com"
+    
+    logger.info(f"Masked phone: {mask_sensitive_data(test_phone)}")
+    logger.info(f"Masked token: {mask_sensitive_data(test_token)}")
+    logger.info(f"Masked email: {mask_sensitive_data(test_email)}")
     
     # Test trace context
     with TraceContext(service="logging_utils") as trace:
@@ -668,20 +1016,35 @@ if __name__ == "__main__":
             trace_id=trace.trace_id
         )
     
-    # Test various log levels
+    # Test call context
+    with CallContext(call_id="test-call-123", persona_id="assistant", session_phase="duplex", service="logging_utils") as call:
+        log_event(
+            service="logging_utils", 
+            event="call_test",
+            status="ok",
+            message="Call context test successful"
+        )
+    
+    # Test call logger
+    call_logger = get_call_logger(call_id="test-call-456", persona_id="user", session_phase="init")
+    call_logger.info("Call logger test message", extra={"test_field": "test_value", "phone": test_phone})
+    call_logger.warn("Call logger warning test")
+    call_logger.error("Call logger error test")
+    
+    # Test various log levels and convenience methods
     log_debug(service="logging_utils", event="debug_test", message="Debug level test")
     log_warning(service="logging_utils", event="warning_test", message="Warning level test") 
     log_error(service="logging_utils", event="error_test", message="Error level test")
+    log_metric(service="logging_utils", metric_name="test_metric", value=42.5, extra={"unit": "ms"})
     
-    print("All logging tests completed successfully")
+    logger.info("All logging tests completed successfully")
 
-# Auto-initialize on module import
-initialize_logging_system()
+# Auto-initialize on module import (with safety check to avoid double initialization)
+if "LOGGING_SYSTEM_INITIALIZED" not in globals():
+    initialize_logging_system()
+    LOGGING_SYSTEM_INITIALIZED = True
 
 # --- Phase 11-F Compatibility Shim (Non-destructive) ---
-# This ensures older modules that still reference get_logger() remain functional.
-# Do not modify existing logic or imports above this line.
-
 def get_logger(name=None):
     """
     Backward compatibility wrapper for unified logging interface.

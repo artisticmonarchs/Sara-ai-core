@@ -1,16 +1,22 @@
 """
-global_metrics_store.py — Phase 11-D
+global_metrics_store.py — Phase 11-F Enhanced
 ----------------------------------------
-Background synchronization service that keeps a persisted view of metrics
-in Redis and helps restore across restarts.
+Enhanced metrics synchronization service with multi-service aggregation,
+metric publishing helpers, and robust Prometheus exposition.
+
+New Features:
+✅ Aggregate metrics from all services into Redis
+✅ Helper publish_metric(name, value, labels) 
+✅ Expose /metrics endpoint to Prometheus
+✅ Handle per-service TTL + counter resets
+✅ Add logging + Sentry for metric push failures
 
 Responsibilities:
- - On startup: attempt to restore the last saved snapshot from Redis into metrics_collector.
- - Periodically (default 30s): call metrics_collector.get_snapshot() and generate_latest(REGISTRY)
-   and persist the combined snapshot to Redis using core.metrics_registry.save_metrics_snapshot
-   and/or core.metrics_registry.push_snapshot_from_collector.
- - Expose start_background_sync(interval_sec=30) and stop_background_sync().
- - Robust logging via logging_utils.log_event and best-effort behavior if Redis is absent.
+ - Multi-service metrics aggregation with service-specific TTL
+ - Simplified metric publishing API
+ - Prometheus exposition endpoint
+ - Counter reset detection and handling
+ - Enhanced error tracking with Sentry integration
 """
 
 from __future__ import annotations
@@ -18,267 +24,354 @@ import threading
 import time
 import json
 import traceback
-import copy  # ← ADD: For deep copy in get_global_snapshot()
-from typing import Optional, Dict, Any, Callable
+import copy
+from typing import Optional, Dict, Any, Callable, List, Union
+from datetime import datetime, timedelta
+
+# Enhanced imports for new functionality
+try:
+    import sentry_sdk
+    from sentry_sdk import capture_exception, capture_message
+    SENTRY_AVAILABLE = True
+except ImportError:
+    SENTRY_AVAILABLE = False
+    def capture_exception(*args, **kwargs): pass
+    def capture_message(*args, **kwargs): pass
 
 # ────────────────────────────────────────────────────────────────
-# Phase 11-E Metrics Registry Guard & Deduplication
-# Ensures all Prometheus metrics are registered safely and uniquely
+# Phase 11-F: Enhanced Metrics Registry with Service Support
 # ────────────────────────────────────────────────────────────────
 
 try:
-    from prometheus_client import REGISTRY as registry, Counter, Gauge, Histogram
+    from prometheus_client import REGISTRY as registry, Counter, Gauge, Histogram, generate_latest
 except ImportError:
-    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
+    from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
     registry = CollectorRegistry()
 
 # Avoid duplicate registration of metrics
-def safe_counter(name: str, description: str):
+def safe_counter(name: str, description: str, labels: List[str] = None):
     """Safely register a Counter metric or reuse existing one."""
     existing = [m for m in registry._names_to_collectors.keys() if m == name]
     if existing:
-        # If already registered, return the existing collector
         return registry._names_to_collectors[name]
-    return Counter(name, description, registry=registry)
+    return Counter(name, description, labelnames=labels or [], registry=registry)
 
-def safe_gauge(name: str, description: str):
+def safe_gauge(name: str, description: str, labels: List[str] = None):
     existing = [m for m in registry._names_to_collectors.keys() if m == name]
     if existing:
         return registry._names_to_collectors[name]
-    return Gauge(name, description, registry=registry)
+    return Gauge(name, description, labelnames=labels or [], registry=registry)
 
-def safe_histogram(name: str, description: str):
+def safe_histogram(name: str, description: str, labels: List[str] = None):
     existing = [m for m in registry._names_to_collectors.keys() if m == name]
     if existing:
         return registry._names_to_collectors[name]
-    return Histogram(name, description, registry=registry)
+    return Histogram(name, description, labelnames=labels or [], registry=registry)
 
 # ────────────────────────────────────────────────────────────────
-# Global Metrics (Deduplicated)
+# Phase 11-F: Global Metrics (Enhanced)
 # ────────────────────────────────────────────────────────────────
 
-# --- Safe deduplication for merge counter ---
-from prometheus_client import REGISTRY
-
-for name in list(REGISTRY._names_to_collectors.keys()):
-    if name.startswith("global_metrics_total_merges"):
+# Clean up any duplicate metrics
+for name in list(registry._names_to_collectors.keys()):
+    if name.startswith("global_metrics_"):
         try:
-            REGISTRY.unregister(REGISTRY._names_to_collectors[name])
+            registry.unregister(registry._names_to_collectors[name])
         except Exception:
             pass
 
-try:
-    _global_metrics_total_merges = Counter(
-        "global_metrics_total_merges",
-        "Total merges performed across metrics snapshots (deduplicated)"
-    )
-except ValueError:
-    _global_metrics_total_merges = REGISTRY._names_to_collectors.get("global_metrics_total_merges")
-
-global_metrics_total_merges_created = safe_counter(
-    "global_metrics_total_merges_created",
-    "Total number of merges created during runtime"
+# Enhanced global metrics with service labels
+_global_metrics_total_merges = safe_counter(
+    "global_metrics_total_merges",
+    "Total merges performed across metrics snapshots",
+    labels=["service"]
 )
 
-# If the following was redundant, it will now safely reuse the existing one
-global_metrics_total_merges_total = safe_counter(
-    "global_metrics_total_merges_total",
-    "Aggregated merges counter (safe duplicate alias)"
+_global_metrics_merge_failures_total = safe_counter(
+    "global_metrics_merge_failures_total",
+    "Total number of metric merge failures",
+    labels=["service", "error_type"]
+)
+
+_global_metrics_redis_sync_failures_total = safe_counter(
+    "global_metrics_redis_sync_failures_total", 
+    "Total number of Redis sync failures",
+    labels=["service", "operation"]
 )
 
 _global_metrics_last_sync_timestamp = safe_gauge(
     "global_metrics_last_sync_timestamp",
-    "Last successful metrics sync timestamp (UNIX epoch seconds)"
+    "Last successful metrics sync timestamp (UNIX epoch seconds)",
+    labels=["service"]
 )
 
-# Initialize global metrics timestamp
-global_metrics_last_sync_timestamp = time.time()
+# New metrics for Phase 11-F
+_global_metrics_publish_total = safe_counter(
+    "global_metrics_publish_total",
+    "Total metrics published via publish_metric",
+    labels=["service", "metric_type"]
+)
 
-def update_global_metrics_timestamp():
-    global global_metrics_last_sync_timestamp
-    global_metrics_last_sync_timestamp = time.time()
+_global_metrics_ttl_expirations_total = safe_counter(
+    "global_metrics_ttl_expirations_total",
+    "Total metrics expired due to TTL",
+    labels=["service"]
+)
+
+_global_metrics_counter_resets_total = safe_counter(
+    "global_metrics_counter_resets_total",
+    "Total counter reset events detected",
+    labels=["service", "metric_name"]
+)
+
+_global_metrics_service_health = safe_gauge(
+    "global_metrics_service_health",
+    "Service health status (1=healthy, 0=unhealthy)",
+    labels=["service", "service_type"]
+)
 
 from logging_utils import log_event, get_trace_id
 
 # ------------------------------------------------------------------
-# Phase 11-D: Configuration Management - FIXED
+# Phase 11-F: Enhanced Configuration Management
 # ------------------------------------------------------------------
 try:
     from config import get_metrics_config, Config
     METRICS_CONFIG = get_metrics_config()
     SERVICE_NAME = getattr(Config, "SERVICE_NAME", "unknown_service")
 except ImportError:
-    # Fallback configuration without direct os.environ access
     METRICS_CONFIG = {
-        "snapshot_interval": 30,  # Fixed default, no os.environ access
-        "circuit_breaker_enabled": True
+        "snapshot_interval": 30,
+        "circuit_breaker_enabled": True,
+        "service_ttl_seconds": 300,  # 5 minutes default TTL
+        "counter_reset_threshold": 0.8,  # 80% decrease triggers reset detection
+        "max_metrics_per_service": 1000
+        # TODO: Move hardcoded port number to config.py
     }
     SERVICE_NAME = "unknown_service"
 
 SNAPSHOT_INTERVAL = METRICS_CONFIG.get("snapshot_interval", 30)
+SERVICE_TTL_SECONDS = METRICS_CONFIG.get("service_ttl_seconds", 300)
+COUNTER_RESET_THRESHOLD = METRICS_CONFIG.get("counter_reset_threshold", 0.8)
+MAX_METRICS_PER_SERVICE = METRICS_CONFIG.get("max_metrics_per_service", 1000)
+# TODO: Move hardcoded port number to config.py
 
 # ------------------------------------------------------------------
-# Phase 11-D: Unified Global Snapshot with Thread Safety
+# Phase 11-F: Enhanced Global Snapshot with Service TTL Support
 # ------------------------------------------------------------------
 GLOBAL_METRICS_SNAPSHOT = {
     "counters": {},
-    "latencies": {},
+    "latencies": {}, 
     "gauges": {},
     "last_sync": None,
-    "service_name": SERVICE_NAME
+    "service_name": SERVICE_NAME,
+    "services": {}  # New: Track all services and their last update
 }
 
 _snapshot_lock = threading.Lock()
 
-# ------------------------------------------------------------------
-# Phase 11-D: Self-Monitoring Metrics
-# ------------------------------------------------------------------
-try:
-    from metrics_registry import REGISTRY, register_metric
-except Exception:
-    REGISTRY = None
-    def register_metric(metric):  # type: ignore
-        return False
-
-# Register self-monitoring metrics safely
-if REGISTRY:
-    _global_metrics_total_merges = safe_counter(
-        'global_metrics_total_merges',
-        'Total number of metric merge operations'
-    )
-
-    _global_metrics_merge_failures_total = safe_counter(
-        'global_metrics_merge_failures_total',
-        'Total number of metric merge failures'
-    )
-
-    _global_metrics_redis_sync_failures_total = safe_counter(
-        'global_metrics_redis_sync_failures_total',
-        'Total number of Redis sync failures'
-    )
+# Service registry for TTL management
+_SERVICE_REGISTRY = {}
+_SERVICE_REGISTRY_LOCK = threading.Lock()
 
 # ------------------------------------------------------------------
-# Phase 11-D: Safe Metric Operations (No-op if metrics not registered)
+# Phase 11-F: Enhanced Metric Operations
 # ------------------------------------------------------------------
-def _safe_inc(metric):
-    """Safely increment a metric (no-op if metric doesn't exist)."""
+def _safe_inc(metric, labels=None):
+    """Safely increment a metric with labels."""
     try:
         if metric is not None:
-            metric.inc()
+            if labels:
+                metric.labels(**labels).inc()
+            else:
+                metric.inc()
     except Exception:
-        # Never bubble metric operations
         pass
 
-def _safe_set_time(gauge):
-    """Safely set gauge to current time (no-op if gauge doesn't exist)."""
+def _safe_set(metric, value, labels=None):
+    """Safely set a metric value with labels."""
+    try:
+        if metric is not None:
+            if labels:
+                metric.labels(**labels).set(value)
+            else:
+                metric.set(value)
+    except Exception:
+        pass
+
+def _safe_set_time(gauge, labels=None):
+    """Safely set gauge to current time with labels."""
     try:
         if gauge is not None:
-            gauge.set_to_current_time()
+            if labels:
+                gauge.labels(**labels).set_to_current_time()
+            else:
+                gauge.set_to_current_time()
     except Exception:
-        # Never bubble metric operations
         pass
 
-# Local imports (import-time safe)
-try:
-    from metrics_registry import (
-        save_metrics_snapshot,
-        load_metrics_snapshot,
-        push_snapshot_from_collector,
-        restore_snapshot_to_collector,
-    )
-except Exception:
-    # If metrics_registry missing, we still want file to import without hard failure
-    # Re-raise later if user actually calls start; but for safety assign placeholders
-    def save_metrics_snapshot(x):  # type: ignore
-        raise RuntimeError("metrics_registry unavailable")
-
-    def load_metrics_snapshot():  # type: ignore
-        return {}
-
-    def push_snapshot_from_collector(f):  # type: ignore
-        raise RuntimeError("metrics_registry unavailable")
-
-    def restore_snapshot_to_collector(m):  # type: ignore
-        raise RuntimeError("metrics_registry unavailable")
-
-try:
-    import metrics_collector as metrics_collector  # type: ignore
-    from metrics_collector import get_snapshot  # type: ignore
-except Exception:
-    metrics_collector = None
-    def get_snapshot():  # type: ignore
-        return {}
-
-try:
-    from prometheus_client import generate_latest
-except Exception:
-    def generate_latest(x):  # placeholder
-        return b""
-
-# ------------------------------------------------------------------
-# Phase 11-D: Redis Circuit Breaker Support - FIXED
-# ------------------------------------------------------------------
-def _is_redis_circuit_breaker_open() -> bool:
-    """Check if Redis circuit breaker is open."""
-    if not METRICS_CONFIG.get("circuit_breaker_enabled", True):
-        return False
-        
+def _safe_observe(histogram, value, labels=None):
+    """Safely observe histogram value with labels."""
     try:
-        # CORRECTED: Use get_client() instead of get_redis_client()
-        from redis_client import get_client
-        client = get_client()
-        if not client:
-            return False
-            
-        key = "circuit_breaker:redis:state"
-        state = client.get(key)
-        return state == b"open"
+        if histogram is not None:
+            if labels:
+                histogram.labels(**labels).observe(value)
+            else:
+                histogram.observe(value)
     except Exception:
-        return False  # Proceed on circuit breaker check errors
-
-# Thread control
-_sync_thread: Optional[threading.Thread] = None
-_stop_event: Optional[threading.Event] = None
+        pass
 
 # ------------------------------------------------------------------
-# Phase 11-D: Snapshot Management with Thread Safety
+# Phase 11-F: Service TTL Management
+# ------------------------------------------------------------------
+def update_service_heartbeat(service_name: str, service_type: str = "unknown"):
+    """Update service heartbeat and health status."""
+    with _SERVICE_REGISTRY_LOCK:
+        _SERVICE_REGISTRY[service_name] = {
+            "last_heartbeat": time.time(),
+            "service_type": service_type,
+            "status": "healthy"
+        }
+    
+    # Update health metric
+    _safe_set(_global_metrics_service_health, 1, {
+        "service": service_name,
+        "service_type": service_type
+    })
+
+def check_service_ttl() -> List[str]:
+    """Check for expired services and return list of expired service names."""
+    expired_services = []
+    current_time = time.time()
+    
+    with _SERVICE_REGISTRY_LOCK:
+        for service_name, service_info in list(_SERVICE_REGISTRY.items()):
+            if current_time - service_info["last_heartbeat"] > SERVICE_TTL_SECONDS:
+                expired_services.append(service_name)
+                # Mark as unhealthy
+                _safe_set(_global_metrics_service_health, 0, {
+                    "service": service_name,
+                    "service_type": service_info["service_type"]
+                })
+                _safe_inc(_global_metrics_ttl_expirations_total, {
+                    "service": service_name
+                })
+                
+                # Log and capture in Sentry
+                log_event(
+                    service="global_metrics_store",
+                    event="service_ttl_expired",
+                    status="warning",
+                    message=f"Service TTL expired: {service_name}",
+                    extra={
+                        "service_name": service_name,
+                        "service_type": service_info["service_type"],
+                        "last_heartbeat": service_info["last_heartbeat"],
+                        "ttl_seconds": SERVICE_TTL_SECONDS,
+                        "trace_id": get_trace_id()
+                    }
+                )
+                
+                if SENTRY_AVAILABLE:
+                    capture_message(
+                        f"Service TTL expired: {service_name}",
+                        level="warning"
+                    )
+    
+    return expired_services
+
+# ------------------------------------------------------------------
+# Phase 11-F: Counter Reset Detection
+# ------------------------------------------------------------------
+def detect_counter_reset(service_name: str, metric_name: str, current_value: float, previous_value: float) -> bool:
+    """Detect if a counter has reset (decreased significantly)."""
+    if previous_value is None or current_value >= previous_value:
+        return False
+    
+    decrease_ratio = (previous_value - current_value) / previous_value if previous_value > 0 else 1.0
+    
+    if decrease_ratio > COUNTER_RESET_THRESHOLD:
+        _safe_inc(_global_metrics_counter_resets_total, {
+            "service": service_name,
+            "metric_name": metric_name
+        })
+        
+        log_event(
+            service="global_metrics_store",
+            event="counter_reset_detected",
+            status="info",
+            message=f"Counter reset detected: {metric_name}",
+            extra={
+                "service_name": service_name,
+                "metric_name": metric_name,
+                "previous_value": previous_value,
+                "current_value": current_value,
+                "decrease_ratio": decrease_ratio,
+                "trace_id": get_trace_id()
+            }
+        )
+        
+        return True
+    
+    return False
+
+# ------------------------------------------------------------------
+# Phase 11-F: Enhanced Snapshot Management
 # ------------------------------------------------------------------
 def get_global_snapshot() -> dict:
-    """Return the current in-memory global snapshot."""
+    """Return the current in-memory global snapshot with service info."""
     with _snapshot_lock:
-        return copy.deepcopy(GLOBAL_METRICS_SNAPSHOT)  # ← FIX: Use deepcopy instead of shallow copy
+        snapshot = copy.deepcopy(GLOBAL_METRICS_SNAPSHOT)
+        snapshot["services"] = copy.deepcopy(_SERVICE_REGISTRY)
+        return snapshot
 
 def _update_global_snapshot(new_snapshot: Dict[str, Any]) -> None:
-    """Update the global snapshot with thread safety."""
+    """Update the global snapshot with enhanced service support."""
     with _snapshot_lock:
         try:
-            _safe_inc(globals().get('_global_metrics_total_merges'))  # ← FIX: Safe metric increment
+            service_name = new_snapshot.get("service_name", "unknown")
             
-            # Merge counters (sum values)
+            # Update service heartbeat
+            update_service_heartbeat(service_name, new_snapshot.get("service_type", "unknown"))
+            
+            _safe_inc(_global_metrics_total_merges, {"service": service_name})
+            
+            # Initialize service structure if not exists
+            if service_name not in GLOBAL_METRICS_SNAPSHOT["counters"]:
+                GLOBAL_METRICS_SNAPSHOT["counters"][service_name] = {}
+            if service_name not in GLOBAL_METRICS_SNAPSHOT["gauges"]:
+                GLOBAL_METRICS_SNAPSHOT["gauges"][service_name] = {}
+            if service_name not in GLOBAL_METRICS_SNAPSHOT["latencies"]:
+                GLOBAL_METRICS_SNAPSHOT["latencies"][service_name] = {}
+            
+            # Merge counters with reset detection
             if "counters" in new_snapshot:
                 for key, value in new_snapshot["counters"].items():
-                    if key in GLOBAL_METRICS_SNAPSHOT["counters"]:
-                        GLOBAL_METRICS_SNAPSHOT["counters"][key] += value
+                    previous_value = GLOBAL_METRICS_SNAPSHOT["counters"][service_name].get(key)
+                    if detect_counter_reset(service_name, key, value, previous_value):
+                        # Reset detected, use current value
+                        GLOBAL_METRICS_SNAPSHOT["counters"][service_name][key] = value
                     else:
-                        GLOBAL_METRICS_SNAPSHOT["counters"][key] = value
+                        # Normal merge
+                        if key in GLOBAL_METRICS_SNAPSHOT["counters"][service_name]:
+                            GLOBAL_METRICS_SNAPSHOT["counters"][service_name][key] += value
+                        else:
+                            GLOBAL_METRICS_SNAPSHOT["counters"][service_name][key] = value
             
             # Update gauges (replace values)
             if "gauges" in new_snapshot:
-                GLOBAL_METRICS_SNAPSHOT["gauges"].update(new_snapshot["gauges"])
+                GLOBAL_METRICS_SNAPSHOT["gauges"][service_name].update(new_snapshot["gauges"])
             
-            # Merge latency stats (weighted average if applicable)
+            # Merge latency stats
             if "latencies" in new_snapshot:
                 for key, new_stats in new_snapshot["latencies"].items():
-                    if key in GLOBAL_METRICS_SNAPSHOT["latencies"]:
-                        # Simple merge - in production you might want weighted average
-                        old_stats = GLOBAL_METRICS_SNAPSHOT["latencies"][key]
-                        # Add boundary checks for min/max
+                    if key in GLOBAL_METRICS_SNAPSHOT["latencies"][service_name]:
+                        old_stats = GLOBAL_METRICS_SNAPSHOT["latencies"][service_name][key]
                         old_min = old_stats.get("min", float('inf'))
                         new_min = new_stats.get("min", float('inf'))
                         old_max = old_stats.get("max", 0)
                         new_max = new_stats.get("max", 0)
                         
-                        # Handle infinity cases
                         if old_min == float('inf'):
                             old_min = 0
                         if new_min == float('inf'):
@@ -290,34 +383,163 @@ def _update_global_snapshot(new_snapshot: Dict[str, Any]) -> None:
                             "min": min(old_min, new_min),
                             "max": max(old_max, new_max)
                         }
-                        GLOBAL_METRICS_SNAPSHOT["latencies"][key] = merged_stats
+                        GLOBAL_METRICS_SNAPSHOT["latencies"][service_name][key] = merged_stats
                     else:
-                        GLOBAL_METRICS_SNAPSHOT["latencies"][key] = new_stats
+                        GLOBAL_METRICS_SNAPSHOT["latencies"][service_name][key] = new_stats
             
             GLOBAL_METRICS_SNAPSHOT["last_sync"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             
         except Exception as e:
-            _safe_inc(globals().get('_global_metrics_merge_failures_total'))  # ← FIX: Safe metric increment
+            error_type = type(e).__name__
+            _safe_inc(_global_metrics_merge_failures_total, {
+                "service": service_name,
+                "error_type": error_type
+            })
+            
             log_event(
                 service="global_metrics_store",
                 event="snapshot_merge_failed",
                 status="error",
                 message="Failed to merge metrics snapshot",
-                extra={"error": str(e), "stack": traceback.format_exc(), "trace_id": get_trace_id()}
+                extra={
+                    "error": str(e),
+                    "error_type": error_type,
+                    "stack": traceback.format_exc(),
+                    "trace_id": get_trace_id()
+                }
             )
+            
+            if SENTRY_AVAILABLE:
+                capture_exception(e)
 
-def _build_combined_snapshot() -> Dict[str, Any]:
+# ------------------------------------------------------------------
+# Phase 11-F: Enhanced Metric Publishing Helper
+# ------------------------------------------------------------------
+def publish_metric(name: str, value: float, labels: Dict[str, str] = None, metric_type: str = "gauge") -> bool:
     """
-    Compose a combined snapshot object using:
-      - metrics_collector.get_snapshot() (structured counters/latencies)
-      - textual registry export (generate_latest(REGISTRY).decode())
-    Returns a dict ready for JSON serialization.
+    Publish a metric to the global metrics store.
+    
+    Args:
+        name: Metric name
+        value: Metric value
+        labels: Dictionary of labels
+        metric_type: Type of metric ('counter', 'gauge', 'histogram')
+    
+    Returns:
+        bool: True if successful, False otherwise
     """
     try:
+        service_name = labels.get("service", SERVICE_NAME) if labels else SERVICE_NAME
+        labels = labels or {}
+        
+        # Update service heartbeat
+        update_service_heartbeat(service_name, labels.get("service_type", "unknown"))
+        
+        # Track metric publication
+        _safe_inc(_global_metrics_publish_total, {
+            "service": service_name,
+            "metric_type": metric_type
+        })
+        
+        # Store in appropriate snapshot category
+        with _snapshot_lock:
+            if metric_type == "counter":
+                if service_name not in GLOBAL_METRICS_SNAPSHOT["counters"]:
+                    GLOBAL_METRICS_SNAPSHOT["counters"][service_name] = {}
+                
+                metric_key = f"{name}_{'_'.join(f'{k}_{v}' for k, v in sorted(labels.items()))}"
+                previous_value = GLOBAL_METRICS_SNAPSHOT["counters"][service_name].get(metric_key, 0)
+                
+                if detect_counter_reset(service_name, name, value, previous_value):
+                    GLOBAL_METRICS_SNAPSHOT["counters"][service_name][metric_key] = value
+                else:
+                    GLOBAL_METRICS_SNAPSHOT["counters"][service_name][metric_key] = previous_value + value
+                    
+            elif metric_type == "gauge":
+                if service_name not in GLOBAL_METRICS_SNAPSHOT["gauges"]:
+                    GLOBAL_METRICS_SNAPSHOT["gauges"][service_name] = {}
+                
+                metric_key = f"{name}_{'_'.join(f'{k}_{v}' for k, v in sorted(labels.items()))}"
+                GLOBAL_METRICS_SNAPSHOT["gauges"][service_name][metric_key] = value
+                
+            elif metric_type == "histogram":
+                if service_name not in GLOBAL_METRICS_SNAPSHOT["latencies"]:
+                    GLOBAL_METRICS_SNAPSHOT["latencies"][service_name] = {}
+                
+                if name not in GLOBAL_METRICS_SNAPSHOT["latencies"][service_name]:
+                    GLOBAL_METRICS_SNAPSHOT["latencies"][service_name][name] = {
+                        "avg": value,
+                        "count": 1,
+                        "min": value,
+                        "max": value
+                    }
+                else:
+                    stats = GLOBAL_METRICS_SNAPSHOT["latencies"][service_name][name]
+                    stats["avg"] = (stats["avg"] * stats["count"] + value) / (stats["count"] + 1)
+                    stats["count"] += 1
+                    stats["min"] = min(stats["min"], value)
+                    stats["max"] = max(stats["max"], value)
+        
+        log_event(
+            service="global_metrics_store",
+            event="metric_published",
+            status="debug",
+            message=f"Metric published: {name}",
+            extra={
+                "metric_name": name,
+                "value": value,
+                "metric_type": metric_type,
+                "labels": labels,
+                "service_name": service_name,
+                "trace_id": get_trace_id()
+            }
+        )
+        
+        return True
+        
+    except Exception as e:
+        error_type = type(e).__name__
+        log_event(
+            service="global_metrics_store",
+            event="metric_publish_failed",
+            status="error",
+            message=f"Failed to publish metric: {name}",
+            extra={
+                "error": str(e),
+                "error_type": error_type,
+                "metric_name": name,
+                "value": value,
+                "metric_type": metric_type,
+                "labels": labels,
+                "trace_id": get_trace_id()
+            }
+        )
+        
+        if SENTRY_AVAILABLE:
+            capture_exception(e)
+        
+        return False
+
+# ------------------------------------------------------------------
+# Phase 11-F: Enhanced Combined Snapshot Builder
+# ------------------------------------------------------------------
+def _build_combined_snapshot() -> Dict[str, Any]:
+    """Build enhanced combined snapshot with service aggregation."""
+    try:
+        # Check for expired services
+        expired_services = check_service_ttl()
+        
+        # Clean up expired services from snapshot
+        with _snapshot_lock:
+            for service_name in expired_services:
+                for category in ["counters", "gauges", "latencies"]:
+                    if service_name in GLOBAL_METRICS_SNAPSHOT[category]:
+                        del GLOBAL_METRICS_SNAPSHOT[category][service_name]
+        
         coll_snap = {}
         try:
+            from metrics_collector import get_snapshot
             coll_snap = get_snapshot()
-            # Update global snapshot with new data
             _update_global_snapshot(coll_snap)
         except Exception as e:
             log_event(
@@ -330,8 +552,7 @@ def _build_combined_snapshot() -> Dict[str, Any]:
 
         registry_text = None
         try:
-            if REGISTRY is not None:
-                registry_text = generate_latest(REGISTRY).decode("utf-8")
+            registry_text = generate_latest(registry).decode("utf-8")
         except Exception as e:
             log_event(
                 service="global_metrics_store",
@@ -342,15 +563,18 @@ def _build_combined_snapshot() -> Dict[str, Any]:
             )
 
         payload = {
-            "schema": "v1",  # ← FIX: Add schema version for future-proofing
-            "schema_version": "phase_11d_v1",  # Add explicit schema version
+            "schema": "v2",
+            "schema_version": "phase_11f_v1",
             "service": SERVICE_NAME,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "collector_snapshot": coll_snap,
             "registry_text": registry_text,
-            "global_snapshot": get_global_snapshot()
+            "global_snapshot": get_global_snapshot(),
+            "service_registry": _SERVICE_REGISTRY,
+            "expired_services": expired_services
         }
         return payload
+        
     except Exception as e:
         log_event(
             service="global_metrics_store",
@@ -359,24 +583,114 @@ def _build_combined_snapshot() -> Dict[str, Any]:
             message="Failed to build combined snapshot",
             extra={"error": str(e), "stack": traceback.format_exc(), "trace_id": get_trace_id()},
         )
+        if SENTRY_AVAILABLE:
+            capture_exception(e)
         return {
-            "schema": "v1",
-            "schema_version": "phase_11d_v1",
-            "collector_snapshot": {}, 
-            "registry_text": None, 
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            "schema": "v2",
+            "schema_version": "phase_11f_v1",
+            "collector_snapshot": {},
+            "registry_text": None,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "service_registry": {},
+            "expired_services": []
         }
 
+# ------------------------------------------------------------------
+# Phase 11-F: Prometheus Metrics Endpoint
+# ------------------------------------------------------------------
+def get_prometheus_metrics() -> str:
+    """
+    Generate Prometheus metrics exposition format.
+    This can be exposed via a /metrics endpoint.
+    """
+    try:
+        # Generate standard registry metrics
+        metrics_output = generate_latest(registry).decode('utf-8')
+        
+        # Add custom aggregated metrics from global snapshot
+        custom_metrics = []
+        snapshot = get_global_snapshot()
+        
+        # Export counters
+        for service_name, counters in snapshot.get("counters", {}).items():
+            for counter_name, value in counters.items():
+                custom_metrics.append(f'sara_custom_{counter_name}{{service="{service_name}"}} {float(value)}')
+        
+        # Export gauges  
+        for service_name, gauges in snapshot.get("gauges", {}).items():
+            for gauge_name, value in gauges.items():
+                custom_metrics.append(f'sara_custom_{gauge_name}{{service="{service_name}"}} {float(value)}')
+        
+        if custom_metrics:
+            metrics_output += "\n" + "\n".join(custom_metrics)
+        
+        return metrics_output
+        
+    except Exception as e:
+        log_event(
+            service="global_metrics_store",
+            event="prometheus_export_failed",
+            status="error",
+            message="Failed to generate Prometheus metrics",
+            extra={"error": str(e), "trace_id": get_trace_id()}
+        )
+        if SENTRY_AVAILABLE:
+            capture_exception(e)
+        return "# metrics_export_error 1\n"
 
+# ------------------------------------------------------------------
+# Phase 11-F: Existing Redis Integration (Enhanced)
+# ------------------------------------------------------------------
+def _is_redis_circuit_breaker_open() -> bool:
+    """Check if Redis circuit breaker is open."""
+    if not METRICS_CONFIG.get("circuit_breaker_enabled", True):
+        return False
+        
+    try:
+        from redis_client import get_client
+        client = get_client()
+        if not client:
+            return False
+            
+        key = "circuit_breaker:redis:state"
+        state = client.get(key)
+        return state == b"open"
+    except Exception as e:
+        log_event(
+            service="global_metrics_store",
+            event="circuit_breaker_check_failed",
+            status="warn",
+            message="Circuit breaker check failed",
+            extra={"error": str(e), "trace_id": get_trace_id()}
+        )
+        return False
+
+# Local imports (maintain existing functionality)
+try:
+    from metrics_registry import (
+        save_metrics_snapshot,
+        load_metrics_snapshot,
+        push_snapshot_from_collector,
+        restore_snapshot_to_collector,
+    )
+except Exception:
+    def save_metrics_snapshot(x): raise RuntimeError("metrics_registry unavailable")
+    def load_metrics_snapshot(): return {}
+    def push_snapshot_from_collector(f): raise RuntimeError("metrics_registry unavailable")
+    def restore_snapshot_to_collector(m): raise RuntimeError("metrics_registry unavailable")
+
+try:
+    import metrics_collector as metrics_collector
+    from metrics_collector import get_snapshot
+except Exception:
+    metrics_collector = None
+    def get_snapshot(): return {}
+
+# ------------------------------------------------------------------
+# Phase 11-F: Enhanced Sync Operations
+# ------------------------------------------------------------------
 def _sync_once() -> bool:
-    """
-    Perform a single sync operation:
-      - build combined snapshot
-      - push snapshot using push_snapshot_from_collector (if available)
-      - save raw combined snapshot via save_metrics_snapshot
-    Returns True on success (any best-effort portion), False otherwise.
-    """
-    # Phase 11-D: Circuit breaker check
+    """Enhanced sync operation with better error handling and Sentry integration."""
     if _is_redis_circuit_breaker_open():
         log_event(
             service="global_metrics_store",
@@ -390,107 +704,88 @@ def _sync_once() -> bool:
     try:
         snap = _build_combined_snapshot()
 
-        # Try to push via convenience helper (this will call metrics_collector.get_snapshot internally).
+        # Try to push via convenience helper
         pushed = False
         try:
-            # Use push_snapshot_from_collector if available (it expects metrics_collector.get_snapshot)
-            if callable(globals().get('push_snapshot_from_collector')):  # ← FIX: Guard helper call
+            if callable(globals().get('push_snapshot_from_collector')):
                 push_snapshot_from_collector(get_snapshot)
                 pushed = True
-                log_event(service="global_metrics_store", event="pushed_via_helper", status="info",
-                          message="Pushed snapshot via push_snapshot_from_collector",
-                          extra={"trace_id": get_trace_id()})
-            else:
-                log_event(service="global_metrics_store", event="push_helper_missing", status="debug",
-                          message="push_snapshot_from_collector helper not available; skipping",
-                          extra={"trace_id": get_trace_id()})
+                log_event(
+                    service="global_metrics_store",
+                    event="pushed_via_helper", 
+                    status="info",
+                    message="Pushed snapshot via push_snapshot_from_collector",
+                    extra={"trace_id": get_trace_id()}
+                )
         except Exception as e:
-            _safe_inc(globals().get('_global_metrics_redis_sync_failures_total'))  # ← FIX: Safe metric increment
-            log_event(service="global_metrics_store", event="push_helper_failed", status="warn",
-                      message="push_snapshot_from_collector failed (best-effort)",
-                      extra={"error": str(e), "stack": traceback.format_exc(), "trace_id": get_trace_id()})
+            _safe_inc(_global_metrics_redis_sync_failures_total, {
+                "service": SERVICE_NAME,
+                "operation": "push_helper"
+            })
+            log_event(
+                service="global_metrics_store",
+                event="push_helper_failed",
+                status="warn", 
+                message="push_snapshot_from_collector failed (best-effort)",
+                extra={"error": str(e), "stack": traceback.format_exc(), "trace_id": get_trace_id()}
+            )
+            if SENTRY_AVAILABLE:
+                capture_exception(e)
 
-        # Always attempt to save the combined payload to a Redis key via save_metrics_snapshot
+        # Save combined payload to Redis
         saved = False
         try:
             save_metrics_snapshot(snap)
             saved = True
-            _safe_set_time(_global_metrics_last_sync_timestamp)  # ← FIX: Use the correct gauge variable
-            update_global_metrics_timestamp()  # Update the global timestamp
-            log_event(service="global_metrics_store", event="saved_snapshot", status="info",
-                      message="Saved combined snapshot via save_metrics_snapshot",
-                      extra={"trace_id": get_trace_id()})
+            _safe_set_time(_global_metrics_last_sync_timestamp, {"service": SERVICE_NAME})
+            log_event(
+                service="global_metrics_store", 
+                event="saved_snapshot",
+                status="info",
+                message="Saved combined snapshot via save_metrics_snapshot",
+                extra={"trace_id": get_trace_id()}
+            )
         except Exception as e:
-            _safe_inc(globals().get('_global_metrics_redis_sync_failures_total'))  # ← FIX: Safe metric increment
-            log_event(service="global_metrics_store", event="save_snapshot_failed", status="warn",
-                      message="save_metrics_snapshot failed (best-effort)",
-                      extra={"error": str(e), "stack": traceback.format_exc(), "trace_id": get_trace_id()})
+            _safe_inc(_global_metrics_redis_sync_failures_total, {
+                "service": SERVICE_NAME, 
+                "operation": "save_snapshot"
+            })
+            log_event(
+                service="global_metrics_store",
+                event="save_snapshot_failed",
+                status="warn",
+                message="save_metrics_snapshot failed (best-effort)",
+                extra={"error": str(e), "stack": traceback.format_exc(), "trace_id": get_trace_id()}
+            )
+            if SENTRY_AVAILABLE:
+                capture_exception(e)
 
         return pushed or saved
+        
     except Exception as e:
-        _safe_inc(globals().get('_global_metrics_redis_sync_failures_total'))  # ← FIX: Safe metric increment
-        log_event(service="global_metrics_store", event="sync_failed", status="error",
-                  message="Unhandled error during _sync_once", 
-                  extra={"error": str(e), "stack": traceback.format_exc(), "trace_id": get_trace_id()})
-        return False
-
-
-def _restore_once() -> bool:
-    """
-    Attempt a best-effort restore from Redis:
-      - load a raw snapshot via load_metrics_snapshot()
-      - if snapshot present, call restore_snapshot_to_collector(metrics_collector)
-    """
-    # Phase 11-D: Circuit breaker check
-    if _is_redis_circuit_breaker_open():
+        _safe_inc(_global_metrics_redis_sync_failures_total, {
+            "service": SERVICE_NAME,
+            "operation": "sync_once"
+        })
         log_event(
             service="global_metrics_store",
-            event="redis_circuit_breaker_open_restore",
-            status="warn",
-            message="Skipped Redis restore due to circuit breaker open",
-            extra={"trace_id": get_trace_id()}
+            event="sync_failed",
+            status="error",
+            message="Unhandled error during _sync_once", 
+            extra={"error": str(e), "stack": traceback.format_exc(), "trace_id": get_trace_id()}
         )
+        if SENTRY_AVAILABLE:
+            capture_exception(e)
         return False
 
-    try:
-        try:
-            snap = load_metrics_snapshot() or {}
-        except Exception as e:
-            log_event(service="global_metrics_store", event="load_snapshot_failed", status="warn",
-                      message="load_metrics_snapshot failed",
-                      extra={"error": str(e), "stack": traceback.format_exc(), "trace_id": get_trace_id()})
-            snap = {}
-
-        restored = False
-        if snap:
-            try:
-                # Primary restore path: let metrics_registry.restore_snapshot_to_collector do the work
-                restore_snapshot_to_collector(metrics_collector)
-                restored = True
-                log_event(service="global_metrics_store", event="restored_snapshot", status="info",
-                          message="Restored snapshot via restore_snapshot_to_collector",
-                          extra={"trace_id": get_trace_id()})
-            except Exception as e:
-                log_event(service="global_metrics_store", event="restore_failed", status="warn",
-                          message="restore_snapshot_to_collector failed (best-effort)",
-                          extra={"error": str(e), "stack": traceback.format_exc(), "trace_id": get_trace_id()})
-        else:
-            log_event(service="global_metrics_store", event="no_snapshot_found", status="info",
-                      message="No snapshot found at startup",
-                      extra={"trace_id": get_trace_id()})
-        return restored
-    except Exception as e:
-        log_event(service="global_metrics_store", event="restore_unhandled_error", status="error",
-                  message="Unhandled error during _restore_once", 
-                  extra={"error": str(e), "stack": traceback.format_exc(), "trace_id": get_trace_id()})
-        return False
-
+# ------------------------------------------------------------------
+# Phase 11-F: Maintain Existing Background Sync Functionality
+# ------------------------------------------------------------------
+_sync_thread: Optional[threading.Thread] = None
+_stop_event: Optional[threading.Event] = None
 
 def _sync_loop(interval_sec: int) -> None:
-    """
-    Background thread target — runs until stop_event is set.
-    Performs restore on first iteration, then periodically syncs.
-    """
+    """Background thread target with enhanced logging."""
     log_event(
         service="global_metrics_store",
         event="sync_thread_start",
@@ -501,59 +796,67 @@ def _sync_loop(interval_sec: int) -> None:
     
     # First restore attempt
     try:
-        _restore_once()
-    except Exception:
-        pass
-
-    while _stop_event is not None and not _stop_event.is_set():  # ← FIX: Defensive _stop_event check
-        # Log cycle start for monitoring
+        from metrics_registry import restore_snapshot_to_collector
+        restore_snapshot_to_collector(metrics_collector)
+    except Exception as e:
         log_event(
             service="global_metrics_store",
-            event="sync_cycle_start",
-            status="debug", 
-            message="Sync cycle starting",
-            extra={"trace_id": get_trace_id()}
+            event="initial_restore_failed",
+            status="warn",
+            message="Initial restore failed",
+            extra={"error": str(e), "trace_id": get_trace_id()}
         )
-        
+
+    while _stop_event is not None and not _stop_event.is_set():
         try:
             ok = _sync_once()
             if not ok:
-                # log at info as we expect occasional failures (Redis unavailable)
-                log_event(service="global_metrics_store", event="sync_cycle_noop", status="info",
-                          message="Sync cycle completed with no-op (best-effort)",
-                          extra={"trace_id": get_trace_id()})
+                log_event(
+                    service="global_metrics_store",
+                    event="sync_cycle_noop", 
+                    status="info",
+                    message="Sync cycle completed with no-op (best-effort)",
+                    extra={"trace_id": get_trace_id()}
+                )
         except Exception as e:
-            log_event(service="global_metrics_store", event="sync_cycle_error", status="warn",
-                      message="Exception during sync cycle", 
-                      extra={"error": str(e), "stack": traceback.format_exc(), "trace_id": get_trace_id()})
-        # wait but allow timely shutdown
-        if _stop_event:  # ← FIX: Additional defensive check
+            log_event(
+                service="global_metrics_store",
+                event="sync_cycle_error",
+                status="warn",
+                message="Exception during sync cycle", 
+                extra={"error": str(e), "stack": traceback.format_exc(), "trace_id": get_trace_id()}
+            )
+            if SENTRY_AVAILABLE:
+                capture_exception(e)
+                
+        if _stop_event:
             _stop_event.wait(interval_sec)
 
-    log_event(service="global_metrics_store", event="sync_thread_stop", status="info",
-              message="Global metrics sync thread stopping",
-              extra={"trace_id": get_trace_id()})
-
+    log_event(
+        service="global_metrics_store",
+        event="sync_thread_stop",
+        status="info",
+        message="Global metrics sync thread stopping",
+        extra={"trace_id": get_trace_id()}
+    )
 
 def start_background_sync(service_name: str = None, interval_sec: int = None) -> None:
-    """
-    Start the background sync thread (idempotent).
-    Should be called once at service startup (app.py, streaming_server.py, tasks.py).
-    """
-    global _sync_thread, _stop_event, SERVICE_NAME  # ← FIX: Include SERVICE_NAME in global declaration
+    """Start the background sync thread (idempotent)."""
+    global _sync_thread, _stop_event, SERVICE_NAME
     
-    # Reset SERVICE_NAME if provided - FIXED: No direct os.environ access
     if service_name:
         SERVICE_NAME = service_name
-    # Otherwise keep the SERVICE_NAME from config initialization
         
     if _sync_thread and _sync_thread.is_alive():
-        log_event(service="global_metrics_store", event="sync_already_running", status="info",
-                  message="Background metrics sync already running",
-                  extra={"trace_id": get_trace_id()})
+        log_event(
+            service="global_metrics_store",
+            event="sync_already_running", 
+            status="info",
+            message="Background metrics sync already running",
+            extra={"trace_id": get_trace_id()}
+        )
         return
 
-    # Enforce minimum interval
     sync_interval = max(5, interval_sec or SNAPSHOT_INTERVAL)
     _stop_event = threading.Event()
     _sync_thread = threading.Thread(
@@ -572,52 +875,53 @@ def start_background_sync(service_name: str = None, interval_sec: int = None) ->
         extra={"interval": sync_interval, "service_name": SERVICE_NAME, "trace_id": get_trace_id()}
     )
 
-
 def stop_background_sync(timeout_sec: Optional[int] = 5) -> None:
-    """Stop the background sync thread gracefully (best-effort)."""
+    """Stop the background sync thread gracefully."""
     global _sync_thread, _stop_event
     if not _sync_thread:
         return
     try:
         if _stop_event:
             _stop_event.set()
-        # Only join if thread is alive
         if _sync_thread.is_alive():
             _sync_thread.join(timeout=timeout_sec)
     except Exception as e:
-        log_event(service="global_metrics_store", event="stop_sync_failed", status="warn",
-                  message="Failed to stop sync thread cleanly", 
-                  extra={"error": str(e), "stack": traceback.format_exc(), "trace_id": get_trace_id()})
+        log_event(
+            service="global_metrics_store",
+            event="stop_sync_failed",
+            status="warn",
+            message="Failed to stop sync thread cleanly", 
+            extra={"error": str(e), "stack": traceback.format_exc(), "trace_id": get_trace_id()}
+        )
     finally:
         _sync_thread = None
         _stop_event = None
 
 # ------------------------------------------------------------------
-# Phase 11-D: Export Functionality
+# Phase 11-F: Export Enhanced Functionality
 # ------------------------------------------------------------------
-def export_prometheus_snapshot() -> str:
-    """Return Prometheus text exposition for the global registry."""
+def metrics_safe_sync():
+    """Safe sync for external use."""
     try:
-        from metrics_registry import export_prometheus
-        result = export_prometheus()
-        return result if isinstance(result, str) else result.decode('utf-8', errors='replace')
+        return _sync_once()
     except Exception as e:
         log_event(
             service="global_metrics_store",
-            event="prometheus_export_failed",
+            event="safe_sync_failed",
             status="error",
-            message="Failed to export Prometheus snapshot",
+            message="metrics_safe_sync failed",
             extra={"error": str(e), "trace_id": get_trace_id()}
         )
-        return "# metrics_export_error 1\n"
+        return False
 
-# === Phase 11-E FinalTouch: Duplicate metric guard ===
-try:
-    if 'global_metrics_last_sync_timestamp' not in registry._names_to_collectors:
-        global_metrics_last_sync_timestamp = Gauge(
-            'global_metrics_last_sync_timestamp', 'Last successful global metrics sync timestamp'
-        )
-        registry.register(global_metrics_last_sync_timestamp)
-except Exception as e:
-    import logging
-    logging.getLogger(__name__).warning(f'Metric guard applied: {e}')
+# Export the key new functionality
+__all__ = [
+    'publish_metric',
+    'get_prometheus_metrics', 
+    'update_service_heartbeat',
+    'check_service_ttl',
+    'get_global_snapshot',
+    'start_background_sync',
+    'stop_background_sync',
+    'metrics_safe_sync'
+]

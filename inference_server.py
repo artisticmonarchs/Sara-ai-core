@@ -1,5 +1,5 @@
 """
-inference_server.py — Phase 11-D Compliant
+inference_server.py — Phase 12 Compliant
 Inference server with trace propagation, centralized config, and unified metrics.
 """
 
@@ -10,9 +10,32 @@ from typing import Tuple, Optional
 
 from flask import Flask, request, jsonify
 from werkzeug.exceptions import HTTPException
+import signal
+import sys
 
-# Phase 11-D: Use centralized config only
-from config import Config
+def _graceful_shutdown(signum, frame):
+    """Phase 12: Graceful shutdown handler"""
+    from logging_utils import log_event
+    log_event(
+        service="inference_server",
+        event="shutdown",
+        status="info",
+        message=f"Received signal {signum}, shutting down gracefully..."
+    )
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, _graceful_shutdown)
+signal.signal(signal.SIGTERM, _graceful_shutdown)
+
+
+# Phase 12: Use centralized config instance (not class)
+from config import config
+
+# Phase 12: Set Flask JSON compact mode (performance)
+app = Flask(__name__)
+app.config["JSONIFY_PRETTYPRINT_REGULAR"] = False
+
+SERVICE_NAME = "inference_server"
 
 # Phase 11-D: Defer metrics imports to avoid circular dependencies
 def _get_metrics():
@@ -38,8 +61,6 @@ from redis_client import get_client, safe_redis_operation
 # ------------------------------------------------------------------
 # Phase 11-D: Application Initialization (No side effects at import)
 # ------------------------------------------------------------------
-app = Flask(__name__)
-SERVICE_NAME = "inference_server"
 
 # Redis client for lightweight metrics (lazy initialization)
 _redis_client = None
@@ -530,7 +551,15 @@ if __name__ == "__main__":
         service=SERVICE_NAME,
         event="startup",
         status="info",
-        message=f"Starting {SERVICE_NAME} on port {getattr(Config, 'INFERENCE_PORT', 7000)}",
-        trace_id=get_trace_id()
+        message=f"Starting {SERVICE_NAME} on port {config.INFERENCE_PORT} [Phase {config.SARA_PHASE}]",
+        trace_id=get_trace_id(),
+        extra={"phase_version": config.PHASE_VERSION}
     )
-    app.run(host="0.0.0.0", port=int(getattr(Config, 'INFERENCE_PORT', 7000)))
+
+    # Phase 12: Record startup metric
+    try:
+        increment_metric("inference_server_startups_total")
+    except Exception:
+        pass
+
+    app.run(host="0.0.0.0", port=config.INFERENCE_PORT)

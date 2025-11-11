@@ -1,10 +1,10 @@
-# Procfile — Sara AI Core (Phase 6 Ready, Flattened Structure)
+# Procfile — aligns with Render service commands
 
-# Main Flask API (inference + TTS endpoints)
-web: gunicorn -k uvicorn.workers.UvicornWorker app:app --bind 0.0.0.0:$PORT
+# Web API (Flask/Gunicorn)
+web: gunicorn app:app --workers 2 --threads 4 --bind 0.0.0.0:${PORT:-5000} --timeout 120 --log-level info
 
-# Streaming Server (for Twilio Media Streams)
+# Streaming server (Twilio Media Streams)
 streaming: python -m streaming_server
 
-# Celery Worker (background async processing)
-worker: celery -A celery_app.celery worker --loglevel=info
+# Celery Worker (Celery instance exposed as `celery` in celery_app.py)
+worker: celery -A celery_app.celery worker --loglevel=info --concurrency=1

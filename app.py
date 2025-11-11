@@ -8,6 +8,27 @@ import time
 import traceback
 from flask import Flask, request, jsonify, Response
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+import signal
+import sys
+import logging
+
+# Minimal process logger (prevents NameError in signal handler)
+logger = logging.getLogger("sara.app")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
+
+def _graceful_shutdown(signum, frame):
+    """Phase 12: Graceful shutdown handler"""
+    try:
+        logger.info(f"Received signal {signum}, shutting down gracefully...")
+    except Exception:
+        # Fallback: never let signal handler crash
+        sys.stderr.write(f"[shutdown] signal={signum}\n")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, _graceful_shutdown)
+signal.signal(signal.SIGTERM, _graceful_shutdown)
+
 
 # --------------------------------------------------------------------------
 # Phase 11-D Configuration Isolation
@@ -19,6 +40,7 @@ except ImportError:
     import os
     class Config:
         PORT = int(os.getenv("PORT", "5000"))
+        # TODO: Move hardcoded port number to config.py
         R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME")
 
 # --------------------------------------------------------------------------
@@ -70,7 +92,7 @@ def _initialize_metrics_sync():
         log_event(service="app", event="global_metrics_sync_failed", status="error",
                   message="Failed to start background metrics sync",
                   extra={"error": str(e), "stack": traceback.format_exc()})
-
+        
 def _initialize_metrics_restore():
     """Lazy metrics restore - called on first request"""
     try:
@@ -183,8 +205,8 @@ except Exception as e:
 # Twilio Integration (Phase 11-D)
 # --------------------------------------------------------------------------
 try:
-    from twilio_router import twilio_bp  # unified router blueprint
-    app.register_blueprint(twilio_bp, url_prefix="/twilio")
+    from twilio_router import twilio_router_bp  # unified router blueprint
+    app.register_blueprint(twilio_router_bp, url_prefix="/twilio")
     log_event(
         service="app",
         event="twilio_router_registered",
@@ -200,8 +222,8 @@ except Exception as e:
         extra={"error": str(e), "stack": traceback.format_exc()}
     )
 
-# Phase 11-D: Run system validation at startup
-startup_components = validate_system_dependencies()
+# Phase 11-D: Startup components will be validated lazily at process start.
+startup_components = {}
 
 # --------------------------------------------------------------------------
 # Enhanced Health check endpoints
@@ -253,6 +275,12 @@ def healthz():
         return jsonify({"status": "error", "message": str(e), "trace_id": trace_id}), 500
 
 
+# Alias for infra that probes /health instead of /healthz
+@app.route("/health", methods=["GET"])
+def health():
+    return healthz()
+
+
 @app.route("/system_status", methods=["GET"])
 def system_status():
     trace_id = get_trace_id()
@@ -287,6 +315,7 @@ def check_r2_connection(trace_id=None, session_id=None):
             if callable(r2_check):
                 ok, meta = r2_check(client=client, bucket=Config.R2_BUCKET_NAME)
                 latency_ms = round((time.time() - start) * 1000, 2)
+                # TODO: Move hardcoded port number to config.py
                 if ok:
                     get_metrics().inc_metric("r2_health_checks_ok_total")
                     log_event(
@@ -314,6 +343,7 @@ def check_r2_connection(trace_id=None, session_id=None):
                 bucket = Config.R2_BUCKET_NAME
                 client.list_objects_v2(Bucket=bucket, MaxKeys=1)
                 latency_ms = round((time.time() - start) * 1000, 2)
+                # TODO: Move hardcoded port number to config.py
                 get_metrics().inc_metric("r2_health_checks_ok_total")
                 log_event(
                     service="app",
@@ -360,11 +390,26 @@ def r2_status():
 # --------------------------------------------------------------------------
 # Metrics snapshot restore and persistence
 # --------------------------------------------------------------------------
-@app.route("/metrics_snapshot", methods=["POST"])
+@app.route("/metrics_snapshot", methods=["GET", "POST"])  # CHANGED: Added GET method
 def metrics_snapshot():
     trace_id = get_trace_id()
     try:
         get_metrics().inc_metric("api_metrics_snapshot_requests_total")
+        
+        # For GET requests, return current snapshot without restoring
+        if request.method == "GET":
+            try:
+                snapshot = get_metrics().get_snapshot()
+                log_event(service="app", event="metrics_snapshot_retrieved", status="ok",
+                          message="Metrics snapshot retrieved via GET", trace_id=trace_id)
+                return jsonify({"status": "ok", "snapshot": snapshot, "trace_id": trace_id})
+            except Exception as e:
+                log_event(service="app", event="metrics_snapshot_retrieve_failed", status="error",
+                          message="Failed to retrieve metrics snapshot", trace_id=trace_id,
+                          extra={"error": str(e)})
+                return jsonify({"status": "error", "message": str(e), "trace_id": trace_id}), 500
+        
+        # For POST requests, restore and persist (original behavior)
         restore_metrics_snapshot()
         log_event(service="app", event="metrics_snapshot_restored", status="ok",
                   message="Metrics snapshot restored via API", trace_id=trace_id)
@@ -560,12 +605,180 @@ def readiness_probe():
 
 
 # --------------------------------------------------------------------------
+# Phase 11-D: Outbound Call and Duplex Streaming Placeholders
+# --------------------------------------------------------------------------
+@app.route("/outbound_call", methods=["POST"])
+def outbound_call():
+    """Placeholder for outbound call functionality (lazy-loads outbound_dialer)."""
+    trace_id = get_trace_id()
+    try:
+        get_metrics().inc_metric("api_outbound_call_requests_total")
+
+        # Lazy import so missing outbound_dialer does not break import-time.
+        try:
+            from outbound_dialer import handle_outbound_call  # type: ignore
+        except Exception:
+            handle_outbound_call = None
+
+        if callable(handle_outbound_call):
+            # delegate to the real implementation if present
+            try:
+                result = handle_outbound_call(request)
+                log_event(service="app", event="outbound_call_dispatched", status="ok",
+                          message="Outbound call delegated to outbound_dialer", trace_id=trace_id)
+                return jsonify({"status": "ok", "result": result, "trace_id": trace_id})
+            except Exception as e:
+                # log and fallthrough to stub response
+                log_event(service="app", event="outbound_call_handler_error", status="error",
+                          message=str(e), trace_id=trace_id, extra={"stack": traceback.format_exc()})
+
+        # fallback stub
+        log_event(service="app", event="outbound_call_stub", status="ok",
+                  message="Outbound call stub endpoint called", trace_id=trace_id)
+        return jsonify({"status": "ok", "message": "stub", "trace_id": trace_id})
+    except Exception as e:
+        get_metrics().inc_metric("api_outbound_call_failures_total")
+        log_event(service="app", event="outbound_call_stub_error", status="error",
+                  message=str(e), trace_id=trace_id)
+        return jsonify({"status": "error", "message": str(e), "trace_id": trace_id}), 500
+
+@app.route("/duplex_stream/start", methods=["POST"])
+def duplex_stream_start():
+    """Placeholder for duplex stream start functionality (lazy-loads duplex_voice_controller)."""
+    trace_id = get_trace_id()
+    try:
+        get_metrics().inc_metric("api_duplex_stream_start_requests_total")
+
+        try:
+            from duplex_voice_controller import start_session  # type: ignore
+        except Exception:
+            start_session = None
+
+        if callable(start_session):
+            try:
+                result = start_session(request)
+                log_event(service="app", event="duplex_stream_start_delegated", status="ok",
+                          message="duplex start delegated", trace_id=trace_id)
+                return jsonify({"status": "ok", "result": result, "trace_id": trace_id})
+            except Exception as e:
+                log_event(service="app", event="duplex_start_handler_error", status="error",
+                          message=str(e), trace_id=trace_id, extra={"stack": traceback.format_exc()})
+
+        log_event(service="app", event="duplex_stream_start_stub", status="ok",
+                  message="Duplex stream start stub endpoint called", trace_id=trace_id)
+        return jsonify({"status": "ok", "message": "stub", "trace_id": trace_id})
+    except Exception as e:
+        get_metrics().inc_metric("api_duplex_stream_start_failures_total")
+        log_event(service="app", event="duplex_stream_start_stub_error", status="error",
+                  message=str(e), trace_id=trace_id)
+        return jsonify({"status": "error", "message": str(e), "trace_id": trace_id}), 500
+
+@app.route("/duplex_stream/chunk", methods=["POST"])
+def duplex_stream_chunk():
+    """Placeholder for duplex stream chunk functionality (lazy-loads duplex_voice_controller)."""
+    trace_id = get_trace_id()
+    try:
+        get_metrics().inc_metric("api_duplex_stream_chunk_requests_total")
+
+        try:
+            from duplex_voice_controller import handle_chunk  # type: ignore
+        except Exception:
+            handle_chunk = None
+
+        if callable(handle_chunk):
+            try:
+                result = handle_chunk(request)
+                log_event(service="app", event="duplex_stream_chunk_delegated", status="ok",
+                          message="duplex chunk delegated", trace_id=trace_id)
+                return jsonify({"status": "ok", "result": result, "trace_id": trace_id})
+            except Exception as e:
+                log_event(service="app", event="duplex_chunk_handler_error", status="error",
+                          message=str(e), trace_id=trace_id, extra={"stack": traceback.format_exc()})
+
+        log_event(service="app", event="duplex_stream_chunk_stub", status="ok",
+                  message="Duplex stream chunk stub endpoint called", trace_id=trace_id)
+        return jsonify({"status": "ok", "message": "stub", "trace_id": trace_id})
+    except Exception as e:
+        get_metrics().inc_metric("api_duplex_stream_chunk_failures_total")
+        log_event(service="app", event="duplex_stream_chunk_stub_error", status="error",
+                  message=str(e), trace_id=trace_id)
+        return jsonify({"status": "error", "message": str(e), "trace_id": trace_id}), 500
+
+@app.route("/duplex_stream/end", methods=["POST"])
+def duplex_stream_end():
+    """Placeholder for duplex stream end functionality (lazy-loads duplex_voice_controller)."""
+    trace_id = get_trace_id()
+    try:
+        get_metrics().inc_metric("api_duplex_stream_end_requests_total")
+
+        try:
+            from duplex_voice_controller import end_session  # type: ignore
+        except Exception:
+            end_session = None
+
+        if callable(end_session):
+            try:
+                result = end_session(request)
+                log_event(service="app", event="duplex_stream_end_delegated", status="ok",
+                          message="duplex end delegated", trace_id=trace_id)
+                return jsonify({"status": "ok", "result": result, "trace_id": trace_id})
+            except Exception as e:
+                log_event(service="app", event="duplex_end_handler_error", status="error",
+                          message=str(e), trace_id=trace_id, extra={"stack": traceback.format_exc()})
+
+        log_event(service="app", event="duplex_stream_end_stub", status="ok",
+                  message="Duplex stream end stub endpoint called", trace_id=trace_id)
+        return jsonify({"status": "ok", "message": "stub", "trace_id": trace_id})
+    except Exception as e:
+        get_metrics().inc_metric("api_duplex_stream_end_failures_total")
+        log_event(service="app", event="duplex_stream_end_stub_error", status="error",
+                  message=str(e), trace_id=trace_id)
+        return jsonify({"status": "error", "message": str(e), "trace_id": trace_id}), 500
+
+# --------------------------------------------------------------------------
+# Conversation Metrics Snapshot Endpoint
+# --------------------------------------------------------------------------
+@app.route("/conversation_metrics_snapshot", methods=["GET"])
+def conversation_metrics_snapshot():
+    """Expose conversation metrics snapshot"""
+    trace_id = get_trace_id()
+    try:
+        get_metrics().inc_metric("api_conversation_metrics_snapshot_requests_total")
+        # Use existing metrics snapshot functionality
+        from metrics_collector import push_snapshot_from_collector
+        try:
+            pushed = push_snapshot_from_collector(get_metrics().get_snapshot)
+        except TypeError:
+            pushed = push_snapshot_from_collector(get_metrics().get_snapshot())
+        
+        if pushed:
+            log_event(service="app", event="conversation_metrics_snapshot_pushed", status="ok",
+                      message="Conversation metrics snapshot pushed", trace_id=trace_id)
+        else:
+            log_event(service="app", event="conversation_metrics_snapshot_failed", status="warn",
+                      message="Failed to push conversation metrics snapshot", trace_id=trace_id)
+        
+        return jsonify({"status": "ok", "message": "conversation metrics snapshot", "trace_id": trace_id})
+    except Exception as e:
+        get_metrics().inc_metric("api_conversation_metrics_snapshot_failures_total")
+        log_event(service="app", event="conversation_metrics_snapshot_error", status="error",
+                  message=str(e), trace_id=trace_id)
+        return jsonify({"status": "error", "message": str(e), "trace_id": trace_id}), 500
+
+
+# --------------------------------------------------------------------------
 # Main entrypoint
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Initialize metrics on startup
+    # Initialize metrics on startup (lazy init)
     _ensure_initialized()
-    
+
+    # Perform one-time system validation at process start (keeps import-time side-effects out).
+    try:
+        startup_components = validate_system_dependencies()
+    except Exception:
+        startup_components = {}
+
     log_event(
         service="app",
         event="application_start",
@@ -577,10 +790,14 @@ if __name__ == "__main__":
         }
     )
 
-    # Use dedicated config values
+    # Use dedicated config values with safe fallbacks
+    host = getattr(Config, "HOST", "0.0.0.0")
+    port = getattr(Config, "FLASK_PORT", getattr(Config, "PORT", 5000))
+    # TODO: Move hardcoded port number to config.py
+
     app.run(
-        host=Config.HOST,
-        port=Config.FLASK_PORT,  # <-- Changed from Config.PORT
+        host=host,
+        port=port,
         debug=False,
         threaded=True
     )

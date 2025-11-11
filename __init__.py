@@ -1,89 +1,118 @@
+from logging_utils import log_event
+from metrics_collector import push_metric
+from redis_client import get_redis_connection
+import config
+
+# ==============================================================
+#  Phase 11-F Compliant – Unified Logging, Metrics & Config Integrated
+#  Generated: 2025-11-03T17:29:04.919329
+#  Do not alter business logic – observability patch only.
+# ==============================================================
+
 """
-__init__.py — Phase 11-D
-Centralized logging bootstrap for Sara AI services
-Provides structured JSON logging with trace correlation and metrics integration
+__init__.py — Phase 12-Stable
+Centralized structured logging bootstrap for Sara AI Core
+Provides resilient JSON logging with trace correlation, observability tagging,
+and metrics-safe integration for all subsystems.
 """
 
 import os
+import json
 import logging
 from logging.handlers import RotatingFileHandler
 
-# Phase 11-D: Structured JSON logging bootstrap
-# Compatible with logging_utils.py and Prometheus metrics integration
 
 def setup_structured_logging():
     """
-    Initialize structured JSON logging for Sara AI services.
-    This complements logging_utils.py and ensures all log sources are structured.
+    Initialize structured JSON logging for Sara AI Core services.
+    Safe to import multiple times — will not duplicate handlers.
     """
-    
-    # Avoid duplicate handlers in multi-import scenarios
+
     root_logger = logging.getLogger()
-    if root_logger.handlers:
-        return  # Already configured
-    
-    root_logger.setLevel(logging.INFO)
-    
-    # Phase 11-D: JSON formatter for structured logging
+    if getattr(root_logger, "_sara_logging_initialized", False):
+        return  # Already initialized safely
+
+    # Environment-aware log level
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    root_logger.setLevel(getattr(logging, log_level, logging.INFO))
+
+    # Phase 12 JSON formatter with safe encoding
     class JSONFormatter(logging.Formatter):
         def format(self, record):
-            log_entry = {
-                "timestamp": self.formatTime(record),
-                "level": record.levelname,
-                "service": getattr(record, 'service', 'unknown'),
-                "message": record.getMessage(),
-                "component": record.name,
-            }
-            
-            # Add trace_id if available
-            trace_id = getattr(record, 'trace_id', None)
-            if trace_id:
-                log_entry["trace_id"] = trace_id
-                
-            # Add any extra structured data
-            extra_data = getattr(record, 'structured_data', {})
-            if extra_data:
-                log_entry.update(extra_data)
-                
-            return json.dumps(log_entry, ensure_ascii=False)
-    
+            try:
+                log_entry = {
+                    "timestamp": self.formatTime(record),
+                    "level": record.levelname,
+                    "service": getattr(record, "service", "unknown"),
+                    "message": record.getMessage(),
+                    "component": record.name,
+                    "phase": "12",
+                }
+
+                # Trace & observability data
+                trace_id = getattr(record, "trace_id", None)
+                if trace_id:
+                    log_entry["trace_id"] = trace_id
+
+                extra_data = getattr(record, "structured_data", {})
+                if extra_data:
+                    log_entry.update(extra_data)
+
+                return json.dumps(log_entry, ensure_ascii=False)
+            except Exception as e:
+                # Graceful fallback: plain text logging
+                return f"[LOGGING ERROR] {e} | RawMessage={record.getMessage()}"
+
     formatter = JSONFormatter()
-    
-    # Console handler for Render/cloud environments (primary)
+
+    # Console handler — primary for Render / local
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(formatter)
     root_logger.addHandler(console_handler)
-    
-    # Optional file handler for local development
-    if os.getenv("ENABLE_FILE_LOGS", "false").lower() == "true":
-        os.makedirs("logs", exist_ok=True)
-        log_file = os.path.join("logs", "sara_ai.json.log")
-        
-        file_handler = RotatingFileHandler(
-            log_file, 
-            maxBytes=5_000_000, 
-            backupCount=3,
-            encoding='utf-8'
-        )
-        file_handler.setFormatter(formatter)
-        root_logger.addHandler(file_handler)
-    
-    # Phase 11-D: Log initialization event
+
+    # Optional file handler for local debugging
+    enable_file_logs = os.getenv("ENABLE_FILE_LOGS", "false").lower() == "true"
+    if enable_file_logs:
+        try:
+            log_dir = os.getenv("LOG_DIR", "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            log_file = os.path.join(log_dir, "sara_ai_core.json.log")
+
+            file_handler = RotatingFileHandler(
+                log_file,
+                maxBytes=10_000_000,
+                backupCount=5,
+                encoding="utf-8"
+            )
+            file_handler.setFormatter(formatter)
+            root_logger.addHandler(file_handler)
+        except Exception as e:
+            root_logger.warning(f"File logging setup failed: {e}")
+
+    # Boot event
     root_logger.info(
         "Structured logging initialized",
         extra={
-            'service': 'logging_bootstrap',
-            'structured_data': {
-                'event': 'logging_initialized',
-                'phase': '11-D',
-                'file_logging_enabled': os.getenv("ENABLE_FILE_LOGS", "false").lower() == "true",
-                'schema_version': 'phase_11d_v1'
-            }
-        }
+            "service": "logging_bootstrap",
+            "structured_data": {
+                "event": "logging_initialized",
+                "phase": "12",
+                "file_logging_enabled": enable_file_logs,
+                "schema_version": "phase_12_v1",
+                "environment": os.getenv("APP_ENV", "local"),
+            },
+        },
     )
 
-# Import JSON for formatter
-import json
+    # Prevent re-init
+    root_logger._sara_logging_initialized = True
 
-# Auto-initialize structured logging
+
+# Auto-bootstrap
 setup_structured_logging()
+
+
+try:
+    push_metric(service="system_core", event="module_load", status="ok", message=__name__)
+except Exception as e:
+    log_event(service="system_core", event="metric_load_fail", status="error", message=str(e))

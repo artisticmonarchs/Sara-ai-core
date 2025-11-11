@@ -8,17 +8,33 @@ import os
 import io
 import traceback
 import time
+import signal
+import sys
+import logging
 from typing import Optional
 
 import speech_recognition as sr
 
-from logging_utils import log_event, get_trace_id
-from twilio_client import (
-    update_partial_transcript,
-    update_final_transcript,
-    get_trace_id as twilio_trace_id,
-)
+from logging_utils import log_event
 from tasks import run_inference
+
+# --------------------------------------------------------------------------
+# Safe Twilio imports with fallback stubs only if import fails
+# --------------------------------------------------------------------------
+try:
+    from twilio_client import (
+        update_partial_transcript,
+        update_final_transcript,
+        get_trace_id as twilio_trace_id,
+    )
+except Exception:
+    logging.getLogger(__name__).warning("twilio_client import failed; using fallback stubs")
+    def update_partial_transcript(*args, **kwargs):
+        logging.getLogger(__name__).warning("Fallback: update_partial_transcript() called but not implemented.")
+    def update_final_transcript(*args, **kwargs):
+        logging.getLogger(__name__).warning("Fallback: update_final_transcript() called but not implemented.")
+    def twilio_trace_id():
+        return "twilio-fallback-trace"
 
 # --------------------------------------------------------------------------
 # Phase 11-D Configuration Integration
@@ -37,7 +53,7 @@ except ImportError:
 # Phase 11-D Redis Integration
 # --------------------------------------------------------------------------
 try:
-    from redis_client import get_client
+    from redis_client import get_redis_client as get_client
 except ImportError:
     # Fallback Redis client
     def get_client():
@@ -64,6 +80,47 @@ ASR_PARTIAL_METRIC = "asr_partial_chunks_total"
 ASR_FINAL_METRIC = "asr_final_chunks_total" 
 ASR_FAILURE_METRIC = "asr_failures_total"
 ASR_LATENCY_METRIC = "asr_processing_latency_ms"
+
+# --------------------------------------------------------------------------
+# Logger Setup
+# --------------------------------------------------------------------------
+logger = logging.getLogger(__name__)
+
+# --------------------------------------------------------------------------
+# Signal Handlers
+# --------------------------------------------------------------------------
+def _graceful_shutdown(signum, frame):
+    """Phase 12: Graceful shutdown handler"""
+    logger.info(f"Received signal {signum}, shutting down gracefully...")
+    try:
+        # Flush metrics and resources if available
+        try:
+            from global_metrics_store import flush_now
+            flush_now()
+            logger.info("Metrics flushed during shutdown")
+        except Exception:
+            pass
+
+        try:
+            from conversation_state_manager import flush_all_sessions_to_redis
+            flush_all_sessions_to_redis()
+            logger.info("Conversation states flushed during shutdown")
+        except Exception:
+            pass
+
+        try:
+            from r2_client import close as r2_close
+            r2_close()
+            logger.info("R2 client closed during shutdown")
+        except Exception:
+            pass
+    except Exception:
+        logger.exception("Error during graceful shutdown cleanup")
+    finally:
+        sys.exit(0)
+
+signal.signal(signal.SIGINT, _graceful_shutdown)
+signal.signal(signal.SIGTERM, _graceful_shutdown)
 
 # --------------------------------------------------------------------------
 # Internal Utilities
@@ -132,6 +189,7 @@ def _convert_audio_to_text(audio_bytes: bytes) -> Optional[str]:
     start_time = time.time()
     recognizer = sr.Recognizer()
     try:
+        # Try BytesIO first for efficiency
         with sr.AudioFile(io.BytesIO(audio_bytes)) as source:
             audio = recognizer.record(source)
         text = recognizer.recognize_google(audio)
@@ -143,21 +201,37 @@ def _convert_audio_to_text(audio_bytes: bytes) -> Optional[str]:
         
         return text
     except Exception as e:
-        # Phase 11-D: Increment failure metric (lazy metrics)
-        _inc, _obs = _get_metrics()
-        _inc(ASR_FAILURE_METRIC)
-        
-        log_event(
-            service="asr_service",
-            event="asr_conversion_error",
-            status="error",
-            message="ASR conversion failed",
-            error=str(e),
-            traceback=traceback.format_exc(),
-            schema_version="phase_11d_v1",
-            service_version="11d"
-        )
-        return None
+        # Fallback to temporary file if BytesIO fails
+        try:
+            from tempfile import NamedTemporaryFile
+            with NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
+                tmp.write(audio_bytes)
+                tmp.flush()
+                with sr.AudioFile(tmp.name) as source:
+                    audio = recognizer.record(source)
+            text = recognizer.recognize_google(audio)
+            
+            latency_ms = (time.time() - start_time) * 1000
+            _inc, _obs = _get_metrics()
+            _obs(ASR_LATENCY_METRIC, latency_ms)
+            
+            return text
+        except Exception as fallback_error:
+            # Phase 11-D: Increment failure metric (lazy metrics)
+            _inc, _obs = _get_metrics()
+            _inc(ASR_FAILURE_METRIC)
+            
+            log_event(
+                service="asr_service",
+                event="asr_conversion_error",
+                status="error",
+                message="ASR conversion failed with both BytesIO and tempfile",
+                error=f"BytesIO: {str(e)}, Tempfile: {str(fallback_error)}",
+                traceback=traceback.format_exc(),
+                schema_version="phase_11d_v1",
+                service_version="11d"
+            )
+            return None
 
 
 def _store_partial_state(call_sid: str, partial_text: str, trace_id: str):
@@ -382,18 +456,7 @@ if __name__ == "__main__":
     """
     import sys
     if len(sys.argv) < 3:
-        # Replace print with log_event fallback
-        try:
-            log_event(
-                service="asr_service",
-                event="cli_usage_error",
-                status="error",
-                message="Usage: python asr_service.py <audio_file.wav> <call_sid>",
-                schema_version="phase_11d_v1",
-                service_version="11d"
-            )
-        except Exception:
-            print("Usage: python asr_service.py <audio_file.wav> <call_sid>")
+        logger.error("Usage: python asr_service.py <audio_file.wav> <call_sid>")
         sys.exit(1)
 
     file_path = sys.argv[1]
@@ -402,21 +465,4 @@ if __name__ == "__main__":
         audio_bytes = f.read()
 
     process_final_audio(call_sid, audio_bytes)
-    try:
-        log_event(
-            service="asr_service",
-            event="cli_processing_complete",
-            status="info",
-            message=f"Processed final audio for call_sid={call_sid}",
-            call_sid=call_sid,
-            schema_version="phase_11d_v1",
-            service_version="11d"
-        )
-    except Exception:
-        print(f"[ASR] Processed final audio for call_sid={call_sid}")
-
-# === Phase 11-E FinalTouch: Safe fallback stub ===
-def update_partial_transcript(*args, **kwargs):
-    '''Fallback stub to avoid ImportError during ASR init.'''
-    import logging
-    logging.getLogger(__name__).warning('Fallback: update_partial_transcript() called but not implemented.')
+    logger.info(f"Processed final audio for call_sid={call_sid}")

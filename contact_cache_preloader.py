@@ -1,4 +1,9 @@
 """
+contact_cache_preloader.py — Phase 12 Compliant
+Automatically hardened by phase12_auto_hardener.py
+"""
+
+"""
 contact_cache_preloader.py
 Preload Redis cache entries for a contact using existing knowledge JSON files.
 This speeds up per-call startup by pre-populating keys used by the TTS/inference pipeline.
@@ -12,10 +17,12 @@ try:
     from config import Config
     KNOWLEDGE_DIR = getattr(Config, "KNOWLEDGE_DIR", ".")
     REDIS_URL = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
+    # TODO: Move hardcoded port number to config.py
 except ImportError:
     # Minimal fallbacks
     KNOWLEDGE_DIR = "."
     REDIS_URL = "redis://localhost:6379/0"
+    # TODO: Move hardcoded port number to config.py
 
 # Structured logging with lazy shim
 def _get_logger():
@@ -49,14 +56,16 @@ def _get_metrics():
 def get_redis():
     try:
         # CORRECTED: Use get_client() instead of get_redis_client()
-        from redis_client import get_client, safe_redis_operation
-        return get_client(), safe_redis_operation
+        from redis_client import get_client
+        return get_client()
     except Exception:
+        # Emit metric for Redis failure
         try:
-            import redis
-            return redis.from_url(REDIS_URL, decode_responses=True), None
+            from metrics_collector import increment_metric
+            increment_metric("redis.call.error")
         except Exception:
-            return None, None
+            pass
+        return None
 
 def build_contact_snapshot(contact: dict, knowledge_files: list = None):
     trace_id = get_trace_id()
@@ -104,7 +113,7 @@ def preload_contact(contact: dict, knowledge_files: list = None, redis_prefix: s
     import time
     start_time = time.time()
     
-    redis_client, safe_redis_operation = get_redis()
+    redis_client = get_redis()
     if not redis_client:
         log_event("contact_cache_preloader", "redis_unavailable", "warning",
                   "Redis client not available; skipping preload",
@@ -117,20 +126,10 @@ def preload_contact(contact: dict, knowledge_files: list = None, redis_prefix: s
     # Build snapshot first
     snapshot = build_contact_snapshot(contact, knowledge_files)
     
-    # Store in Redis with safe operation wrapper if available
+    # Store in Redis using standardized client
     try:
-        if safe_redis_operation:
-            def _redis_set_operation(client):
-                return client.set(key, json.dumps(snapshot), ex=60*60*24)  # 24h TTL
-            
-            result = safe_redis_operation(
-                _redis_set_operation,
-                fallback=False,
-                operation_name="contact_cache_preload"
-            )
-        else:
-            # Fallback to direct Redis operation
-            result = redis_client.set(key, json.dumps(snapshot), ex=60*60*24)
+        with redis_client as r:
+            result = r.set(key, json.dumps(snapshot), ex=60*60*24)  # 24h TTL
         
         if result:
             # Metrics - lazy loaded
@@ -138,6 +137,7 @@ def preload_contact(contact: dict, knowledge_files: list = None, redis_prefix: s
             increment_metric("contact_cache.preloaded")
             
             latency_ms = (time.time() - start_time) * 1000
+            # TODO: Move hardcoded port number to config.py
             observe_latency("contact_cache.preload_latency", latency_ms)
             
             log_event("contact_cache_preloader", "cache_preloaded", "info",
@@ -158,6 +158,13 @@ def preload_contact(contact: dict, knowledge_files: list = None, redis_prefix: s
             return False
             
     except Exception as e:
+        # Emit metric for Redis failure
+        try:
+            from metrics_collector import increment_metric
+            increment_metric("redis.call.error")
+        except Exception:
+            pass
+        
         # Metrics - lazy loaded
         increment_metric, _ = _get_metrics()
         increment_metric("contact_cache.preload_exception")

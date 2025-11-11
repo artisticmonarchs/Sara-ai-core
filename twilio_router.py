@@ -1,16 +1,31 @@
 """
-twilio_router.py — Sara AI Core (Phase 11-D)
-Central Twilio routing layer with Observability, Circuit Breaker, and Metrics
+twilio_router.py — Sara AI Core (Phase 11-F)
+Central Twilio routing layer with Duplex Streaming, Observability, Circuit Breaker, and Metrics
 """
-__phase__ = "11-D"
+__phase__ = "11-F"
 __service__ = "twilio_router"
-__schema_version__ = "phase_11d_v1"
+__schema_version__ = "phase_11f_v1"
 
 import time
 import traceback
 from flask import Flask, request, Response, jsonify, Blueprint
+import signal
+import sys
+from logging_utils import get_logger
 
-# Phase 11-D: Lazy imports to avoid import-time side effects
+logger = get_logger("twilio_router")
+
+
+def _graceful_shutdown(signum, frame):
+    """Phase 12: Graceful shutdown handler"""
+    logger.info(f"Received signal {{signum}}, shutting down gracefully...")
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, _graceful_shutdown)
+signal.signal(signal.SIGTERM, _graceful_shutdown)
+
+
+# Phase 11-F: Lazy imports to avoid import-time side effects
 def _get_twilio_client():
     try:
         from twilio.rest import Client
@@ -25,7 +40,16 @@ def _get_twilio_exceptions():
     except Exception:
         return Exception
 
-# Phase 11-D Observability imports with lazy loading
+# Phase 11-F: Duplex streaming imports
+def _get_duplex_modules():
+    try:
+        from duplex_voice_controller import DuplexVoiceController
+        from realtime_voice_engine import RealtimeVoiceEngine
+        return DuplexVoiceController, RealtimeVoiceEngine
+    except ImportError:
+        return None, None
+
+# Phase 11-F Observability imports with lazy loading
 def _get_observability_modules():
     try:
         from logging_utils import log_event, get_trace_id
@@ -35,7 +59,7 @@ def _get_observability_modules():
         from config import Config
         return log_event, get_trace_id, increment_metric, observe_latency, get_redis_client, safe_redis_operation, capture_exception_safe, Config
     except Exception as e:
-        # Fallback for missing Phase 11-D modules
+        # Fallback for missing Phase 11-F modules
         def get_trace_id(): return "unknown-trace"
         def capture_exception_safe(*args, **kwargs): pass
         def increment_metric(*args, **kwargs): pass
@@ -50,14 +74,18 @@ def _get_observability_modules():
             pass
         def log_event(*args, **kwargs): 
             # Fallback logging
-            print(f"[{kwargs.get('service', __service__)}] {kwargs.get('event', 'unknown')}: {kwargs.get('message', '')}")
+            logger.info(f"[{kwargs.get('service', __service__)}] {kwargs.get('event', 'unknown')}: {kwargs.get('message', '')}")
         return log_event, get_trace_id, increment_metric, observe_latency, get_redis_client, safe_redis_operation, capture_exception_safe, Config
 
 # Initialize observability modules
 log_event, get_trace_id, increment_metric, observe_latency, get_redis_client, safe_redis_operation, capture_exception_safe, Config = _get_observability_modules()
 
+# Initialize duplex modules
+DuplexVoiceController, RealtimeVoiceEngine = _get_duplex_modules()
+DUPLEX_AVAILABLE = DuplexVoiceController is not None and RealtimeVoiceEngine is not None
+
 # --------------------------------------------------------------------------
-# Configuration (Phase 11-D: Only use Config, no direct env access)
+# Configuration (Phase 11-F: Only use Config, no direct env access)
 # --------------------------------------------------------------------------
 def _get_config_values():
     """Get all configuration values from Config with fallbacks"""
@@ -65,12 +93,15 @@ def _get_config_values():
         "TWILIO_ACCOUNT_SID": getattr(Config, "TWILIO_ACCOUNT_SID", None),
         "TWILIO_AUTH_TOKEN": getattr(Config, "TWILIO_AUTH_TOKEN", None),
         "PUBLIC_AUDIO_BASE": getattr(Config, "PUBLIC_AUDIO_BASE", "https://your-domain.com/audio").rstrip("/"),
-        "TWILIO_ROUTER_PORT": getattr(Config, "TWILIO_ROUTER_PORT", 8001)
+        # TODO: Move hardcoded URL to config.py
+        "TWILIO_ROUTER_PORT": getattr(Config, "TWILIO_ROUTER_PORT", 8001),
+        # TODO: Move hardcoded port number to config.py
+        "DUPLEX_STREAMING_ENABLED": getattr(Config, "DUPLEX_STREAMING_ENABLED", True) and DUPLEX_AVAILABLE
     }
 
 CONFIG = _get_config_values()
 
-# Phase 11-D: Redis client initialization deferred to avoid import-time connections
+# Phase 11-F: Redis client initialization deferred to avoid import-time connections
 redis_client = None
 def _get_redis_client_safe():
     """Lazy Redis client initialization"""
@@ -85,6 +116,7 @@ def _get_redis_client_safe():
             try:
                 from redis import Redis
                 redis_url = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
+                # TODO: Move hardcoded port number to config.py
                 redis_client = Redis.from_url(redis_url, decode_responses=True)
             except Exception:
                 redis_client = None
@@ -96,11 +128,39 @@ def _get_redis_client_safe():
 # Twilio client - initialize as None, will be set by helper
 twilio_client = None
 
-# Phase 11-D: Convert to Blueprint for better isolation
+# Phase 11-F: Duplex controller - lazy initialization
+duplex_controller = None
+
+# Phase 11-F: Convert to Blueprint for better isolation
+from flask import Blueprint
+
 twilio_router_bp = Blueprint("twilio_router", __name__)
 
+logger.info("Twilio router blueprint initialized successfully.")
+
 # --------------------------------------------------------------------------
-# Phase 11-D Twilio Client Initialization Helper
+# Phase 11-F Duplex Controller Initialization
+# --------------------------------------------------------------------------
+def _init_duplex_controller():
+    """Initialize duplex controller for real-time streaming"""
+    global duplex_controller
+    if duplex_controller is not None or not CONFIG["DUPLEX_STREAMING_ENABLED"]:
+        return duplex_controller
+    
+    try:
+        duplex_controller = DuplexVoiceController()
+        _structured_log("duplex_controller_initialized", level="info",
+                      message="Duplex voice controller initialized successfully")
+        return duplex_controller
+    except Exception as e:
+        _structured_log("duplex_controller_init_failed", level="warn",
+                      message="Failed to initialize duplex controller",
+                      extra={"error": str(e)})
+        duplex_controller = None
+        return None
+
+# --------------------------------------------------------------------------
+# Phase 11-F Twilio Client Initialization Helper
 # --------------------------------------------------------------------------
 def _init_twilio_client():
     global twilio_client
@@ -126,7 +186,7 @@ def _init_twilio_client():
         return None
 
 # --------------------------------------------------------------------------
-# Phase 11-D Circuit Breaker
+# Phase 11-F Circuit Breaker
 # --------------------------------------------------------------------------
 def _is_circuit_breaker_open(service: str = "twilio_client") -> bool:
     """Check if circuit breaker is open for Twilio operations"""
@@ -148,21 +208,21 @@ def _is_circuit_breaker_open(service: str = "twilio_client") -> bool:
         return False
 
 # --------------------------------------------------------------------------
-# Phase 11-D Structured Logging Wrapper
+# Phase 11-F Structured Logging Wrapper
 # --------------------------------------------------------------------------
 def _structured_log(event: str, level: str = "info", message: str = None, trace_id: str = None, **extra):
-    """Structured logging wrapper with Phase 11-D schema"""
+    """Structured logging wrapper with Phase 11-F schema"""
     log_event(
         service=__service__,
         event=event,
         status=level,
         message=message or event,
         trace_id=trace_id or get_trace_id(),
-        extra={**extra, "schema_version": __schema_version__}
+        extra={**extra, "schema_version": __schema_version__, "phase": __phase__}
     )
 
 # --------------------------------------------------------------------------
-# Phase 11-D Metrics Recording
+# Phase 11-F Metrics Recording
 # --------------------------------------------------------------------------
 def _record_metrics(event_type: str, status: str, latency_ms: float = None, trace_id: str = None):
     """Record metrics for router operations"""
@@ -174,7 +234,7 @@ def _record_metrics(event_type: str, status: str, latency_ms: float = None, trac
         pass
 
 # --------------------------------------------------------------------------
-# Playback Endpoint (Updated with Phase 11-D Observability)
+# Playback Endpoint (Updated with Phase 11-F Duplex Streaming)
 # --------------------------------------------------------------------------
 @twilio_router_bp.route("/twilio/playback", methods=["POST"])
 def playback():
@@ -187,7 +247,7 @@ def playback():
     session_id = payload.get("session_id")
     trace_id = payload.get("trace_id") or get_trace_id()
 
-    # Phase 11-D: Circuit breaker check
+    # Phase 11-F: Circuit breaker check
     if _is_circuit_breaker_open("twilio_client"):
         _structured_log("circuit_breaker_blocked", level="warning", 
                       message="Playback blocked by circuit breaker", trace_id=trace_id)
@@ -212,7 +272,7 @@ def playback():
         return jsonify({"error": "Invalid session_id", "trace_id": trace_id}), 400
 
     try:
-        # Phase 11-D: Safe Redis operation with bytes decoding
+        # Phase 11-F: Safe Redis operation with bytes decoding
         redis_client_instance = _get_redis_client_safe()
         call_sid = safe_redis_operation(
             lambda: redis_client_instance.get(f"twilio_call:{safe_session_id}") if redis_client_instance else None,
@@ -242,7 +302,34 @@ def playback():
     <Play>{audio_url}</Play>
 </Response>"""
 
-        # Initialize Twilio client and update call
+        # Phase 11-F: Try duplex streaming first if available
+        if CONFIG["DUPLEX_STREAMING_ENABLED"]:
+            try:
+                controller = _init_duplex_controller()
+                if controller and hasattr(controller, 'handle_playback_request'):
+                    result = controller.handle_playback_request(call_sid, audio_url, trace_id)
+                    if result and result.get("success"):
+                        latency_ms = (time.time() - start_time) * 1000
+                        # TODO: Move hardcoded port number to config.py
+                        _record_metrics("playback_duplex", "success", latency_ms, trace_id)
+                        _structured_log("twilio_playback_duplex", level="info",
+                                      message=f"Playback handled via duplex controller for call {call_sid}",
+                                      trace_id=trace_id, session_id=safe_session_id, call_sid=call_sid,
+                                      audio_url=audio_url, latency_ms=latency_ms)
+                        return jsonify({
+                            "status": "success", 
+                            "audio_url": audio_url, 
+                            "trace_id": trace_id,
+                            "call_sid": call_sid,
+                            "via": "duplex_controller"
+                        }), 200
+            except Exception as e:
+                _structured_log("duplex_playback_failed", level="warn",
+                              message="Duplex playback failed, falling back to standard Twilio",
+                              trace_id=trace_id, session_id=safe_session_id, 
+                              extra={"error": str(e)})
+
+        # Fallback to standard Twilio client
         client = _init_twilio_client()
         if client is None:
             _structured_log("twilio_client_unavailable", level="error",
@@ -256,25 +343,28 @@ def playback():
         # Update Twilio call with explicit timeout
         client.calls(call_sid).update(twiml=twiml, timeout=5)
 
-        # Phase 11-D: Record success metrics and structured log
+        # Phase 11-F: Record success metrics and structured log
         latency_ms = (time.time() - start_time) * 1000
+        # TODO: Move hardcoded port number to config.py
         _record_metrics("playback", "success", latency_ms, trace_id)
         _structured_log("twilio_playback_update", level="info",
                       message=f"Updated Twilio call {call_sid} with audio {audio_url}",
                       trace_id=trace_id, session_id=safe_session_id, call_sid=call_sid, 
-                      audio_url=audio_url, latency_ms=latency_ms)
+                      audio_url=audio_url, latency_ms=latency_ms, via="standard_twilio")
 
         return jsonify({
             "status": "success", 
             "audio_url": audio_url, 
             "trace_id": trace_id,
-            "call_sid": call_sid
+            "call_sid": call_sid,
+            "via": "standard_twilio"
         }), 200
 
     except Exception as e:
         TwilioRestException = _get_twilio_exceptions()
-        # Phase 11-D: Exception handling
+        # Phase 11-F: Exception handling
         latency_ms = (time.time() - start_time) * 1000
+        # TODO: Move hardcoded port number to config.py
         _record_metrics("playback", "failure", latency_ms, trace_id)
         capture_exception_safe(e, {"service": __service__, "trace_id": trace_id, "session_id": safe_session_id})
         
@@ -291,16 +381,89 @@ def playback():
             return jsonify({"error": str(e), "trace_id": trace_id}), 500
 
 # --------------------------------------------------------------------------
-# Health Check (Updated with Phase 11-D Observability)
+# Duplex Streaming Endpoint (Phase 11-F Addition)
+# --------------------------------------------------------------------------
+@twilio_router_bp.route("/twilio/duplex/stream", methods=["POST"])
+# TODO: Move hardcoded potential token/secret to config.py
+def duplex_stream():
+    """
+    Phase 11-F: Endpoint for duplex streaming operations
+    Expects JSON payload: { "call_sid": str, "audio_data": base64, "trace_id": str, "stream_type": "inbound|outbound" }
+    """
+    start_time = time.time()
+    payload = request.get_json(silent=True) or {}
+    call_sid = payload.get("call_sid")
+    trace_id = payload.get("trace_id") or get_trace_id()
+    stream_type = payload.get("stream_type", "inbound")
+    
+    if not call_sid:
+        _structured_log("duplex_missing_call_sid", level="error",
+                      message="Missing call_sid in duplex stream request",
+                      trace_id=trace_id)
+        return jsonify({"error": "Missing call_sid", "trace_id": trace_id}), 400
+
+    if not CONFIG["DUPLEX_STREAMING_ENABLED"]:
+        _structured_log("duplex_streaming_disabled", level="warn",
+                      message="Duplex streaming disabled, request rejected",
+                      trace_id=trace_id, call_sid=call_sid)
+        return jsonify({"error": "Duplex streaming disabled", "trace_id": trace_id}), 503
+
+    try:
+        controller = _init_duplex_controller()
+        if not controller:
+            _structured_log("duplex_controller_unavailable", level="error",
+                          message="Duplex controller not available",
+                          trace_id=trace_id, call_sid=call_sid)
+            return jsonify({"error": "Duplex controller unavailable", "trace_id": trace_id}), 503
+
+        # Route to appropriate duplex handler
+        if stream_type == "inbound":
+            result = controller.handle_inbound_stream(call_sid, payload, trace_id)
+        elif stream_type == "outbound":
+            result = controller.handle_outbound_stream(call_sid, payload, trace_id)
+        else:
+            _structured_log("duplex_invalid_stream_type", level="error",
+                          message=f"Invalid stream type: {stream_type}",
+                          trace_id=trace_id, call_sid=call_sid)
+            return jsonify({"error": f"Invalid stream type: {stream_type}", "trace_id": trace_id}), 400
+
+        latency_ms = (time.time() - start_time) * 1000
+        # TODO: Move hardcoded port number to config.py
+        _record_metrics("duplex_stream", "success", latency_ms, trace_id)
+        _structured_log("duplex_stream_handled", level="info",
+                      message=f"Duplex stream handled for {stream_type}",
+                      trace_id=trace_id, call_sid=call_sid, stream_type=stream_type,
+                      latency_ms=latency_ms)
+
+        return jsonify({
+            "status": "success",
+            "stream_type": stream_type,
+            "call_sid": call_sid,
+            "trace_id": trace_id,
+            "result": result
+        }), 200
+
+    except Exception as e:
+        latency_ms = (time.time() - start_time) * 1000
+        # TODO: Move hardcoded port number to config.py
+        _record_metrics("duplex_stream", "failure", latency_ms, trace_id)
+        capture_exception_safe(e, {"service": __service__, "trace_id": trace_id, "call_sid": call_sid})
+        _structured_log("duplex_stream_error", level="error",
+                      message=str(e), trace_id=trace_id, call_sid=call_sid,
+                      traceback=traceback.format_exc(), latency_ms=latency_ms)
+        return jsonify({"error": str(e), "trace_id": trace_id}), 500
+
+# --------------------------------------------------------------------------
+# Health Check (Updated with Phase 11-F Observability and Duplex Status)
 # --------------------------------------------------------------------------
 @twilio_router_bp.route("/health/twilio_router", methods=["GET"])
 def health_check():
-    """Phase 11-D health check endpoint with Redis ping + circuit breaker state"""
+    """Phase 11-F health check endpoint with Redis ping + circuit breaker state + duplex status"""
     start_time = time.time()
     trace_id = get_trace_id()
     
     try:
-        # Phase 11-D: Safe Redis ping and circuit breaker check
+        # Phase 11-F: Safe Redis ping and circuit breaker check
         redis_client_instance = _get_redis_client_safe()
         redis_ok = safe_redis_operation(
             lambda: redis_client_instance.ping() if redis_client_instance else False, 
@@ -308,15 +471,27 @@ def health_check():
             operation_name="ping_redis"
         )
         breaker_open = _is_circuit_breaker_open("twilio_client")
+        
+        # Phase 11-F: Duplex controller health check
+        duplex_healthy = False
+        if CONFIG["DUPLEX_STREAMING_ENABLED"]:
+            try:
+                controller = _init_duplex_controller()
+                duplex_healthy = controller.is_healthy() if controller else False
+            except Exception:
+                duplex_healthy = False
+        
         status = "healthy" if redis_ok and not breaker_open else "degraded"
         
         # Record metrics
         latency_ms = (time.time() - start_time) * 1000
+        # TODO: Move hardcoded port number to config.py
         _record_metrics("health_check", "success", latency_ms, trace_id)
         
         _structured_log("health_check", level="info", 
                       message=f"Health check completed: {status}",
-                      trace_id=trace_id, redis_ok=redis_ok, breaker_open=breaker_open)
+                      trace_id=trace_id, redis_ok=redis_ok, breaker_open=breaker_open,
+                      duplex_healthy=duplex_healthy, duplex_enabled=CONFIG["DUPLEX_STREAMING_ENABLED"])
         
         # Return appropriate HTTP status code
         http_code = 200 if status == "healthy" else 503
@@ -324,16 +499,29 @@ def health_check():
         return jsonify({
             "service": __service__,
             "status": status,
-            "redis_ok": redis_ok,
-            "breaker_open": breaker_open,
             "phase": __phase__,
             "schema_version": __schema_version__,
-            "trace_id": trace_id
+            "trace_id": trace_id,
+            "duplex_enabled": CONFIG["DUPLEX_STREAMING_ENABLED"],
+            "duplex_healthy": duplex_healthy,
+            "components": {
+                "redis": {
+                    "status": "healthy" if redis_ok else "unhealthy"
+                },
+                "circuit_breaker": {
+                    "status": "open" if breaker_open else "closed"
+                },
+                "duplex_controller": {
+                    "status": "healthy" if duplex_healthy else "unhealthy",
+                    "enabled": CONFIG["DUPLEX_STREAMING_ENABLED"]
+                }
+            }
         }), http_code
         
     except Exception as e:
-        # Phase 11-D: Health check failure handling
+        # Phase 11-F: Health check failure handling
         latency_ms = (time.time() - start_time) * 1000
+        # TODO: Move hardcoded port number to config.py
         _record_metrics("health_check", "failure", latency_ms, trace_id)
         capture_exception_safe(e, {"service": __service__, "trace_id": trace_id})
         _structured_log("health_check_failed", level="error",
@@ -361,12 +549,21 @@ def health_legacy():
     return jsonify({"service": __service__, "status": "healthy"}), 200
 
 # --------------------------------------------------------------------------
-# Local Debug Entry (Preserved)
+# Local Debug Entry (Preserved with Phase 11-F enhancements)
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
     import os
     app = Flask(__name__)
-    app.register_blueprint(twilio_router_bp)
+    app.register_bluelogger.info(twilio_router_bp)
+    
+    # Phase 11-F: Initialize duplex controller on startup
+    if CONFIG["DUPLEX_STREAMING_ENABLED"]:
+        _init_duplex_controller()
+    
+    _structured_log("twilio_router_startup", level="info",
+                  message="Twilio router starting with Phase 11-F compliance",
+                  extra={"phase": __phase__, "duplex_enabled": CONFIG["DUPLEX_STREAMING_ENABLED"]})
+    
     app.run(host="0.0.0.0", port=int(CONFIG["TWILIO_ROUTER_PORT"]))
 
 # --------------------------------------------------------------------------
@@ -375,6 +572,11 @@ if __name__ == "__main__":
 __all__ = [
     "twilio_router_bp", 
     "playback", 
+    "duplex_stream",
     "health_check",
-    "health_legacy"
+    "health_legacy",
+    "_init_duplex_controller"
 ]
+
+# Backward compatibility alias for legacy imports
+twilio_bp = twilio_router_bp

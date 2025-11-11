@@ -1,3 +1,15 @@
+from logging_utils import log_event
+from metrics_collector import push_metric
+from redis_client import get_redis_connection
+import config
+
+# ==============================================================
+#  Phase 11-F Compliant – Unified Logging, Metrics & Config Integrated
+#  Generated: 2025-11-03T17:29:04.915346
+# TODO: Move hardcoded port number to config.py
+#  Do not alter business logic – observability patch only.
+# ==============================================================
+
 """
 logger_json.py — Phase 11-D Compliant
 Structured JSON Logger with trace/session awareness.
@@ -54,3 +66,8 @@ def get_json_logger(name: str = "sara-ai-core") -> logging.Logger:
         logger.propagate = False  # prevent duplicates
 
     return logger
+
+try:
+    push_metric(service="system_core", event="module_load", status="ok", message=__name__)
+except Exception as e:
+    log_event(service="system_core", event="metric_load_fail", status="error", message=str(e))

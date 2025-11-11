@@ -10,6 +10,9 @@ import logging
 import secrets
 from typing import Any, Dict, Optional, Callable
 
+# Define module logger
+logger = logging.getLogger(__name__)
+
 # Safe import with fallbacks
 try:
     from logging_utils import log_event, get_trace_id
@@ -38,41 +41,8 @@ def increment_metric(name: str, amount: int = 1, labels: dict = None):
     except Exception:
         return None
 
-try:
-    from redis_client import get_redis_client
-except ImportError:
-    def get_redis_client():
-        return None
-
-def restore_metrics_snapshot(service_name: str = "metrics_collector"):
-    """
-    Restore last known metrics snapshot from Redis.
-    Called during app startup to reload previous metric state.
-    """
-    try:
-        from redis_client import get_redis_client
-        client = get_redis_client()
-        if not client:
-            return None
-        key = f"prometheus:registry_snapshot:{service_name}"
-        snapshot = client.get(key)
-        if not snapshot:
-            return None
-        return json.loads(snapshot)
-    except Exception as e:
-        # Replace print with structured logging
-        try:
-            log_event(
-                service="utils",
-                event="restore_metrics_snapshot",
-                status="error",
-                message=f"Error restoring snapshot: {e}",
-                service_name=service_name
-            )
-        except Exception:
-            # Ultimate fallback if log_event fails
-            print(f"[utils] restore_metrics_snapshot: Error restoring snapshot: {e}")
-        return None
+# Remove Redis I/O helpers to keep module pure
+# These should be moved to a separate redis_utils.py module
 
 def _safe_inc_metric(metric_name: str, value: int = 1, labels: Optional[dict] = None) -> None:
     """Safely increment metrics counter with fallback and label support"""
@@ -80,17 +50,6 @@ def _safe_inc_metric(metric_name: str, value: int = 1, labels: Optional[dict] = 
         increment_metric(metric_name, value, labels or {})
     except Exception:
         pass  # Silent fallback - metrics are non-critical
-
-def _decode_redis_value(val):
-    """Defensively decode Redis values from bytes to string"""
-    if val is None:
-        return None
-    if isinstance(val, (bytes, bytearray)):
-        try:
-            return val.decode('utf-8')
-        except Exception:
-            return str(val)
-    return val
 
 def generate_id() -> str:
     """Generate a unique UUID string for traceable operations with observability."""
@@ -191,6 +150,17 @@ def safe_json_dumps(obj: Any, default: Optional[str] = None) -> str:
         _safe_inc_metric("utils_json_dump_failures_total")
         return default if isinstance(default, str) else "null"
 
+def note_blocking_call(name: str) -> None:
+    """Log a warning for any intentional blocking usage."""
+    log_event(
+        service="utils",
+        event="blocking_call",
+        status="warning",
+        message=f"Intentional blocking call: {name}",
+        trace_id=get_trace_id(),
+        blocking_call_name=name
+    )
+
 def retry_operation(func: Callable, retries: int = 3, delay: float = 1.0, 
                    backoff: float = 2.0, operation_name: str = "unknown") -> Any:
     """
@@ -246,19 +216,6 @@ def retry_operation(func: Callable, retries: int = 3, delay: float = 1.0,
     )
     _safe_inc_metric("utils_retry_failures_total")
     raise RuntimeError(f"retry_operation failed for {operation_name} after {retries} attempts") from last_exception
-
-def _is_circuit_open(key: str = "circuit_breaker:utils:state") -> bool:
-    """Check if circuit breaker is open for a specific operation."""
-    try:
-        from redis_client import get_redis_client
-        client = get_redis_client()
-        if not client:
-            return False
-        state = client.get(key)
-        state = _decode_redis_value(state) or ""
-        return state.lower() == "open"
-    except Exception:
-        return False  # Default to closed on failure
 
 def ensure_trace_session(trace_id: str = None, session_id: str = None) -> Dict[str, str]:
     """
@@ -353,19 +310,17 @@ __all__ = [
     "safe_get", 
     "safe_json_loads",
     "safe_json_dumps",
+    "note_blocking_call",
     "retry_operation",
     "ensure_trace_session",
     "self_test",
-    "restore_metrics_snapshot",
     "_safe_inc_metric",
-    "_is_circuit_open",
-    "_decode_redis_value"
 ]
 
 # Run self-test when executed directly
 if __name__ == "__main__":
-    print("Running utils.py self-test...")
+    logger.info("Running utils.py self-test...")
     test_results = self_test()
-    print("Self-test results:")
+    logger.info("Self-test results:")
     for test_name, result in test_results.items():
-        print(f"  {test_name}: {result}")
+        logger.info(f"  {test_name}: {result}")

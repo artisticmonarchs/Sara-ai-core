@@ -1,3 +1,14 @@
+from __future__ import annotations
+try:
+    import logging
+    logger = logging.getLogger(__name__)
+except ImportError:
+    class FallbackLogger:
+        def info(self, msg): logger.info(f"INFO: {msg}")
+        def error(self, msg): logger.error(f"ERROR: {msg}")
+        def warning(self, msg): logger.warning(f"WARNING: {msg}")
+    logger = FallbackLogger()
+
 """
 persona_engine.py — Phase 11-F (Final, Static-Load, assets-aware)
 
@@ -15,7 +26,6 @@ Design:
 - Lazy imports prevent circular dependencies.
 - Missing/invalid files emit warnings and safe defaults.
 """
-from __future__ import annotations
 
 import json
 import threading
@@ -84,10 +94,10 @@ class PersonaEngine:
             pass
 
         class _Fallback:
-            def info(self, *a, **k): print("INFO:", *a)
-            def warning(self, *a, **k): print("WARN:", *a)
-            def error(self, *a, **k): print("ERROR:", *a)
-            def debug(self, *a, **k): print("DEBUG:", *a)
+            def info(self, *a, **k): logger.info("INFO:", *a)
+            def warning(self, *a, **k): logger.warning("WARN:", *a)
+            def error(self, *a, **k): logger.error("ERROR:", *a)
+            def debug(self, *a, **k): logger.info("DEBUG:", *a)
         return _Fallback()
 
     def _get_metrics_module(self):
@@ -251,7 +261,7 @@ class PersonaEngine:
         def_resp = sp.get("deflection_responses", {}).get("default") if isinstance(sp, dict) else None
         if def_resp:
             return {"type": "deflection", "response": def_resp}
-        return {"type": "deflection", "response": "I can’t help with that topic — let’s focus on business growth and how Noblecom helps."}
+        return {"type": "deflection", "response": "I can't help with that topic — let's focus on business growth and how Noblecom helps."}
 
     # ---------------- Persona Realign ----------------
     def emit_persona_realign(self, reason: str) -> None:
@@ -269,6 +279,29 @@ def initialize_persona_engine() -> PersonaEngine:
     return PersonaEngine.initialize()
 
 
+def load_governance_files() -> Dict[str, Any]:
+    """Load all governance JSONs from assets folder and validate phase alignment."""
+    loaded = {}
+    for name, filename in GOV_FILES.items():
+        file_path = ASSETS_DIR / filename
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                phase = data.get("upgrade_metadata", {}).get("phase")
+                if phase != REQUIRED_PHASE:
+                    logger.warning(f"{filename} has mismatched phase {phase} (expected {REQUIRED_PHASE})")
+                loaded[name] = data
+                logger.info({
+                    "event": "governance_loaded",
+                    "file": str(file_path),
+                    "phase": phase
+                })
+        except Exception as e:
+            logger.error(f"Failed to load {filename}: {e}")
+            loaded[name] = {}
+    return loaded
+
+
 # Static load on import
 try:
     _ENGINE = PersonaEngine.initialize()
@@ -276,7 +309,7 @@ except Exception:
     _ENGINE = None
 
 
-__all__ = ["PersonaEngine", "initialize_persona_engine"]
+__all__ = ["PersonaEngine", "initialize_persona_engine", "load_governance_files"]
 
 # --- Phase 11-F Compatibility Stub ---
 def verify_persona_integrity():
