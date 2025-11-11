@@ -47,6 +47,11 @@ except ImportError:
         CELERY_RETRY_BACKOFF_MAX = int(os.getenv("CELERY_RETRY_BACKOFF_MAX", "600"))
         CELERY_SOFT_TIME_LIMIT = int(os.getenv("CELERY_SOFT_TIME_LIMIT", "300"))
 
+# Phase 12: Safe configuration access with fallbacks
+CELERY_TASK_MAX_RETRIES = getattr(config, "CELERY_TASK_MAX_RETRIES", getattr(config, "CELERY_MAX_RETRIES", 3))
+CELERY_RETRY_BACKOFF_MAX = getattr(config, "CELERY_RETRY_BACKOFF_MAX", 600)
+CELERY_SOFT_TIME_LIMIT = getattr(config, "CELERY_SOFT_TIME_LIMIT", 300)
+
 # Phase 12: Transient error detection
 class TransientError(Exception):
     """Base class for transient errors that should trigger retries"""
@@ -183,9 +188,8 @@ def resilient_task(func=None, **decorator_kwargs):
         # compute a stable name once
         task_name_full = f"{task_func.__module__}.{task_func.__name__}"
         
-        # Resolve max_retries with backward compatibility
-        max_retries = getattr(config, 'CELERY_TASK_MAX_RETRIES', 
-                             getattr(config, 'CELERY_MAX_RETRIES', 3))
+        # Use the safe configuration variable
+        max_retries = CELERY_TASK_MAX_RETRIES
 
         @wraps(task_func)
         @shared_task(
@@ -194,10 +198,10 @@ def resilient_task(func=None, **decorator_kwargs):
             acks_on_failure_or_timeout=False,                 # Celery task option name
             autoretry_for=(Exception,),
             retry_backoff=True,
-            retry_backoff_max=config.CELERY_RETRY_BACKOFF_MAX,  # added
+            retry_backoff_max=CELERY_RETRY_BACKOFF_MAX,
             retry_jitter=True,
             max_retries=max_retries,
-            soft_time_limit=config.CELERY_SOFT_TIME_LIMIT,
+            soft_time_limit=CELERY_SOFT_TIME_LIMIT,
             name=task_name_full,                               # added
             **decorator_kwargs
         )

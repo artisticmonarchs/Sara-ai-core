@@ -70,19 +70,27 @@ def get_metrics():
     return _metrics
 
 # --------------------------------------------------------------------------
-# Internal imports
+# Internal imports with safe fallbacks
 # --------------------------------------------------------------------------
 from celery_app import celery
 from logging_utils import log_event, get_trace_id
 from redis_client import get_client
 from r2_client import get_r2_client, check_r2_connection as r2_check  # type: ignore
-from utils import increment_metric
-# Not all branches define this symbol; provide a safe shim so Gunicorn boot never fails.
+
+# Safe import of utils functions with comprehensive fallbacks
 try:
-    from utils import restore_metrics_snapshot  # type: ignore
-except Exception:
+    from utils import increment_metric, restore_metrics_snapshot
+except ImportError:
+    # Fallback if utils module doesn't exist or symbols are missing
+    def increment_metric(*_args, **_kwargs):
+        pass
     def restore_metrics_snapshot(*_args, **_kwargs) -> int:
-        # Why: keep boot resilient if metrics snapshotting isn't implemented.
+        return 0
+except Exception:
+    # Additional safety for any other import issues
+    def increment_metric(*_args, **_kwargs):
+        pass
+    def restore_metrics_snapshot(*_args, **_kwargs) -> int:
         return 0
 
 
@@ -531,7 +539,9 @@ def tts_test():
         session_id = data.get("session_id")
         text = data.get("text", "")
         
-        celery.send_task("tasks.run_tts", args=[session_id, text])
+        # Use the proxy pattern to enqueue the TTS task
+        from tasks import run_tts  # local import to avoid import-time side effects
+        run_tts.delay({"session_id": session_id, "text": text, "trace_id": trace_id})
         
         get_metrics().inc_metric("api_tts_test_dispatched_total")
         log_event(service="app", event="tts_task_dispatched", status="ok", 
