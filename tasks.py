@@ -19,7 +19,7 @@ import requests
 # Phase 12: Use shared_task with proper resilience decorators
 from celery import shared_task
 
-from gpt_client import generate_reply_sync as generate_reply
+from gpt_client import generate_reply_sync
 from logging_utils import log_event
 
 # --------------------------------------------------------------------------
@@ -894,7 +894,7 @@ def run_inference(self, payload):
     inc_metric, obs_latency = get_metrics()  # Fixed: Initialize metrics before try block
     try:
         t0 = time.time()
-        reply_text = generate_reply(transcript, trace_id=trace_id)
+        reply_text = generate_reply_sync(transcript, trace_id=trace_id)
         latency_ms = round((time.time() - t0) * 1000, 2)
         obs_latency("inference_latency_ms", latency_ms, labels={"task": self.name})
 

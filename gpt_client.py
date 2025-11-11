@@ -319,13 +319,12 @@ class TokenLatencyTracker:
             )
 
         if len(self.token_timestamps) > 1:
-            token_latencies = [
-                (self.token_timestamps[i] - self.token_timestamps[i-1]) * 1000
-                for i in range(1, len(self.token_timestamps))
-            ]
-            if token_latencies:
-                metrics["avg_token_latency_ms"] = sum(token_latencies) / len(token_latencies)
-                metrics["max_token_latency_ms"] = max(token_latencies)
+            gaps = []
+            for i in range(1, len(self.token_timestamps)):
+                gaps.append((self.token_timestamps[i] - self.token_timestamps[i-1]) * 1000)
+            if gaps:
+                metrics["avg_token_latency_ms"] = sum(gaps) / len(gaps)
+                metrics["max_token_latency_ms"] = max(gaps)
 
         return metrics
 
@@ -701,6 +700,7 @@ async def generate_reply_adaptive(
         words = reply.split()
         for i, word in enumerate(words):
             yield word + (" " if i < len(words) - 1 else "")
+}
 
 # --------------------------------------------------------------------------
 # Backward Compatibility Wrapper

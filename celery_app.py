@@ -394,6 +394,13 @@ except ImportError as e:
         logger.error("[TASK] outbound_call_task imported in fallback mode - original task not available")
         return {"status": "error", "message": "Outbound tasks module not available"}
 
+# Consolidated Task Registration (add this block)
+try:
+    import tasks as _core_tasks  # ensures resilient tasks are registered
+    logger.info("[TASKS] Successfully imported core tasks (run_inference, _run_tts_task)")
+except Exception as e:
+    logger.error(f"[TASKS] Failed to import core tasks: {e}")
+
 # --------------------------------------------------------------------------- #
 # Phase 12: Maintenance Tasks with Resilience
 # --------------------------------------------------------------------------- #
