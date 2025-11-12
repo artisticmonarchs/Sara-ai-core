@@ -1,236 +1,335 @@
-"""
-config.py — Phase 12 (Stable Dual-Mode)
-Centralized configuration for Sara AI Core (GPT-5 + Streaming Voice)
+# path: config.py
+# Production-ready configuration with backward-compat, safe defaults, and helpers.
 
-- Works on Render and local automatically.
-- Local `.env.local` overrides cloud `.env` safely.
-- Provides legacy aliases (DG_*) and snake_case module-level mirrors.
-- Avoids import cycles by not importing app/metrics/logging at module import time.
-"""
-
+from __future__ import annotations
 import os
-from pathlib import Path
-
-# Optional: python-dotenv (safe if present, no hard dependency in container)
-try:
-    from dotenv import load_dotenv  # type: ignore
-except Exception:
-    def load_dotenv(*_args, **_kwargs):
-        return False  # noop if library not present
-
-# --------------------------------------------------------------------------------------
-# .env loading (order: .env → .env.local as last override)
-# --------------------------------------------------------------------------------------
-BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
-load_dotenv(BASE_DIR / ".env.local")
+from typing import Any, Dict, List, Optional, Tuple
 
 
-# --------------------------------------------------------------------------------------
-# Helpers
-# --------------------------------------------------------------------------------------
-def _to_bool(val: str | None, default: bool = False) -> bool:
-    if val is None:
+# ---------------------- env parsers (import-safe) ----------------------
+
+def _env_str(name: str, default: Optional[str] = None) -> Optional[str]:
+    val = os.getenv(name)
+    return val if val not in (None, "") else default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
         return default
-    return str(val).strip().lower() in {"1", "true", "yes", "on"}
-
-def _to_int(val: str | None, default: int) -> int:
     try:
-        return int(str(val).strip()) if val is not None else default
+        return int(float(raw))
     except Exception:
         return default
 
-def _redact(value: str | None) -> str | None:
-    if not value:
-        return value
-    if len(value) <= 8:
-        return "****"
-    return value[:4] + "…" + value[-4:]
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except Exception:
+        return default
 
 
-# --------------------------------------------------------------------------------------
-# Core Config
-# --------------------------------------------------------------------------------------
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "t", "yes", "y", "on"}
+
+
+def _env_csv(name: str, default: List[str]) -> List[str]:
+    raw = os.getenv(name)
+    if not raw:
+        return list(default)
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def _redact(val: Optional[str]) -> Optional[str]:
+    # Why: prevent secrets exposure in logs.
+    if not val:
+        return val
+    if len(val) <= 6:
+        return "******"
+    return val[:2] + "****" + val[-2:]
+
+
+# ---------------------- canonical config ----------------------
+
 class Config:
-    # Environment / service identity
-    ENV: str = os.getenv("ENV", os.getenv("APP_ENV", "local"))
-    DEBUG: bool = _to_bool(os.getenv("DEBUG"), False)
-    SERVICE_NAME: str = os.getenv("SERVICE_NAME", "sara_core")
+    """
+    Single source of truth. Legacy names are preserved.
+    Defaults tuned to observed prod values (Phase-12).
+    """
 
-    # Redis & Celery
-    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-    CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", os.getenv("BROKER_URL", REDIS_URL.rsplit("/", 1)[0] + "/0"))
-    CELERY_RESULT_BACKEND: str = os.getenv("CELERY_RESULT_BACKEND", REDIS_URL.rsplit("/", 1)[0] + "/1")
-    CELERY_TIMEZONE: str = os.getenv("CELERY_TIMEZONE", "UTC")
-    CELERY_TASK_ACKS_LATE: bool = _to_bool(os.getenv("CELERY_TASK_ACKS_LATE", "true"), True)
-    CELERY_TASK_TRACK_STARTED: bool = _to_bool(os.getenv("CELERY_TASK_TRACK_STARTED", "true"), True)
-    CELERY_WORKER_MAX_TASKS_PER_CHILD: int = _to_int(os.getenv("CELERY_WORKER_MAX_TASKS_PER_CHILD"), 200)
-    CELERY_WORKER_CONCURRENCY: int = _to_int(os.getenv("CELERY_WORKER_CONCURRENCY"), 4)
+    # ---- Legacy logging field (REQUIRED by existing imports) ----
+    log_buffer_size: int = _env_int("LOG_BUFFER_SIZE", 8192)
 
-    # Sentry
-    SENTRY_DSN: str | None = os.getenv("SENTRY_DSN")
-    SENTRY_ENABLED: bool = _to_bool(os.getenv("SENTRY_ENABLED", "true" if SENTRY_DSN else "false"), bool(SENTRY_DSN))
-    SENTRY_TRACES_SAMPLE_RATE: float = float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.05"))
+    # ---- Phase-12 constraints ----
+    MAX_TTS_TEXT_LEN: int = _env_int("MAX_TTS_TEXT_LEN", 1200)
 
-    # OpenAI / GPT
-    OPENAI_API_KEY: str | None = os.getenv("OPENAI_API_KEY")
-    OPENAI_BASE_URL: str | None = os.getenv("OPENAI_BASE_URL")  # optional override
+    # ---- Service mode flags ----
+    ENV_MODE: str = _env_str("ENV_MODE", "render") or "render"
 
-    # Deepgram / ASR (with legacy DG_* mirrors)
-    DEEPGRAM_API_KEY: str | None = os.getenv("DEEPGRAM_API_KEY") or os.getenv("DG_API_KEY")
-    DEEPGRAM_BASE_URL: str = os.getenv("DEEPGRAM_BASE_URL", os.getenv("DG_BASE_URL", "https://api.deepgram.com"))
-    DEEPGRAM_MODEL: str = os.getenv("DEEPGRAM_MODEL", os.getenv("DG_MODEL", "nova-2-general"))
+    # ---- Redis / Celery URLs ----
+    REDIS_URL: Optional[str] = _env_str("REDIS_URL")
+    CELERY_BROKER_URL: Optional[str] = _env_str("CELERY_BROKER_URL")
+    CELERY_RESULT_BACKEND: Optional[str] = _env_str("CELERY_RESULT_BACKEND")
 
-    # TTS
-    MAX_TTS_TEXT_LEN: int = _to_int(os.getenv("MAX_TTS_TEXT_LEN"), 1000)  # ← important knob used elsewhere
-    TTS_VOICE: str = os.getenv("TTS_VOICE", "alloy")
-    TTS_RATE: float = float(os.getenv("TTS_RATE", "1.0"))
+    # ---- Redis / circuit knobs ----
+    REDIS_SOCKET_TIMEOUT: int = _env_int("REDIS_SOCKET_TIMEOUT", 5)
+    REDIS_POOL_MAXSIZE: int = _env_int("REDIS_POOL_MAXSIZE", 20)
+    CIRCUIT_FAIL_THRESHOLD: int = _env_int("CIRCUIT_FAIL_THRESHOLD", 5)
+    CIRCUIT_COOLDOWN_SECS: int = _env_int("CIRCUIT_COOLDOWN_SECS", 30)
+    CIRCUIT_HALFOPEN_MAX_CALLS: int = _env_int("CIRCUIT_HALFOPEN_MAX_CALLS", 10)
 
-    # Cloudflare R2
-    R2_ACCOUNT_ID: str | None = os.getenv("R2_ACCOUNT_ID")
-    R2_ACCESS_KEY_ID: str | None = os.getenv("R2_ACCESS_KEY_ID")
-    R2_SECRET_ACCESS_KEY: str | None = os.getenv("R2_SECRET_ACCESS_KEY")
-    R2_BUCKET: str | None = os.getenv("R2_BUCKET")
-    R2_PUBLIC_BASE_URL: str | None = os.getenv("R2_PUBLIC_BASE_URL")  # cdn base if you expose files
+    # ---- Celery execution knobs ----
+    CELERY_QUEUES: List[str] = _env_csv(
+        "CELERY_QUEUES",
+        ["default", "priority", "celery", "voice_pipeline", "tts", "run_tts", "ai_tasks"],
+    )
+    CELERY_TASK_ACKS_LATE: bool = _env_bool("CELERY_TASK_ACKS_LATE", True)
+    CELERY_TASK_TIME_LIMIT: int = _env_int("CELERY_TASK_TIME_LIMIT", 60 * 10)  # hard limit
+    CELERY_TASK_SOFT_TIME_LIMIT: int = _env_int("CELERY_TASK_SOFT_TIME_LIMIT", 60 * 8)
+    CELERY_RETRY_MAX: int = _env_int("CELERY_RETRY_MAX", 5)
+    CELERY_RETRY_BACKOFF: bool = _env_bool("CELERY_RETRY_BACKOFF", True)
+    CELERY_RETRY_JITTER: bool = _env_bool("CELERY_RETRY_JITTER", True)
+    CELERY_PREFETCH_MULTIPLIER: int = _env_int("CELERY_PREFETCH_MULTIPLIER", 1)
 
-    # HTTP defaults (used by R2 client / external calls)
-    HTTP_CONNECT_TIMEOUT: int = _to_int(os.getenv("HTTP_CONNECT_TIMEOUT"), 10)
-    HTTP_READ_TIMEOUT: int = _to_int(os.getenv("HTTP_READ_TIMEOUT"), 30)
-    HTTP_MAX_POOL: int = _to_int(os.getenv("HTTP_MAX_POOL"), 64)
+    # ---- Observability ----
+    STRUCTURED_LOGGING_ENABLED: bool = _env_bool("STRUCTURED_LOGGING_ENABLED", True)
+    SENTRY_ENABLED: bool = _env_bool("SENTRY_ENABLED", True)
+    SENTRY_DSN: Optional[str] = _env_str("SENTRY_DSN")
+    PROMETHEUS_ENABLED: bool = _env_bool("PROMETHEUS_ENABLED", False)
+    METRICS_FALLBACK_TO_REDIS: bool = _env_bool("METRICS_FALLBACK_TO_REDIS", True)
 
-    # Logging (keep names your code references!)
-    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
-    LOG_JSON: bool = _to_bool(os.getenv("LOG_JSON", "true"), True)
-    LOG_BUFFER_SIZE: int = _to_int(os.getenv("LOG_BUFFER_SIZE"), 1000)  # ← maps to log_buffer_size
+    # ---- R2 / object storage ----
+    R2_ENDPOINT: Optional[str] = _env_str("R2_ENDPOINT")
+    R2_ACCESS_KEY_ID: Optional[str] = _env_str("R2_ACCESS_KEY_ID")
+    R2_SECRET_ACCESS_KEY: Optional[str] = _env_str("R2_SECRET_ACCESS_KEY")
+    R2_BUCKET: Optional[str] = _env_str("R2_BUCKET")
+    R2_CONNECT_TIMEOUT_SECS: int = _env_int("R2_CONNECT_TIMEOUT_SECS", 10)
+    R2_READ_TIMEOUT_SECS: int = _env_int("R2_READ_TIMEOUT_SECS", 30)
+    R2_POOL_MAXSIZE: int = _env_int("R2_POOL_MAXSIZE", 64)
 
-    # Metrics
-    PROMETHEUS_ENABLED: bool = _to_bool(os.getenv("PROMETHEUS_ENABLED", "true"), True)
-    METRICS_NAMESPACE: str = os.getenv("METRICS_NAMESPACE", "sara")
-    METRICS_PUSH_INTERVAL_SEC: int = _to_int(os.getenv("METRICS_PUSH_INTERVAL_SEC"), 5)
-    METRICS_FALLBACK_TO_REDIS: bool = _to_bool(os.getenv("METRICS_FALLBACK_TO_REDIS", "true"), True)
+    # ---- AI providers (names only; secrets stay in env) ----
+    OPENAI_API_KEY: Optional[str] = _env_str("OPENAI_API_KEY")
+    DEEPGRAM_API_KEY: Optional[str] = _env_str("DEEPGRAM_API_KEY")
 
-    # Circuit Breaker defaults
-    CB_FAIL_THRESHOLD: int = _to_int(os.getenv("CB_FAIL_THRESHOLD"), 5)
-    CB_COOLDOWN_SECONDS: int = _to_int(os.getenv("CB_COOLDOWN_SECONDS"), 30)
-    CB_HALF_OPEN_SUCCESS_THRESHOLD: int = _to_int(os.getenv("CB_HALF_OPEN_SUCCESS_THRESHOLD"), 3)
+    # ---- Safety caps ----
+    DAILY_CALLS_SOFT_CAP: int = _env_int("DAILY_CALLS_SOFT_CAP", 300)
 
-    # Streaming service limits
-    MAX_CONCURRENT_STREAMS: int = _to_int(os.getenv("MAX_CONCURRENT_STREAMS"), 50)
-    STREAM_HEALTH_INTERVAL_SEC: int = _to_int(os.getenv("STREAM_HEALTH_INTERVAL_SEC"), 5)
+    # -------- Helpers (no heavy imports) --------
 
-    # Misc
-    ENV_MODE: str = os.getenv("ENV_MODE", "render" if "RENDER" in os.environ else "local")
-
-    # Safe dict for debugging (secrets redacted)
     @classmethod
-    def as_dict(cls) -> dict:
+    def get_celery_urls(cls) -> Tuple[str, str]:
+        """
+        Returns (broker_url, result_backend) with sensible fallbacks.
+        """
+        broker = cls.CELERY_BROKER_URL
+        backend = cls.CELERY_RESULT_BACKEND
+        if broker and backend:
+            return broker, backend
+
+        # Fallback to REDIS_URL/0 and /1 if explicit URLs not provided.
+        redis = cls.REDIS_URL or "redis://localhost:6379"
+        if not broker:
+            broker = f"{redis.rstrip('/')}/0"
+        if not backend:
+            backend = f"{redis.rstrip('/')}/1"
+        return broker, backend
+
+    @classmethod
+    def celery_settings(cls) -> Dict[str, Any]:
+        """
+        Minimal Celery settings dict; import-safe.
+        """
+        broker, backend = cls.get_celery_urls()
         return {
-            "ENV": cls.ENV,
-            "DEBUG": cls.DEBUG,
-            "SERVICE_NAME": cls.SERVICE_NAME,
-            "REDIS_URL": cls.REDIS_URL,
-            "CELERY_BROKER_URL": cls.CELERY_BROKER_URL,
-            "CELERY_RESULT_BACKEND": cls.CELERY_RESULT_BACKEND,
-            "SENTRY_ENABLED": cls.SENTRY_ENABLED,
-            "SENTRY_DSN": _redact(cls.SENTRY_DSN),
-            "OPENAI_API_KEY": _redact(cls.OPENAI_API_KEY),
-            "DEEPGRAM_API_KEY": _redact(cls.DEEPGRAM_API_KEY),
-            "DEEPGRAM_BASE_URL": cls.DEEPGRAM_BASE_URL,
-            "DEEPGRAM_MODEL": cls.DEEPGRAM_MODEL,
-            "MAX_TTS_TEXT_LEN": cls.MAX_TTS_TEXT_LEN,
-            "R2_ACCOUNT_ID": _redact(cls.R2_ACCOUNT_ID),
-            "R2_ACCESS_KEY_ID": _redact(cls.R2_ACCESS_KEY_ID),
-            "R2_SECRET_ACCESS_KEY": _redact(cls.R2_SECRET_ACCESS_KEY),
-            "R2_BUCKET": cls.R2_BUCKET,
-            "R2_PUBLIC_BASE_URL": cls.R2_PUBLIC_BASE_URL,
-            "HTTP_CONNECT_TIMEOUT": cls.HTTP_CONNECT_TIMEOUT,
-            "HTTP_READ_TIMEOUT": cls.HTTP_READ_TIMEOUT,
-            "HTTP_MAX_POOL": cls.HTTP_MAX_POOL,
-            "LOG_LEVEL": cls.LOG_LEVEL,
-            "LOG_JSON": cls.LOG_JSON,
-            "LOG_BUFFER_SIZE": cls.LOG_BUFFER_SIZE,
-            "PROMETHEUS_ENABLED": cls.PROMETHEUS_ENABLED,
-            "METRICS_NAMESPACE": cls.METRICS_NAMESPACE,
-            "METRICS_PUSH_INTERVAL_SEC": cls.METRICS_PUSH_INTERVAL_SEC,
-            "METRICS_FALLBACK_TO_REDIS": cls.METRICS_FALLBACK_TO_REDIS,
-            "CB_FAIL_THRESHOLD": cls.CB_FAIL_THRESHOLD,
-            "CB_COOLDOWN_SECONDS": cls.CB_COOLDOWN_SECONDS,
-            "CB_HALF_OPEN_SUCCESS_THRESHOLD": cls.CB_HALF_OPEN_SUCCESS_THRESHOLD,
-            "MAX_CONCURRENT_STREAMS": cls.MAX_CONCURRENT_STREAMS,
-            "STREAM_HEALTH_INTERVAL_SEC": cls.STREAM_HEALTH_INTERVAL_SEC,
-            "ENV_MODE": cls.ENV_MODE,
+            "broker_url": broker,
+            "result_backend": backend,
+            "task_acks_late": cls.CELERY_TASK_ACKS_LATE,
+            "task_time_limit": cls.CELERY_TASK_TIME_LIMIT,
+            "task_soft_time_limit": cls.CELERY_TASK_SOFT_TIME_LIMIT,
+            "task_default_queue": cls.CELERY_QUEUES[0] if cls.CELERY_QUEUES else "default",
+            "task_queues": cls.CELERY_QUEUES,
+            "worker_prefetch_multiplier": cls.CELERY_PREFETCH_MULTIPLIER,
+            # Retry knobs exposed for tasks to reference
+            "retry_policy_defaults": {
+                "max_retries": cls.CELERY_RETRY_MAX,
+                "retry_backoff": cls.CELERY_RETRY_BACKOFF,
+                "retry_jitter": cls.CELERY_RETRY_JITTER,
+            },
+        }
+
+    @classmethod
+    def validate(cls, strict: bool = False) -> List[str]:
+        """
+        Validates critical wiring; returns list of problems.
+        If strict=True and problems exist, raises ValueError.
+        """
+        problems: List[str] = []
+
+        # Legacy surface
+        if not isinstance(cls.log_buffer_size, int):
+            problems.append("log_buffer_size must be int")
+
+        # Broker/backend resolution
+        broker, backend = cls.get_celery_urls()
+        if not broker.startswith("redis://") and not broker.startswith("rediss://"):
+            problems.append("CELERY_BROKER_URL/REDIS_URL must be redis/rediss")
+        if not backend.startswith("redis://") and not backend.startswith("rediss://"):
+            problems.append("CELERY_RESULT_BACKEND/REDIS_URL must be redis/rediss")
+
+        # R2 presence (warn only; your app logs showed successful init)
+        r2_missing = [n for n in ("R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET")
+                      if not getattr(cls, n)]
+        if r2_missing:
+            problems.append(f"R2 config incomplete: {', '.join(r2_missing)}")
+
+        # AI keys (optional, but warn if features are enabled later)
+        if not cls.OPENAI_API_KEY:
+            problems.append("OPENAI_API_KEY not set")
+        if not cls.DEEPGRAM_API_KEY:
+            problems.append("DEEPGRAM_API_KEY not set")
+
+        if strict and problems:
+            raise ValueError("Config validation failed: " + "; ".join(problems))
+        return problems
+
+    @classmethod
+    def dump_for_logging(cls) -> Dict[str, Any]:
+        """
+        Redacted snapshot for diagnostics.
+        """
+        broker, backend = cls.get_celery_urls()
+        return {
+            "env_mode": cls.ENV_MODE,
+            "log_buffer_size": cls.log_buffer_size,
+            "max_tts_text_len": cls.MAX_TTS_TEXT_LEN,
+            "redis_socket_timeout": cls.REDIS_SOCKET_TIMEOUT,
+            "redis_pool_maxsize": cls.REDIS_POOL_MAXSIZE,
+            "circuit": {
+                "fail_threshold": cls.CIRCUIT_FAIL_THRESHOLD,
+                "cooldown_secs": cls.CIRCUIT_COOLDOWN_SECS,
+                "halfopen_max_calls": cls.CIRCUIT_HALFOPEN_MAX_CALLS,
+            },
+            "celery": {
+                "queues": cls.CELERY_QUEUES,
+                "broker_url": broker,
+                "result_backend": backend,
+                "acks_late": cls.CELERY_TASK_ACKS_LATE,
+                "soft_time_limit": cls.CELERY_TASK_SOFT_TIME_LIMIT,
+                "time_limit": cls.CELERY_TASK_TIME_LIMIT,
+                "prefetch_multiplier": cls.CELERY_PREFETCH_MULTIPLIER,
+                "retry": {
+                    "max": cls.CELERY_RETRY_MAX,
+                    "backoff": cls.CELERY_RETRY_BACKOFF,
+                    "jitter": cls.CELERY_RETRY_JITTER,
+                },
+            },
+            "observability": {
+                "structured_logging": cls.STRUCTURED_LOGGING_ENABLED,
+                "sentry_enabled": cls.SENTRY_ENABLED,
+                "sentry_dsn": _redact(cls.SENTRY_DSN),
+                "prometheus_enabled": cls.PROMETHEUS_ENABLED,
+            },
+            "r2": {
+                "endpoint": cls.R2_ENDPOINT,
+                "access_key_id": _redact(cls.R2_ACCESS_KEY_ID),
+                "secret_key": _redact(cls.R2_SECRET_ACCESS_KEY),
+                "bucket": cls.R2_BUCKET,
+                "connect_timeout_s": cls.R2_CONNECT_TIMEOUT_SECS,
+                "read_timeout_s": cls.R2_READ_TIMEOUT_SECS,
+                "pool_maxsize": cls.R2_POOL_MAXSIZE,
+            },
+            "ai": {
+                "openai_key": _redact(cls.OPENAI_API_KEY),
+                "deepgram_key": _redact(cls.DEEPGRAM_API_KEY),
+            },
+            "caps": {"daily_calls_soft_cap": cls.DAILY_CALLS_SOFT_CAP},
         }
 
 
-# --------------------------------------------------------------------------------------
-# Legacy aliases (so older code keeps working without edits)
-# --------------------------------------------------------------------------------------
+# ---------------------- module-level aliases (back-compat) ----------------------
+# Logging
+LOG_BUFFER_SIZE = Config.log_buffer_size
+log_buffer_size = Config.log_buffer_size
 
-# Some modules use DG_* env names
-DG_API_KEY = Config.DEEPGRAM_API_KEY
-DG_BASE_URL = Config.DEEPGRAM_BASE_URL
-DG_MODEL = Config.DEEPGRAM_MODEL
+# Phase-12
+MAX_TTS_TEXT_LEN = Config.MAX_TTS_TEXT_LEN
 
-# Some modules import config as a module and read snake_case names.
-# Mirror the commonly referenced attributes below to avoid AttributeErrors.
-redis_url = Config.REDIS_URL
-broker_url = Config.CELERY_BROKER_URL
-result_backend = Config.CELERY_RESULT_BACKEND
+# Redis / Circuit
+REDIS_URL = Config.REDIS_URL
+REDIS_SOCKET_TIMEOUT = Config.REDIS_SOCKET_TIMEOUT
+REDIS_POOL_MAXSIZE = Config.REDIS_POOL_MAXSIZE
+CIRCUIT_FAIL_THRESHOLD = Config.CIRCUIT_FAIL_THRESHOLD
+CIRCUIT_COOLDOWN_SECS = Config.CIRCUIT_COOLDOWN_SECS
+CIRCUIT_HALFOPEN_MAX_CALLS = Config.CIRCUIT_HALFOPEN_MAX_CALLS
 
-sentry_dsn = Config.SENTRY_DSN
-sentry_enabled = Config.SENTRY_ENABLED
+# Celery
+CELERY_BROKER_URL = Config.CELERY_BROKER_URL
+CELERY_RESULT_BACKEND = Config.CELERY_RESULT_BACKEND
+CELERY_QUEUES = Config.CELERY_QUEUES
+CELERY_TASK_ACKS_LATE = Config.CELERY_TASK_ACKS_LATE
+CELERY_TASK_TIME_LIMIT = Config.CELERY_TASK_TIME_LIMIT
+CELERY_TASK_SOFT_TIME_LIMIT = Config.CELERY_TASK_SOFT_TIME_LIMIT
+CELERY_RETRY_MAX = Config.CELERY_RETRY_MAX
+CELERY_RETRY_BACKOFF = Config.CELERY_RETRY_BACKOFF
+CELERY_RETRY_JITTER = Config.CELERY_RETRY_JITTER
+CELERY_PREFETCH_MULTIPLIER = Config.CELERY_PREFETCH_MULTIPLIER
 
-openai_api_key = Config.OPENAI_API_KEY
-openai_base_url = Config.OPENAI_BASE_URL
+# Observability
+STRUCTURED_LOGGING_ENABLED = Config.STRUCTURED_LOGGING_ENABLED
+SENTRY_ENABLED = Config.SENTRY_ENABLED
+SENTRY_DSN = Config.SENTRY_DSN
+PROMETHEUS_ENABLED = Config.PROMETHEUS_ENABLED
+METRICS_FALLBACK_TO_REDIS = Config.METRICS_FALLBACK_TO_REDIS
 
-http_connect_timeout = Config.HTTP_CONNECT_TIMEOUT
-http_read_timeout = Config.HTTP_READ_TIMEOUT
-http_max_pool = Config.HTTP_MAX_POOL
+# R2
+R2_ENDPOINT = Config.R2_ENDPOINT
+R2_ACCESS_KEY_ID = Config.R2_ACCESS_KEY_ID
+R2_SECRET_ACCESS_KEY = Config.R2_SECRET_ACCESS_KEY
+R2_BUCKET = Config.R2_BUCKET
+R2_CONNECT_TIMEOUT_SECS = Config.R2_CONNECT_TIMEOUT_SECS
+R2_READ_TIMEOUT_SECS = Config.R2_READ_TIMEOUT_SECS
+R2_POOL_MAXSIZE = Config.R2_POOL_MAXSIZE
 
-log_level = Config.LOG_LEVEL
-log_json = Config.LOG_JSON
-log_buffer_size = Config.LOG_BUFFER_SIZE  # ← critical for celery_app import path
+# AI
+OPENAI_API_KEY = Config.OPENAI_API_KEY
+DEEPGRAM_API_KEY = Config.DEEPGRAM_API_KEY
 
-prometheus_enabled = Config.PROMETHEUS_ENABLED
-metrics_namespace = Config.METRICS_NAMESPACE
-metrics_push_interval_sec = Config.METRICS_PUSH_INTERVAL_SEC
-metrics_fallback_to_redis = Config.METRICS_FALLBACK_TO_REDIS
+# Misc
+ENV_MODE = Config.ENV_MODE
+DAILY_CALLS_SOFT_CAP = Config.DAILY_CALLS_SOFT_CAP
 
-cb_fail_threshold = Config.CB_FAIL_THRESHOLD
-cb_cooldown_seconds = Config.CB_COOLDOWN_SECONDS
-cb_half_open_success_threshold = Config.CB_HALF_OPEN_SUCCESS_THRESHOLD
-
-max_concurrent_streams = Config.MAX_CONCURRENT_STREAMS
-stream_health_interval_sec = Config.STREAM_HEALTH_INTERVAL_SEC
-
-max_tts_text_len = Config.MAX_TTS_TEXT_LEN  # ← requested earlier for TTS
-tts_voice = Config.TTS_VOICE
-tts_rate = Config.TTS_RATE
-
-env_mode = Config.ENV_MODE
-service_name = Config.SERVICE_NAME
-debug = Config.DEBUG
-
-# Convenience Celery settings dict (imported by celery_app without side-effects)
-def celery_settings() -> dict:
-    return {
-        "broker_url": Config.CELERY_BROKER_URL,
-        "result_backend": Config.CELERY_RESULT_BACKEND,
-        "task_acks_late": Config.CELERY_TASK_ACKS_LATE,
-        "task_track_started": Config.CELERY_TASK_TRACK_STARTED,
-        "worker_max_tasks_per_child": Config.CELERY_WORKER_MAX_TASKS_PER_CHILD,
-        "worker_concurrency": Config.CELERY_WORKER_CONCURRENCY,
-        "timezone": Config.CELERY_TIMEZONE,
-    }
+__all__ = [
+    "Config",
+    # legacy/module-level aliases
+    "LOG_BUFFER_SIZE", "log_buffer_size",
+    "MAX_TTS_TEXT_LEN",
+    "REDIS_URL", "REDIS_SOCKET_TIMEOUT", "REDIS_POOL_MAXSIZE",
+    "CIRCUIT_FAIL_THRESHOLD", "CIRCUIT_COOLDOWN_SECS", "CIRCUIT_HALFOPEN_MAX_CALLS",
+    "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND", "CELERY_QUEUES",
+    "CELERY_TASK_ACKS_LATE", "CELERY_TASK_SOFT_TIME_LIMIT", "CELERY_TASK_TIME_LIMIT",
+    "CELERY_RETRY_MAX", "CELERY_RETRY_BACKOFF", "CELERY_RETRY_JITTER", "CELERY_PREFETCH_MULTIPLIER",
+    "STRUCTURED_LOGGING_ENABLED", "SENTRY_ENABLED", "SENTRY_DSN",
+    "PROMETHEUS_ENABLED", "METRICS_FALLBACK_TO_REDIS",
+    "R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET",
+    "R2_CONNECT_TIMEOUT_SECS", "R2_READ_TIMEOUT_SECS", "R2_POOL_MAXSIZE",
+    "OPENAI_API_KEY", "DEEPGRAM_API_KEY",
+    "ENV_MODE", "DAILY_CALLS_SOFT_CAP",
+]
 
 
-# --------------------------------------------------------------------------------------
-# Optional: emit a tiny bootstrap log without importing project logging utils
-# --------------------------------------------------------------------------------------
-if _to_bool(os.getenv("CONFIG_DEBUG_SNAPSHOT"), False):
-    try:
-        import json, sys
-        json.dump({"config_snapshot": Config.as_dict()}, sys.stdout, indent=2)
-        print()  # newline
-    except Exception:
-        pass
+# ---------------------- local smoke (optional) ----------------------
+if __name__ == "__main__":
+    # Prints legacy + derived URLs; zero side-effects.
+    print(
+        "OK",
+        getattr(Config, "log_buffer_size", None),
+        getattr(__import__("config"), "log_buffer_size", None),
+        Config.get_celery_urls(),
+    )
