@@ -1,13 +1,11 @@
 # path: config.py
-# Production-ready config with full backward-compat for legacy names + Phase-12 knobs.
+# Production-ready config with strict backward-compat and Phase-12 knobs.
 
 from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-
-# ---------------------- env helpers ----------------------
-
+# ---- tiny env helpers (no heavy imports) ----
 def _env_str(name: str, default: Optional[str] = None) -> Optional[str]:
     v = os.getenv(name)
     return v if v not in (None, "") else default
@@ -48,43 +46,35 @@ def _redact(val: Optional[str]) -> Optional[str]:
     return ("******" if len(val) <= 6 else (val[:2] + "****" + val[-2:]))
 
 
-# ---------------------- canonical config ----------------------
-
 class Config:
     """
-    Backward-compatible constants + Phase-12 additions.
-    IMPORTANT: legacy snake_case + UPPERCASE names are preserved.
+    Backward-compatible config surface + Phase-12 settings.
+    Exposes both UPPER_CASE and snake_case on the class.
     """
 
-    # ---- Logging (legacy) ----
-    log_buffer_size: int = _env_int("LOG_BUFFER_SIZE", 8192)       # legacy required
-    LOG_LEVEL: str = (_env_str("LOG_LEVEL", "INFO") or "INFO")     # expected by celery_app.py
-    ENABLE_LOG_BUFFERING: bool = _env_bool("ENABLE_LOG_BUFFERING", True)
-    LOG_JSON: bool = _env_bool("LOG_JSON", True)  # structured JSON logs on by default
+    # -------- Identity / Phase banner --------
+    SERVICE_NAME: str = _env_str("SERVICE_NAME", "sara_core") or "sara_core"
+    service_name: str = SERVICE_NAME  # legacy snake_case
+    PHASE_VERSION: str = _env_str("PHASE_VERSION", "12-Stable") or "12-Stable"
+    phase_version: str = PHASE_VERSION
 
-    # ---- Phase-12 constraints ----
-    MAX_TTS_TEXT_LEN: int = _env_int("MAX_TTS_TEXT_LEN", 1200)
+    ENV: str = _env_str("ENV", _env_str("APP_ENV", "local")) or "local"
+    DEBUG: bool = _env_bool("DEBUG", False)
+    ENV_MODE: str = _env_str("ENV_MODE", "render" if "RENDER" in os.environ else "local") or "local"
 
-    # ---- Service mode ----
-    ENV_MODE: str = _env_str("ENV_MODE", "render") or "render"
-
-    # ---- URLs / Redis / Celery ----
-    REDIS_URL: Optional[str] = _env_str("REDIS_URL")
+    # -------- Redis / Celery --------
+    REDIS_URL: str = _env_str("REDIS_URL", "redis://localhost:6379/0") or "redis://localhost:6379/0"
     CELERY_BROKER_URL: Optional[str] = _env_str("CELERY_BROKER_URL")
     CELERY_RESULT_BACKEND: Optional[str] = _env_str("CELERY_RESULT_BACKEND")
-
-    REDIS_SOCKET_TIMEOUT: int = _env_int("REDIS_SOCKET_TIMEOUT", 5)
-    REDIS_POOL_MAXSIZE: int = _env_int("REDIS_POOL_MAXSIZE", 20)
-
-    CIRCUIT_FAIL_THRESHOLD: int = _env_int("CIRCUIT_FAIL_THRESHOLD", 5)
-    CIRCUIT_COOLDOWN_SECS: int = _env_int("CIRCUIT_COOLDOWN_SECS", 30)
-    CIRCUIT_HALFOPEN_MAX_CALLS: int = _env_int("CIRCUIT_HALFOPEN_MAX_CALLS", 10)
-
+    CELERY_TIMEZONE: str = _env_str("CELERY_TIMEZONE", "UTC") or "UTC"
+    CELERY_TASK_ACKS_LATE: bool = _env_bool("CELERY_TASK_ACKS_LATE", True)
+    CELERY_TASK_TRACK_STARTED: bool = _env_bool("CELERY_TASK_TRACK_STARTED", True)
+    CELERY_WORKER_MAX_TASKS_PER_CHILD: int = _env_int("CELERY_WORKER_MAX_TASKS_PER_CHILD", 200)
+    CELERY_WORKER_CONCURRENCY: int = _env_int("CELERY_WORKER_CONCURRENCY", 4)
     CELERY_QUEUES: List[str] = _env_csv(
         "CELERY_QUEUES",
         ["default", "priority", "celery", "voice_pipeline", "tts", "run_tts", "ai_tasks"],
     )
-    CELERY_TASK_ACKS_LATE: bool = _env_bool("CELERY_TASK_ACKS_LATE", True)
     CELERY_TASK_TIME_LIMIT: int = _env_int("CELERY_TASK_TIME_LIMIT", 60 * 10)
     CELERY_TASK_SOFT_TIME_LIMIT: int = _env_int("CELERY_TASK_SOFT_TIME_LIMIT", 60 * 8)
     CELERY_RETRY_MAX: int = _env_int("CELERY_RETRY_MAX", 5)
@@ -92,39 +82,69 @@ class Config:
     CELERY_RETRY_JITTER: bool = _env_bool("CELERY_RETRY_JITTER", True)
     CELERY_PREFETCH_MULTIPLIER: int = _env_int("CELERY_PREFETCH_MULTIPLIER", 1)
 
-    # ---- Observability ----
-    STRUCTURED_LOGGING_ENABLED: bool = _env_bool("STRUCTURED_LOGGING_ENABLED", True)
-    SENTRY_ENABLED: bool = _env_bool("SENTRY_ENABLED", True)
-    SENTRY_DSN: Optional[str] = _env_str("SENTRY_DSN")
-    PROMETHEUS_ENABLED: bool = _env_bool("PROMETHEUS_ENABLED", False)
-    METRICS_FALLBACK_TO_REDIS: bool = _env_bool("METRICS_FALLBACK_TO_REDIS", True)
-
-    # ---- R2 ----
-    R2_ENDPOINT: Optional[str] = _env_str("R2_ENDPOINT")
-    R2_ACCESS_KEY_ID: Optional[str] = _env_str("R2_ACCESS_KEY_ID")
-    R2_SECRET_ACCESS_KEY: Optional[str] = _env_str("R2_SECRET_ACCESS_KEY")
-    R2_BUCKET: Optional[str] = _env_str("R2_BUCKET")
-    R2_CONNECT_TIMEOUT_SECS: int = _env_int("R2_CONNECT_TIMEOUT_SECS", 10)
-    R2_READ_TIMEOUT_SECS: int = _env_int("R2_READ_TIMEOUT_SECS", 30)
-    R2_POOL_MAXSIZE: int = _env_int("R2_POOL_MAXSIZE", 64)
-
-    # ---- AI keys ----
-    OPENAI_API_KEY: Optional[str] = _env_str("OPENAI_API_KEY")
-    DEEPGRAM_API_KEY: Optional[str] = _env_str("DEEPGRAM_API_KEY")
-
-    # ---- Safety ----
-    DAILY_CALLS_SOFT_CAP: int = _env_int("DAILY_CALLS_SOFT_CAP", 300)
-
-    # ---- Helpers ----
+    # Derived (if not explicitly set)
     @classmethod
     def get_celery_urls(cls) -> Tuple[str, str]:
         broker = cls.CELERY_BROKER_URL
         backend = cls.CELERY_RESULT_BACKEND
         if broker and backend:
             return broker, backend
-        redis = cls.REDIS_URL or "redis://localhost:6379"
-        return f"{redis.rstrip('/')}/0", f"{redis.rstrip('/')}/1"
+        base = cls.REDIS_URL.rsplit("/", 1)[0] if "/" in cls.REDIS_URL else cls.REDIS_URL
+        return (broker or f"{base}/0", backend or f"{base}/1")
 
+    # -------- Redis/circuit knobs --------
+    REDIS_SOCKET_TIMEOUT: int = _env_int("REDIS_SOCKET_TIMEOUT", 5)
+    REDIS_POOL_MAXSIZE: int = _env_int("REDIS_POOL_MAXSIZE", 20)
+    CIRCUIT_FAIL_THRESHOLD: int = _env_int("CIRCUIT_FAIL_THRESHOLD", 5)
+    CIRCUIT_COOLDOWN_SECS: int = _env_int("CIRCUIT_COOLDOWN_SECS", 30)
+    CIRCUIT_HALFOPEN_MAX_CALLS: int = _env_int("CIRCUIT_HALFOPEN_MAX_CALLS", 10)
+
+    # -------- Logging (critical legacy names) --------
+    LOG_LEVEL: str = _env_str("LOG_LEVEL", "INFO") or "INFO"
+    log_level: str = LOG_LEVEL
+    LOG_JSON: bool = _env_bool("LOG_JSON", True)
+    log_json: bool = LOG_JSON
+    LOG_BUFFER_SIZE: int = _env_int("LOG_BUFFER_SIZE", 1000)
+    log_buffer_size: int = LOG_BUFFER_SIZE
+    ENABLE_LOG_BUFFERING: bool = _env_bool("ENABLE_LOG_BUFFERING", True)
+    enable_log_buffering: bool = ENABLE_LOG_BUFFERING
+
+    # -------- Observability --------
+    SENTRY_DSN: Optional[str] = _env_str("SENTRY_DSN")
+    SENTRY_ENABLED: bool = _env_bool("SENTRY_ENABLED", bool(SENTRY_DSN))
+    SENTRY_TRACES_SAMPLE_RATE: float = _env_float("SENTRY_TRACES_SAMPLE_RATE", 0.05)
+    STRUCTURED_LOGGING_ENABLED: bool = _env_bool("STRUCTURED_LOGGING_ENABLED", True)
+    PROMETHEUS_ENABLED: bool = _env_bool("PROMETHEUS_ENABLED", True)
+    METRICS_NAMESPACE: str = _env_str("METRICS_NAMESPACE", "sara") or "sara"
+    METRICS_PUSH_INTERVAL_SEC: int = _env_int("METRICS_PUSH_INTERVAL_SEC", 5)
+    METRICS_FALLBACK_TO_REDIS: bool = _env_bool("METRICS_FALLBACK_TO_REDIS", True)
+
+    # -------- AI / TTS --------
+    OPENAI_API_KEY: Optional[str] = _env_str("OPENAI_API_KEY")
+    OPENAI_BASE_URL: Optional[str] = _env_str("OPENAI_BASE_URL")
+    DEEPGRAM_API_KEY: Optional[str] = _env_str("DEEPGRAM_API_KEY") or _env_str("DG_API_KEY")
+    DEEPGRAM_BASE_URL: str = _env_str("DEEPGRAM_BASE_URL", _env_str("DG_BASE_URL", "https://api.deepgram.com")) or "https://api.deepgram.com"
+    DEEPGRAM_MODEL: str = _env_str("DEEPGRAM_MODEL", _env_str("DG_MODEL", "nova-2-general")) or "nova-2-general"
+
+    MAX_TTS_TEXT_LEN: int = _env_int("MAX_TTS_TEXT_LEN", 1000)
+    TTS_VOICE: str = _env_str("TTS_VOICE", "alloy") or "alloy"
+    TTS_RATE: float = _env_float("TTS_RATE", 1.0)
+
+    # -------- Cloudflare R2 --------
+    R2_ACCOUNT_ID: Optional[str] = _env_str("R2_ACCOUNT_ID")
+    R2_ACCESS_KEY_ID: Optional[str] = _env_str("R2_ACCESS_KEY_ID")
+    R2_SECRET_ACCESS_KEY: Optional[str] = _env_str("R2_SECRET_ACCESS_KEY")
+    R2_BUCKET: Optional[str] = _env_str("R2_BUCKET")
+    R2_PUBLIC_BASE_URL: Optional[str] = _env_str("R2_PUBLIC_BASE_URL")
+    HTTP_CONNECT_TIMEOUT: int = _env_int("HTTP_CONNECT_TIMEOUT", 10)
+    HTTP_READ_TIMEOUT: int = _env_int("HTTP_READ_TIMEOUT", 30)
+    HTTP_MAX_POOL: int = _env_int("HTTP_MAX_POOL", 64)
+
+    # -------- Streaming limits --------
+    MAX_CONCURRENT_STREAMS: int = _env_int("MAX_CONCURRENT_STREAMS", 50)
+    STREAM_HEALTH_INTERVAL_SEC: int = _env_int("STREAM_HEALTH_INTERVAL_SEC", 5)
+
+    # -------- Helpers --------
     @classmethod
     def celery_settings(cls) -> Dict[str, Any]:
         broker, backend = cls.get_celery_urls()
@@ -132,25 +152,24 @@ class Config:
             "broker_url": broker,
             "result_backend": backend,
             "task_acks_late": cls.CELERY_TASK_ACKS_LATE,
+            "task_track_started": cls.CELERY_TASK_TRACK_STARTED,
+            "worker_max_tasks_per_child": cls.CELERY_WORKER_MAX_TASKS_PER_CHILD,
+            "worker_concurrency": cls.CELERY_WORKER_CONCURRENCY,
+            "timezone": cls.CELERY_TIMEZONE,
+            "worker_prefetch_multiplier": cls.CELERY_PREFETCH_MULTIPLIER,
             "task_time_limit": cls.CELERY_TASK_TIME_LIMIT,
             "task_soft_time_limit": cls.CELERY_TASK_SOFT_TIME_LIMIT,
-            "task_default_queue": cls.CELERY_QUEUES[0] if cls.CELERY_QUEUES else "default",
-            "task_queues": cls.CELERY_QUEUES,
-            "worker_prefetch_multiplier": cls.CELERY_PREFETCH_MULTIPLIER,
-            "retry_policy_defaults": {
-                "max_retries": cls.CELERY_RETRY_MAX,
-                "retry_backoff": cls.CELERY_RETRY_BACKOFF,
-                "retry_jitter": cls.CELERY_RETRY_JITTER,
-            },
         }
 
     @classmethod
     def validate(cls, strict: bool = False) -> List[str]:
         problems: List[str] = []
-        if not isinstance(cls.log_buffer_size, int):
-            problems.append("log_buffer_size must be int")
-        if not isinstance(cls.LOG_LEVEL, str):
-            problems.append("LOG_LEVEL must be str")
+        # legacy musts
+        for attr in ("LOG_BUFFER_SIZE", "log_buffer_size", "LOG_LEVEL", "log_level",
+                     "ENABLE_LOG_BUFFERING", "LOG_JSON", "SERVICE_NAME", "PHASE_VERSION"):
+            if not hasattr(cls, attr):
+                problems.append(f"missing {attr}")
+        # URLs
         broker, backend = cls.get_celery_urls()
         if not (broker.startswith("redis://") or broker.startswith("rediss://")):
             problems.append("broker_url must be redis/rediss")
@@ -161,92 +180,74 @@ class Config:
         return problems
 
     @classmethod
-    def dump_for_logging(cls) -> Dict[str, Any]:
+    def as_dict(cls) -> Dict[str, Any]:
         broker, backend = cls.get_celery_urls()
         return {
-            "env_mode": cls.ENV_MODE,
+            "service_name": cls.SERVICE_NAME,
+            "phase_version": cls.PHASE_VERSION,
+            "env": cls.ENV, "env_mode": cls.ENV_MODE, "debug": cls.DEBUG,
             "logging": {
-                "log_buffer_size": cls.log_buffer_size,
-                "LOG_BUFFER_SIZE": cls.log_buffer_size,
-                "LOG_LEVEL": cls.LOG_LEVEL,
-                "ENABLE_LOG_BUFFERING": cls.ENABLE_LOG_BUFFERING,
-                "LOG_JSON": cls.LOG_JSON,
+                "level": cls.LOG_LEVEL, "json": cls.LOG_JSON,
+                "buffer_size": cls.LOG_BUFFER_SIZE, "buffering": cls.ENABLE_LOG_BUFFERING
             },
-            "celery": {
-                "queues": cls.CELERY_QUEUES,
-                "broker_url": broker,
-                "result_backend": backend,
-                "acks_late": cls.CELERY_TASK_ACKS_LATE,
-                "soft_time_limit": cls.CELERY_TASK_SOFT_TIME_LIMIT,
-                "time_limit": cls.CELERY_TASK_TIME_LIMIT,
-                "prefetch_multiplier": cls.CELERY_PREFETCH_MULTIPLIER,
-                "retry": {
-                    "max": cls.CELERY_RETRY_MAX,
-                    "backoff": cls.CELERY_RETRY_BACKOFF,
-                    "jitter": cls.CELERY_RETRY_JITTER,
-                },
-            },
-            "redis": {
-                "url": cls.REDIS_URL,
-                "socket_timeout": cls.REDIS_SOCKET_TIMEOUT,
-                "pool_maxsize": cls.REDIS_POOL_MAXSIZE,
-            },
+            "celery": {"broker": broker, "backend": backend, "queues": cls.CELERY_QUEUES},
+            "redis": {"socket_timeout": cls.REDIS_SOCKET_TIMEOUT, "pool_maxsize": cls.REDIS_POOL_MAXSIZE},
             "circuit": {
                 "fail_threshold": cls.CIRCUIT_FAIL_THRESHOLD,
                 "cooldown_secs": cls.CIRCUIT_COOLDOWN_SECS,
                 "halfopen_max_calls": cls.CIRCUIT_HALFOPEN_MAX_CALLS,
             },
-            "r2": {
-                "endpoint": cls.R2_ENDPOINT,
-                "access_key_id": _redact(cls.R2_ACCESS_KEY_ID),
-                "secret_key": _redact(cls.R2_SECRET_ACCESS_KEY),
-                "bucket": cls.R2_BUCKET,
-                "connect_timeout_s": cls.R2_CONNECT_TIMEOUT_SECS,
-                "read_timeout_s": cls.R2_READ_TIMEOUT_SECS,
-                "pool_maxsize": cls.R2_POOL_MAXSIZE,
+            "obs": {
+                "sentry_enabled": cls.SENTRY_ENABLED,
+                "sentry_dsn": _redact(cls.SENTRY_DSN),
+                "prometheus_enabled": cls.PROMETHEUS_ENABLED,
+                "namespace": cls.METRICS_NAMESPACE,
             },
             "ai": {
                 "openai_key": _redact(cls.OPENAI_API_KEY),
                 "deepgram_key": _redact(cls.DEEPGRAM_API_KEY),
+                "deepgram_model": cls.DEEPGRAM_MODEL,
             },
-            "caps": {"daily_calls_soft_cap": cls.DAILY_CALLS_SOFT_CAP},
+            "tts": {"max_len": cls.MAX_TTS_TEXT_LEN, "voice": cls.TTS_VOICE, "rate": cls.TTS_RATE},
+            "r2": {
+                "account": _redact(cls.R2_ACCOUNT_ID),
+                "access_key": _redact(cls.R2_ACCESS_KEY_ID),
+                "secret_key": _redact(cls.R2_SECRET_ACCESS_KEY),
+                "bucket": cls.R2_BUCKET,
+                "public_base_url": cls.R2_PUBLIC_BASE_URL,
+                "http": {"connect": cls.HTTP_CONNECT_TIMEOUT, "read": cls.HTTP_READ_TIMEOUT, "pool": cls.HTTP_MAX_POOL},
+            },
+            "streaming": {"max_concurrent": cls.MAX_CONCURRENT_STREAMS, "health_interval": cls.STREAM_HEALTH_INTERVAL_SEC},
         }
 
 
-# ---------------------- CLASS-LEVEL aliases (for callers using Config.X) ----------------------
-# Why: Some modules access UPPERCASE on the class; keep them identical to snake_case values.
-Config.LOG_BUFFER_SIZE = Config.log_buffer_size      # type: ignore[attr-defined]
-Config.log_level = Config.LOG_LEVEL                  # type: ignore[attr-defined]
-Config.enable_log_buffering = Config.ENABLE_LOG_BUFFERING  # type: ignore[attr-defined]
-Config.log_json = Config.LOG_JSON                    # type: ignore[attr-defined]
+# -------- module-level mirrors (legacy import styles) --------
+# Identity / phase
+SERVICE_NAME = Config.SERVICE_NAME
+service_name = Config.service_name
+PHASE_VERSION = Config.PHASE_VERSION
+phase_version = Config.phase_version
 
-# ---------------------- MODULE-LEVEL aliases (legacy import styles) ----------------------
 # Logging
-LOG_BUFFER_SIZE = Config.log_buffer_size
+LOG_BUFFER_SIZE = Config.LOG_BUFFER_SIZE
 log_buffer_size = Config.log_buffer_size
 LOG_LEVEL = Config.LOG_LEVEL
-log_level = Config.LOG_LEVEL
+log_level = Config.log_level
 ENABLE_LOG_BUFFERING = Config.ENABLE_LOG_BUFFERING
-enable_log_buffering = Config.ENABLE_LOG_BUFFERING
+enable_log_buffering = Config.enable_log_buffering
 LOG_JSON = Config.LOG_JSON
-log_json = Config.LOG_JSON
+log_json = Config.log_json
 
-# Phase-12
-MAX_TTS_TEXT_LEN = Config.MAX_TTS_TEXT_LEN
-
-# URLs / Redis / Celery
+# Redis / Celery
 REDIS_URL = Config.REDIS_URL
-REDIS_SOCKET_TIMEOUT = Config.REDIS_SOCKET_TIMEOUT
-REDIS_POOL_MAXSIZE = Config.REDIS_POOL_MAXSIZE
-
-CIRCUIT_FAIL_THRESHOLD = Config.CIRCUIT_FAIL_THRESHOLD
-CIRCUIT_COOLDOWN_SECS = Config.CIRCUIT_COOLDOWN_SECS
-CIRCUIT_HALFOPEN_MAX_CALLS = Config.CIRCUIT_HALFOPEN_MAX_CALLS
-
-CELERY_BROKER_URL = Config.CELERY_BROKER_URL
-CELERY_RESULT_BACKEND = Config.CELERY_RESULT_BACKEND
-CELERY_QUEUES = Config.CELERY_QUEUES
+CELERY_BROKER_URL = Config.get_celery_urls()[0]
+CELERY_RESULT_BACKEND = Config.get_celery_urls()[1]
+CELERY_TIMEZONE = Config.CELERY_TIMEZONE
 CELERY_TASK_ACKS_LATE = Config.CELERY_TASK_ACKS_LATE
+CELERY_TASK_TRACK_STARTED = Config.CELERY_TASK_TRACK_STARTED
+CELERY_WORKER_MAX_TASKS_PER_CHILD = Config.CELERY_WORKER_MAX_TASKS_PER_CHILD
+CELERY_WORKER_CONCURRENCY = Config.CELERY_WORKER_CONCURRENCY
+CELERY_QUEUES = Config.CELERY_QUEUES
 CELERY_TASK_TIME_LIMIT = Config.CELERY_TASK_TIME_LIMIT
 CELERY_TASK_SOFT_TIME_LIMIT = Config.CELERY_TASK_SOFT_TIME_LIMIT
 CELERY_RETRY_MAX = Config.CELERY_RETRY_MAX
@@ -254,62 +255,79 @@ CELERY_RETRY_BACKOFF = Config.CELERY_RETRY_BACKOFF
 CELERY_RETRY_JITTER = Config.CELERY_RETRY_JITTER
 CELERY_PREFETCH_MULTIPLIER = Config.CELERY_PREFETCH_MULTIPLIER
 
+# Circuit / Redis knobs
+REDIS_SOCKET_TIMEOUT = Config.REDIS_SOCKET_TIMEOUT
+REDIS_POOL_MAXSIZE = Config.REDIS_POOL_MAXSIZE
+CIRCUIT_FAIL_THRESHOLD = Config.CIRCUIT_FAIL_THRESHOLD
+CIRCUIT_COOLDOWN_SECS = Config.CIRCUIT_COOLDOWN_SECS
+CIRCUIT_HALFOPEN_MAX_CALLS = Config.CIRCUIT_HALFOPEN_MAX_CALLS
+
 # Observability
-STRUCTURED_LOGGING_ENABLED = Config.STRUCTURED_LOGGING_ENABLED
-SENTRY_ENABLED = Config.SENTRY_ENABLED
 SENTRY_DSN = Config.SENTRY_DSN
+SENTRY_ENABLED = Config.SENTRY_ENABLED
+SENTRY_TRACES_SAMPLE_RATE = Config.SENTRY_TRACES_SAMPLE_RATE
+STRUCTURED_LOGGING_ENABLED = Config.STRUCTURED_LOGGING_ENABLED
 PROMETHEUS_ENABLED = Config.PROMETHEUS_ENABLED
+METRICS_NAMESPACE = Config.METRICS_NAMESPACE
+METRICS_PUSH_INTERVAL_SEC = Config.METRICS_PUSH_INTERVAL_SEC
 METRICS_FALLBACK_TO_REDIS = Config.METRICS_FALLBACK_TO_REDIS
 
-# R2
-R2_ENDPOINT = Config.R2_ENDPOINT
+# AI / TTS
+OPENAI_API_KEY = Config.OPENAI_API_KEY
+OPENAI_BASE_URL = Config.OPENAI_BASE_URL
+DEEPGRAM_API_KEY = Config.DEEPGRAM_API_KEY
+DEEPGRAM_BASE_URL = Config.DEEPGRAM_BASE_URL
+DEEPGRAM_MODEL = Config.DEEPGRAM_MODEL
+MAX_TTS_TEXT_LEN = Config.MAX_TTS_TEXT_LEN
+TTS_VOICE = Config.TTS_VOICE
+TTS_RATE = Config.TTS_RATE
+
+# R2 / HTTP
+R2_ACCOUNT_ID = Config.R2_ACCOUNT_ID
 R2_ACCESS_KEY_ID = Config.R2_ACCESS_KEY_ID
 R2_SECRET_ACCESS_KEY = Config.R2_SECRET_ACCESS_KEY
 R2_BUCKET = Config.R2_BUCKET
-R2_CONNECT_TIMEOUT_SECS = Config.R2_CONNECT_TIMEOUT_SECS
-R2_READ_TIMEOUT_SECS = Config.R2_READ_TIMEOUT_SECS
-R2_POOL_MAXSIZE = Config.R2_POOL_MAXSIZE
+R2_PUBLIC_BASE_URL = Config.R2_PUBLIC_BASE_URL
+HTTP_CONNECT_TIMEOUT = Config.HTTP_CONNECT_TIMEOUT
+HTTP_READ_TIMEOUT = Config.HTTP_READ_TIMEOUT
+HTTP_MAX_POOL = Config.HTTP_MAX_POOL
 
-# AI / Misc
-OPENAI_API_KEY = Config.OPENAI_API_KEY
-DEEPGRAM_API_KEY = Config.DEEPGRAM_API_KEY
-ENV_MODE = Config.ENV_MODE
-DAILY_CALLS_SOFT_CAP = Config.DAILY_CALLS_SOFT_CAP
+# Streaming
+MAX_CONCURRENT_STREAMS = Config.MAX_CONCURRENT_STREAMS
+STREAM_HEALTH_INTERVAL_SEC = Config.STREAM_HEALTH_INTERVAL_SEC
 
-# Export `config` name for `from config import config`
-config = Config  # class-as-config pattern
+# Export config symbol for callers doing `from config import config`
+config = Config  # class-as-config pattern, supports config.LOG_LEVEL and config.log_level
 
 __all__ = [
     "Config", "config",
+    # identity/phase
+    "SERVICE_NAME", "service_name", "PHASE_VERSION", "phase_version",
     # logging
     "LOG_BUFFER_SIZE", "log_buffer_size", "LOG_LEVEL", "log_level",
     "ENABLE_LOG_BUFFERING", "enable_log_buffering", "LOG_JSON", "log_json",
-    # phase-12
-    "MAX_TTS_TEXT_LEN",
-    # urls / redis / celery
-    "REDIS_URL", "REDIS_SOCKET_TIMEOUT", "REDIS_POOL_MAXSIZE",
+    # redis/celery
+    "REDIS_URL", "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND", "CELERY_TIMEZONE",
+    "CELERY_TASK_ACKS_LATE", "CELERY_TASK_TRACK_STARTED", "CELERY_WORKER_MAX_TASKS_PER_CHILD",
+    "CELERY_WORKER_CONCURRENCY", "CELERY_QUEUES", "CELERY_TASK_TIME_LIMIT",
+    "CELERY_TASK_SOFT_TIME_LIMIT", "CELERY_RETRY_MAX", "CELERY_RETRY_BACKOFF",
+    "CELERY_RETRY_JITTER", "CELERY_PREFETCH_MULTIPLIER",
+    # circuit/redis knobs
+    "REDIS_SOCKET_TIMEOUT", "REDIS_POOL_MAXSIZE",
     "CIRCUIT_FAIL_THRESHOLD", "CIRCUIT_COOLDOWN_SECS", "CIRCUIT_HALFOPEN_MAX_CALLS",
-    "CELERY_BROKER_URL", "CELERY_RESULT_BACKEND", "CELERY_QUEUES",
-    "CELERY_TASK_ACKS_LATE", "CELERY_TASK_SOFT_TIME_LIMIT", "CELERY_TASK_TIME_LIMIT",
-    "CELERY_RETRY_MAX", "CELERY_RETRY_BACKOFF", "CELERY_RETRY_JITTER", "CELERY_PREFETCH_MULTIPLIER",
-    # observability
-    "STRUCTURED_LOGGING_ENABLED", "SENTRY_ENABLED", "SENTRY_DSN",
-    "PROMETHEUS_ENABLED", "METRICS_FALLBACK_TO_REDIS",
-    # r2
-    "R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET",
-    "R2_CONNECT_TIMEOUT_SECS", "R2_READ_TIMEOUT_SECS", "R2_POOL_MAXSIZE",
-    # ai / misc
-    "OPENAI_API_KEY", "DEEPGRAM_API_KEY", "ENV_MODE", "DAILY_CALLS_SOFT_CAP",
+    # obs
+    "SENTRY_DSN", "SENTRY_ENABLED", "SENTRY_TRACES_SAMPLE_RATE", "STRUCTURED_LOGGING_ENABLED",
+    "PROMETHEUS_ENABLED", "METRICS_NAMESPACE", "METRICS_PUSH_INTERVAL_SEC", "METRICS_FALLBACK_TO_REDIS",
+    # ai/tts
+    "OPENAI_API_KEY", "OPENAI_BASE_URL", "DEEPGRAM_API_KEY", "DEEPGRAM_BASE_URL", "DEEPGRAM_MODEL",
+    "MAX_TTS_TEXT_LEN", "TTS_VOICE", "TTS_RATE",
+    # r2/http
+    "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "R2_PUBLIC_BASE_URL",
+    "HTTP_CONNECT_TIMEOUT", "HTTP_READ_TIMEOUT", "HTTP_MAX_POOL",
+    # streaming
+    "MAX_CONCURRENT_STREAMS", "STREAM_HEALTH_INTERVAL_SEC",
 ]
 
 if __name__ == "__main__":
-    # Quick smoke to ensure aliases resolve in all styles.
-    print(
-        "OK",
-        Config.log_buffer_size,
-        LOG_BUFFER_SIZE,
-        getattr(config, "log_buffer_size", None),
-        getattr(config, "LOG_BUFFER_SIZE", None),
-        LOG_LEVEL,
-        ENABLE_LOG_BUFFERING,
-    )
+    print("CONFIG_SMOKE_OK", config.LOG_LEVEL, config.log_level, config.LOG_BUFFER_SIZE, config.log_buffer_size,
+          config.SERVICE_NAME, config.PHASE_VERSION, Config.validate(strict=False))
