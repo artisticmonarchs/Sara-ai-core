@@ -53,7 +53,12 @@ except ImportError:
     class Config:
         OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
         OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
-        # TODO: Move hardcoded URL to config.py
+        # Pick OPENAI_BASE_URL first, then OPENAI_API_URL, default to Responses API:
+        OPENAI_BASE_URL = (
+            os.getenv("OPENAI_BASE_URL")
+            or os.getenv("OPENAI_API_URL")
+            or "https://api.openai.com/v1/responses"
+        )
         MODEL_VERSION = os.getenv("MODEL_VERSION", "v2")
         GPT_MAX_TOKENS = int(os.getenv("GPT_MAX_TOKENS", "1000"))
         GPT_TEMPERATURE = float(os.getenv("GPT_TEMPERATURE", "0.7"))
@@ -308,7 +313,7 @@ class TokenLatencyTracker:
         current_time = time.time()
         metrics = {
             "total_latency_ms": (current_time - self.start_time) * 1000,
-            "token_count": self.token_count
+            "token_count": self.token_count,
         }
 
         if self.first_token_time:
@@ -319,9 +324,10 @@ class TokenLatencyTracker:
             )
 
         if len(self.token_timestamps) > 1:
-            gaps = []
-            for i in range(1, len(self.token_timestamps)):
-                gaps.append((self.token_timestamps[i] - self.token_timestamps[i-1]) * 1000)
+            gaps = [
+                (self.token_timestamps[i] - self.token_timestamps[i - 1]) * 1000
+                for i in range(1, len(self.token_timestamps))
+            ]
             if gaps:
                 metrics["avg_token_latency_ms"] = sum(gaps) / len(gaps)
                 metrics["max_token_latency_ms"] = max(gaps)
@@ -700,7 +706,6 @@ async def generate_reply_adaptive(
         words = reply.split()
         for i, word in enumerate(words):
             yield word + (" " if i < len(words) - 1 else "")
-}
 
 # --------------------------------------------------------------------------
 # Backward Compatibility Wrapper

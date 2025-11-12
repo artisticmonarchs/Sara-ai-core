@@ -19,7 +19,7 @@ import requests
 # Phase 12: Use shared_task with proper resilience decorators
 from celery import shared_task
 
-from gpt_client import generate_reply_sync
+from gpt_client import generate_reply_sync as generate_reply
 from logging_utils import log_event
 
 # --------------------------------------------------------------------------
@@ -53,7 +53,7 @@ CELERY_RETRY_BACKOFF_MAX = getattr(config, "CELERY_RETRY_BACKOFF_MAX", 600)
 CELERY_SOFT_TIME_LIMIT = getattr(config, "CELERY_SOFT_TIME_LIMIT", 300)
 
 # Bucket name compatibility (env may use R2_BUCKET or R2_BUCKET_NAME)
-R2_BUCKET_NAME = getattr(config, "R2_BUCKET_NAME", None) or getattr(config, "R2_BUCKET", None)
+R2_BUCKET_NAME = getattr(config, "R2_BUCKET_NAME", None) or getattr(config, "R2_BUCKET", None) or os.getenv("R2_BUCKET")
 
 # Phase 12: Transient error detection
 class TransientError(Exception):
@@ -177,6 +177,15 @@ def _mark_task_failed(rc, task_id: str, ttl: int = 600):
     )
 
 # --------------------------------------------------------------------------
+# External API call fallback
+# --------------------------------------------------------------------------
+try:
+    from external_api import external_api_call
+except Exception:
+    def external_api_call(_service, func, *a, **k):
+        return func()
+
+# --------------------------------------------------------------------------
 # Phase 12: @resilient_task Decorator
 # --------------------------------------------------------------------------
 def resilient_task(func=None, **decorator_kwargs):
@@ -198,13 +207,13 @@ def resilient_task(func=None, **decorator_kwargs):
         @shared_task(
             bind=True,
             acks_late=True,
-            autoretry_for=(Exception,),
+            acks_on_failure_or_timeout=False,
+            autoretry_for=(TransientError, R2UploadError, requests.Timeout, requests.ConnectionError),
             retry_backoff=True,
             retry_backoff_max=CELERY_RETRY_BACKOFF_MAX,
             retry_jitter=True,
             max_retries=max_retries,
             soft_time_limit=CELERY_SOFT_TIME_LIMIT,
-            name=task_name_full,                               # added
             **decorator_kwargs
         )
         def wrapper(self, *args, **kwargs):
@@ -292,6 +301,24 @@ def resilient_task(func=None, **decorator_kwargs):
                 obs_latency("task_latency_ms", latency_ms, labels={"task_name": task_name})
                 
                 return result
+                
+            except ConfigurationError as e:
+                latency_ms = round((time.time() - start_time) * 1000, 2)
+                if side_effecting:
+                    _release_task_lock(rc, task_id, token)
+                    token = None  # Prevent double release in finally block
+                    _mark_task_failed(rc, task_id)  # mark as failed so we don't thrash
+                log_event(
+                    service="tasks",
+                    event="task_failed_config",
+                    status="error",
+                    message=f"Task {task_name} failed due to configuration error",
+                    trace_id=trace_id,
+                    extra={"task_id": task_id, "task_name": task_name, "error": str(e), "latency_ms": latency_ms}
+                )
+                inc_metric("task_failed_total", labels={"task_name": task_name, "error_type": "ConfigurationError", "type": "fatal"})
+                # re-raise WITHOUT triggering autoretry (since it's not in autoretry_for)
+                raise
                 
             except Exception as e:
                 latency_ms = round((time.time() - start_time) * 1000, 2)
@@ -587,6 +614,10 @@ def upload_to_r2(session_id: str, trace_id: str, audio_bytes: bytes) -> Tuple[st
     size_bytes = len(audio_bytes or b"")
     start = time.time()
 
+    # Fail fast if R2 bucket is missing
+    if not R2_BUCKET_NAME:
+        raise ConfigurationError("R2 bucket name is not configured (R2_BUCKET_NAME or R2_BUCKET).")
+
     log_event(
         service="tasks", 
         event="upload_start", 
@@ -665,8 +696,7 @@ def deepgram_tts_rest(text: str, timeout: int = 30) -> Tuple[bytes, float]:
 
     start = time.time()
     
-    # Use external_api wrapper for Deepgram calls
-    from external_api import external_api_call
+    # Use external_api wrapper for Deepgram calls (already imported at top)
     
     def make_deepgram_request():
         """Encapsulate Deepgram API call for external_api wrapper"""
@@ -677,6 +707,17 @@ def deepgram_tts_rest(text: str, timeout: int = 30) -> Tuple[bytes, float]:
         if resp.status_code == 200:
             latency_ms = round((time.time() - start) * 1000, 2)
             return resp.content, latency_ms
+        elif resp.status_code == 429:
+            inc_metric, obs_latency = get_metrics()
+            inc_metric("tts_failures_total", labels={"reason": "rate_limited"})
+            log_event(
+                service="tasks",
+                event="deepgram_rate_limited",
+                status="warn",
+                message="Deepgram rate limited (429)",
+                extra={"response": resp.text[:200]}
+            )
+            raise TransientError("Deepgram rate limited (429)")
         elif 400 <= resp.status_code < 500:
             # Client errors are non-transient
             inc_metric, obs_latency = get_metrics()
@@ -834,7 +875,7 @@ def perform_tts_core(payload: Any, raise_on_error: bool = True) -> Dict[str, Any
 # --------------------------------------------------------------------------
 # Phase 12: Celery Task with Resilience Decorators
 # --------------------------------------------------------------------------
-@resilient_task
+@resilient_task(name="sara_ai.tasks._run_tts_task")
 def _run_tts_task(self, payload=None):
     """
     Phase 12: TTS task with full resilience patterns
@@ -872,7 +913,7 @@ run_tts = RunTTSProxy(_run_tts_task)
 # --------------------------------------------------------------------------
 # Phase 12: GPT + TTS Inference Task with Resilience
 # --------------------------------------------------------------------------
-@resilient_task
+@resilient_task(name="sara_ai.tasks.run_inference")
 def run_inference(self, payload):
     """
     Phase 12: Inference task with full resilience patterns
@@ -881,6 +922,17 @@ def run_inference(self, payload):
     trace_id = payload.get("trace_id") or get_trace()
     session_id = payload.get("session_id") or str(uuid.uuid4())
     transcript = extract_text(payload)
+
+    if not transcript:
+        inc_metric, _ = get_metrics()
+        inc_metric("inference_failures_total", labels={"task": self.name, "type": "validation"})
+        log_event(
+            service="tasks",
+            event="inference_empty_input",
+            status="error",
+            message="No transcript text provided; skipping GPT and TTS"
+        )
+        return {"error": "No transcript", "trace_id": trace_id, "session_id": session_id}
 
     log_event(
         service="tasks", 
@@ -894,7 +946,7 @@ def run_inference(self, payload):
     inc_metric, obs_latency = get_metrics()  # Fixed: Initialize metrics before try block
     try:
         t0 = time.time()
-        reply_text = generate_reply_sync(transcript, trace_id=trace_id)
+        reply_text = generate_reply(transcript, trace_id=trace_id)
         latency_ms = round((time.time() - t0) * 1000, 2)
         obs_latency("inference_latency_ms", latency_ms, labels={"task": self.name})
 

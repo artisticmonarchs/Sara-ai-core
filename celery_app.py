@@ -88,9 +88,19 @@ def _on_worker_init(**_):
     logger.info("[BOOT] Worker process initialized")
 
 @worker_shutdown.connect
-def _on_worker_shutdown(sig, how, exitcode, **_):
+def _on_worker_shutdown(sender=None, sig=None, how=None, exitcode=None, **kwargs):
     """Worker shutdown signal handler."""
-    logger.info(f"[SHUTDOWN] Celery worker shutting down (sig={sig}, how={how}, exit={exitcode})")
+    try:
+        from logging_utils import log_event
+        log_event(
+            service="celery_app",
+            event="worker_shutdown",
+            status="info",
+            message="Celery worker shutting down",
+            extra={"sig": sig, "how": how, "exitcode": exitcode}
+        )
+    except Exception:
+        pass
 
 # --------------------------------------------------------------------------- #
 # Sentry Integration (Error Capture)
