@@ -23,6 +23,7 @@ import json
 import uuid
 import traceback
 import time
+import os
 from typing import Optional, Dict, Any
 
 from flask import Blueprint, request, Response, jsonify
@@ -88,12 +89,14 @@ except Exception:
 SERVICE_NAME = getattr(Config, 'RENDER_SERVICE_NAME', 'twilio_client')
 SARA_ENV = getattr(Config, 'SARA_ENV', 'development')
 
-TWILIO_ACCOUNT_SID = getattr(Config, 'TWILIO_ACCOUNT_SID', '')
-TWILIO_AUTH_TOKEN = getattr(Config, 'TWILIO_AUTH_TOKEN', '')
-TWILIO_PHONE_NUMBER = getattr(Config, 'TWILIO_PHONE_NUMBER', '')
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID") or getattr(Config, "TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN") or getattr(Config, "TWILIO_AUTH_TOKEN", "")
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER") or getattr(Config, "TWILIO_PHONE_NUMBER", "") or getattr(Config, "TWILIO_NUMBER", "")
 
 # Build URLs from APP_URL/SERVER_URL for production safety
-APP_BASE_URL = (getattr(Config, "APP_URL", None) 
+APP_BASE_URL = (os.getenv("APP_URL") 
+                or os.getenv("SERVER_URL") 
+                or getattr(Config, "APP_URL", None) 
                 or getattr(Config, "SERVER_URL", None) 
                 or "https://sara-ai-core-app-j78a.onrender.com")
 TWILIO_ANSWER_URL = getattr(Config, 'TWILIO_ANSWER_URL', '') or f"{APP_BASE_URL}/twilio/answer"
