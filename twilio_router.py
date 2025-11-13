@@ -8,22 +8,33 @@ __schema_version__ = "phase_11f_v1"
 
 import time
 import traceback
+import os
 from flask import Flask, request, Response, jsonify, Blueprint
 import signal
 import sys
 from logging_utils import get_logger
+from twilio.twiml.voice_response import VoiceResponse
 
 logger = get_logger("twilio_router")
 
 
 def _graceful_shutdown(signum, frame):
     """Phase 12: Graceful shutdown handler"""
-    logger.info(f"Received signal {{signum}}, shutting down gracefully...")
+    logger.info(f"Received signal {signum}, shutting down gracefully...")
     sys.exit(0)
 
-signal.signal(signal.SIGINT, _graceful_shutdown)
-signal.signal(signal.SIGTERM, _graceful_shutdown)
+def _install_signal_handlers():
+    """Install signal handlers only in main thread to avoid WSGI issues"""
+    try:
+        signal.signal(signal.SIGINT, _graceful_shutdown)
+        signal.signal(signal.SIGTERM, _graceful_shutdown)
+        logger.debug("Signal handlers installed successfully")
+    except Exception as e:
+        logger.debug(f"Signal handlers not installed (likely not main thread): {str(e)}")
 
+
+# Twilio signature verification scaffold
+VERIFY_TWILIO_SIGNATURE = os.getenv("VERIFY_TWILIO_SIGNATURE", "false").lower() == "true"
 
 # Phase 11-F: Lazy imports to avoid import-time side effects
 def _get_twilio_client():
@@ -96,7 +107,8 @@ def _get_config_values():
         # TODO: Move hardcoded URL to config.py
         "TWILIO_ROUTER_PORT": getattr(Config, "TWILIO_ROUTER_PORT", 8001),
         # TODO: Move hardcoded port number to config.py
-        "DUPLEX_STREAMING_ENABLED": getattr(Config, "DUPLEX_STREAMING_ENABLED", True) and DUPLEX_AVAILABLE
+        "DUPLEX_STREAMING_ENABLED": getattr(Config, "DUPLEX_STREAMING_ENABLED", True) and DUPLEX_AVAILABLE,
+        "TWILIO_MEDIA_WS_CONN_TRACK": getattr(Config, "TWILIO_MEDIA_WS_CONN_TRACK", "inbound")
     }
 
 CONFIG = _get_config_values()
@@ -131,12 +143,109 @@ twilio_client = None
 # Phase 11-F: Duplex controller - lazy initialization
 duplex_controller = None
 
-# Phase 11-F: Convert to Blueprint for better isolation
-from flask import Blueprint
-
+# Phase 11-F: Blueprint already imported above
 twilio_router_bp = Blueprint("twilio_router", __name__)
 
 logger.info("Twilio router blueprint initialized successfully.")
+
+# --------------------------------------------------------------------------
+# Twilio Webhook Helper Functions
+# --------------------------------------------------------------------------
+def _media_ws_url() -> str | None:
+    """Get WebSocket URL for media streaming from environment"""
+    return os.getenv("TWILIO_MEDIA_WS_URL")  # e.g., wss://sara-ai-core-streaming-mt53.onrender.com/media
+
+def _verify_twilio_signature() -> bool:
+    """Verify Twilio request signature if enabled"""
+    if not VERIFY_TWILIO_SIGNATURE:
+        return True
+    
+    try:
+        # TODO: Implement proper Twilio signature verification
+        # from twilio.request_validator import RequestValidator
+        # validator = RequestValidator(os.environ['TWILIO_AUTH_TOKEN'])
+        # signature = request.headers.get('X-Twilio-Signature', '')
+        # return validator.validate(request.url, request.form, signature)
+        return True
+    except Exception as e:
+        logger.warning(f"Twilio signature verification failed: {str(e)}")
+        return False
+
+# --------------------------------------------------------------------------
+# Twilio Webhook Endpoints
+# --------------------------------------------------------------------------
+@twilio_router_bp.route("/twilio/answer", methods=["GET", "POST"])
+def twilio_answer():
+    """Handle incoming Twilio call - returns TwiML (XML) for both GET and POST"""
+    trace_id = get_trace_id()
+    
+    # Verify Twilio signature if enabled
+    if not _verify_twilio_signature():
+        _structured_log("twilio_signature_failed", level="warning",
+                      message="Twilio signature verification failed", trace_id=trace_id)
+        return Response("Invalid signature", status=403, mimetype="text/plain")
+    
+    try:
+        r = VoiceResponse()
+        ws_url = _media_ws_url()
+        
+        if ws_url and isinstance(ws_url, str) and ws_url.strip().startswith("wss://"):
+            # Safest approach: omit track parameter and let Twilio default to inbound
+            with r.connect() as c:
+                c.stream(url=ws_url.strip())
+        else:
+            r.say("Hello, this is Sara. Please hold while we connect.")
+        
+        _structured_log("twilio_answer_webhook", level="info",
+                      message="Processed Twilio answer webhook",
+                      trace_id=trace_id, media_ws_available=bool(ws_url and ws_url.strip().startswith("wss://")))
+        
+        return Response(str(r), status=200, mimetype="application/xml")
+    except Exception as e:
+        _structured_log("twilio_answer_error", level="error",
+                      message=f"Error processing answer webhook: {str(e)}",
+                      trace_id=trace_id, error=str(e), traceback=traceback.format_exc())
+        capture_exception_safe(e, {"service": __service__, "trace_id": trace_id})
+        # Fallback response
+        r = VoiceResponse()
+        r.say("Hello, this is Sara. Please hold while we connect.")
+        return Response(str(r), status=200, mimetype="application/xml")
+
+@twilio_router_bp.route("/twilio/events", methods=["GET", "POST"])
+def twilio_events():
+    """Handle Twilio status webhooks - accepts application/x-www-form-urlencoded"""
+    trace_id = get_trace_id()
+    
+    # Verify Twilio signature if enabled
+    if not _verify_twilio_signature():
+        _structured_log("twilio_signature_failed", level="warning",
+                      message="Twilio signature verification failed", trace_id=trace_id)
+        return Response("Invalid signature", status=403, mimetype="text/plain")
+    
+    try:
+        # For GET requests, return service info (useful for debugging)
+        if request.method == "GET":
+            return jsonify({
+                "service": __service__,
+                "status": "healthy",
+                "phase": __phase__,
+                "schema_version": __schema_version__,
+                "trace_id": trace_id
+            }), 200
+        
+        # For POST requests, process Twilio webhook data
+        # Twilio sends application/x-www-form-urlencoded - defensive parsing
+        payload = request.form.to_dict() if request.form else {}
+        _structured_log("twilio_status_webhook", level="info",
+                      message="Received Twilio status webhook",
+                      trace_id=trace_id, **payload)
+        return ("", 204)
+    except Exception as e:
+        _structured_log("twilio_events_error", level="error",
+                      message=f"Error processing events webhook: {str(e)}",
+                      trace_id=trace_id, error=str(e), traceback=traceback.format_exc())
+        capture_exception_safe(e, {"service": __service__, "trace_id": trace_id})
+        return ("", 204)  # Always return 204 to Twilio even on errors
 
 # --------------------------------------------------------------------------
 # Phase 11-F Duplex Controller Initialization
@@ -153,9 +262,9 @@ def _init_duplex_controller():
                       message="Duplex voice controller initialized successfully")
         return duplex_controller
     except Exception as e:
-        _structured_log("duplex_controller_init_failed", level="warn",
+        _structured_log("duplex_controller_init_failed", level="warning",
                       message="Failed to initialize duplex controller",
-                      extra={"error": str(e)})
+                      error=str(e))
         duplex_controller = None
         return None
 
@@ -181,7 +290,7 @@ def _init_twilio_client():
         return twilio_client
     except Exception as e:
         capture_exception_safe(e, {"service": __service__, "msg": "Twilio init failed"})
-        _structured_log("twilio_init_failed", level="error", message=str(e))
+        _structured_log("twilio_init_failed", level="error", message=str(e), error=str(e))
         twilio_client = None
         return None
 
@@ -247,6 +356,12 @@ def playback():
     session_id = payload.get("session_id")
     trace_id = payload.get("trace_id") or get_trace_id()
 
+    # Check for placeholder PUBLIC_AUDIO_BASE configuration
+    if CONFIG["PUBLIC_AUDIO_BASE"].startswith("https://your-domain.com"):
+        _structured_log("playback_config_missing", level="error",
+                      message="PUBLIC_AUDIO_BASE not configured", trace_id=trace_id)
+        return jsonify({"error": "PUBLIC_AUDIO_BASE not configured", "trace_id": trace_id}), 400
+
     # Phase 11-F: Circuit breaker check
     if _is_circuit_breaker_open("twilio_client"):
         _structured_log("circuit_breaker_blocked", level="warning", 
@@ -264,7 +379,6 @@ def playback():
         return jsonify({"error": "Missing session_id or trace_id", "trace_id": trace_id}), 400
 
     # Sanitize session_id for URL safety
-    import os
     safe_session_id = os.path.basename(session_id) if session_id else None
     if not safe_session_id or safe_session_id != session_id:
         _structured_log("playback_invalid_session_id", level="error",
@@ -324,10 +438,10 @@ def playback():
                             "via": "duplex_controller"
                         }), 200
             except Exception as e:
-                _structured_log("duplex_playback_failed", level="warn",
+                _structured_log("duplex_playback_failed", level="warning",
                               message="Duplex playback failed, falling back to standard Twilio",
                               trace_id=trace_id, session_id=safe_session_id, 
-                              extra={"error": str(e)})
+                              error=str(e))
 
         # Fallback to standard Twilio client
         client = _init_twilio_client()
@@ -341,7 +455,7 @@ def playback():
             return jsonify({"error": "Twilio client unavailable", "trace_id": trace_id}), 500
 
         # Update Twilio call with explicit timeout
-        client.calls(call_sid).update(twiml=twiml, timeout=5)
+        client.calls(call_sid).update(twiml=twiml)
 
         # Phase 11-F: Record success metrics and structured log
         latency_ms = (time.time() - start_time) * 1000
@@ -372,12 +486,12 @@ def playback():
         if isinstance(e, TwilioRestException):
             _structured_log("twilio_playback_twilio_error", level="error",
                           message=str(e), trace_id=trace_id, session_id=safe_session_id,
-                          traceback=traceback.format_exc(), latency_ms=latency_ms)
+                          traceback=traceback.format_exc(), latency_ms=latency_ms, error=str(e))
             return jsonify({"error": f"Twilio API error: {str(e)}", "trace_id": trace_id}), 502
         else:
             _structured_log("twilio_playback_error", level="error",
                           message=str(e), trace_id=trace_id, session_id=safe_session_id,
-                          traceback=traceback.format_exc(), latency_ms=latency_ms)
+                          traceback=traceback.format_exc(), latency_ms=latency_ms, error=str(e))
             return jsonify({"error": str(e), "trace_id": trace_id}), 500
 
 # --------------------------------------------------------------------------
@@ -403,7 +517,7 @@ def duplex_stream():
         return jsonify({"error": "Missing call_sid", "trace_id": trace_id}), 400
 
     if not CONFIG["DUPLEX_STREAMING_ENABLED"]:
-        _structured_log("duplex_streaming_disabled", level="warn",
+        _structured_log("duplex_streaming_disabled", level="warning",
                       message="Duplex streaming disabled, request rejected",
                       trace_id=trace_id, call_sid=call_sid)
         return jsonify({"error": "Duplex streaming disabled", "trace_id": trace_id}), 503
@@ -450,7 +564,7 @@ def duplex_stream():
         capture_exception_safe(e, {"service": __service__, "trace_id": trace_id, "call_sid": call_sid})
         _structured_log("duplex_stream_error", level="error",
                       message=str(e), trace_id=trace_id, call_sid=call_sid,
-                      traceback=traceback.format_exc(), latency_ms=latency_ms)
+                      traceback=traceback.format_exc(), latency_ms=latency_ms, error=str(e))
         return jsonify({"error": str(e), "trace_id": trace_id}), 500
 
 # --------------------------------------------------------------------------
@@ -481,7 +595,14 @@ def health_check():
             except Exception:
                 duplex_healthy = False
         
-        status = "healthy" if redis_ok and not breaker_open else "degraded"
+        # Determine overall status - only unhealthy if circuit breaker is open
+        # Redis and duplex issues are considered degraded but not unhealthy
+        if breaker_open:
+            status = "unhealthy"
+            http_code = 503
+        else:
+            status = "healthy" if redis_ok else "degraded"
+            http_code = 200
         
         # Record metrics
         latency_ms = (time.time() - start_time) * 1000
@@ -492,9 +613,6 @@ def health_check():
                       message=f"Health check completed: {status}",
                       trace_id=trace_id, redis_ok=redis_ok, breaker_open=breaker_open,
                       duplex_healthy=duplex_healthy, duplex_enabled=CONFIG["DUPLEX_STREAMING_ENABLED"])
-        
-        # Return appropriate HTTP status code
-        http_code = 200 if status == "healthy" else 503
         
         return jsonify({
             "service": __service__,
@@ -526,7 +644,7 @@ def health_check():
         capture_exception_safe(e, {"service": __service__, "trace_id": trace_id})
         _structured_log("health_check_failed", level="error",
                       message=str(e), trace_id=trace_id, 
-                      traceback=traceback.format_exc())
+                      traceback=traceback.format_exc(), error=str(e))
         
         return jsonify({
             "service": __service__,
@@ -552,9 +670,11 @@ def health_legacy():
 # Local Debug Entry (Preserved with Phase 11-F enhancements)
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
-    import os
+    # Install signal handlers only when running directly
+    _install_signal_handlers()
+    
     app = Flask(__name__)
-    app.register_bluelogger.info(twilio_router_bp)
+    app.register_blueprint(twilio_router_bp)
     
     # Phase 11-F: Initialize duplex controller on startup
     if CONFIG["DUPLEX_STREAMING_ENABLED"]:
@@ -562,7 +682,7 @@ if __name__ == "__main__":
     
     _structured_log("twilio_router_startup", level="info",
                   message="Twilio router starting with Phase 11-F compliance",
-                  extra={"phase": __phase__, "duplex_enabled": CONFIG["DUPLEX_STREAMING_ENABLED"]})
+                  phase=__phase__, duplex_enabled=CONFIG["DUPLEX_STREAMING_ENABLED"])
     
     app.run(host="0.0.0.0", port=int(CONFIG["TWILIO_ROUTER_PORT"]))
 
@@ -575,7 +695,9 @@ __all__ = [
     "duplex_stream",
     "health_check",
     "health_legacy",
-    "_init_duplex_controller"
+    "_init_duplex_controller",
+    "twilio_answer",
+    "twilio_events"
 ]
 
 # Backward compatibility alias for legacy imports

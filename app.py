@@ -222,7 +222,7 @@ except Exception as e:
 # --------------------------------------------------------------------------
 try:
     from twilio_router import twilio_router_bp  # unified router blueprint
-    app.register_blueprint(twilio_router_bp, url_prefix="/twilio")
+    app.register_blueprint(twilio_router_bp)
     log_event(
         service="app",
         event="twilio_router_registered",
