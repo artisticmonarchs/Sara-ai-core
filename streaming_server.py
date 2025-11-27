@@ -33,6 +33,7 @@ import sys
 from typing import Generator, Optional, Dict, Any
 
 from flask import Flask, request, jsonify, Response, stream_with_context
+from flask_sock import Sock
 
 # --------------------------------------------------------------------------
 # Phase 11-D Configuration Isolation
@@ -910,6 +911,7 @@ def capture_exception_safe(exception, context=None):
 # Flask app with Enhanced Security Headers - SINGLE DEFINITION
 # --------------------------------------------------------------------------
 app = Flask(__name__)
+sock = Sock(app)
 app.config["JSON_SORT_KEYS"] = False
 
 # Enhanced security headers middleware - SINGLE IMPLEMENTATION
@@ -1476,8 +1478,150 @@ def system_status():
         }), 500
 
 # --------------------------------------------------------------------------
+
+# -----------------------------
+# Realtime engine session map
+# -----------------------------
+try:
+    from realtime_voice_engine import RealtimeVoiceEngine
+except Exception:  # fallback stub to avoid import errors in offline tools
+    class RealtimeVoiceEngine:
+        def __init__(self, call_sid: str, trace_id: str | None = None):
+            self.call_sid = call_sid
+            self.trace_id = trace_id or ""
+        def push_pcm_frame(self, pcm_bytes: bytes, timestamp: float | None = None):
+            pass  # no-op
+        def read_tts_payloads(self):
+            if False:
+                yield ""  # generator stub
+        def on_start(self, info: dict):  # optional
+            pass
+        def on_stop(self):  # optional
+            pass
+
+_engine_sessions = {}
+def _get_or_create_engine(call_sid: str, trace_id: str | None = None) -> RealtimeVoiceEngine:
+    eng = _engine_sessions.get(call_sid)
+    if eng is None:
+        eng = RealtimeVoiceEngine(call_sid, trace_id=trace_id)
+        _engine_sessions[call_sid] = eng
+    return eng
+
 # SSE Streaming Endpoint with Enhanced Resilience and Retry Logic
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# Twilio Media Streams WebSocket Endpoint
+# --------------------------------------------------------------------------
+@sock.route("/media")
+def media(ws):
+    """
+    Twilio Media Streams WebSocket endpoint.
+    Receives JSON text frames with events: start, media, mark, stop.
+    Sends outbound audio as Twilio 'media' JSON messages.
+    """
+    import json, base64, time
+    call_sid = None
+    stream_sid = None
+    trace_id = None
+    session_id = str(uuid.uuid4())
+    start_ts = time.time()
+    try:
+        # Capacity control (reuse same logic as SSE if available)
+        if not streams_manager.can_accept_new_stream():
+            ws.close()
+            return
+
+        # Track locally
+        stream_state_mgr.add_stream(session_id, {
+            "session_id": session_id,
+            "stage": "open",
+            "opened_at": start_ts,
+        })
+        if not streams_manager.increment_global_count():
+            # best effort: still continue but logged upstream
+            pass
+
+        while True:
+            msg = ws.receive()
+            if msg is None:
+                break  # peer closed
+
+            try:
+                data = json.loads(msg)
+            except Exception:
+                # ignore invalid JSON
+                continue
+
+            event = (data.get("event") or "").lower()
+            if event == "start":
+                # Twilio sends streamSid + start info
+                stream_sid = data.get("start", {}).get("streamSid") or data.get("streamSid")
+                call_sid = data.get("start", {}).get("callSid") or data.get("callSid")
+                trace_id = data.get("start", {}).get("trace_id") or new_trace()
+                eng = _get_or_create_engine(call_sid or session_id, trace_id=trace_id)
+                # optional callback
+                try:
+                    eng.on_start(data)
+                except Exception:
+                    pass
+
+            elif event == "media":
+                # Inbound audio from Twilio (base64-encoded 8k PCM μ-law by default)
+                media = data.get("media") or {}
+                b64 = media.get("payload")
+                if b64:
+                    try:
+                        pcm = base64.b64decode(b64)
+                        eng = _get_or_create_engine(call_sid or session_id, trace_id=trace_id)
+                        eng.push_pcm_frame(pcm, timestamp=time.time())
+                    except Exception as e:
+                        stream_errors_total.labels(error_type="media_decode").inc()
+                        # continue
+
+                # Drain any available outbound audio frames from the engine
+                try:
+                    for out_b64 in eng.read_tts_payloads():
+                        # Twilio expects a JSON text frame mirroring its 'media' schema
+                        ws.send(json.dumps({
+                            "event": "media",
+                            "streamSid": stream_sid,
+                            "media": {"payload": out_b64}
+                        }))
+                        # metrics
+                        try:
+                            stream_bytes_out_total.inc(len(out_b64) // 4 * 3)  # approx decoded size
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            elif event == "mark":
+                # Marks are optional sync points; handle as needed
+                pass
+
+            elif event == "stop":
+                # graceful end from Twilio
+                try:
+                    eng = _get_or_create_engine(call_sid or session_id, trace_id=trace_id)
+                    eng.on_stop()
+                except Exception:
+                    pass
+                break
+
+            else:
+                # Unknown/heartbeat
+                pass
+
+    except Exception as e:
+        stream_errors_total.labels(error_type="ws_media").inc()
+        log_event(service="streaming_server", event="ws_media_error", status="error",
+                  message=str(e), extra={"stack": traceback.format_exc()})
+    finally:
+        # cleanup
+        stream_state_mgr.remove_stream(session_id)
+        streams_manager.decrement_global_count()
+
 @app.route("/stream", methods=["POST"])
 def stream():
     trace_id = None

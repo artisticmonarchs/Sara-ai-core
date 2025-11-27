@@ -610,7 +610,7 @@ def health_check():
         _record_metrics("health_check", "success", latency_ms, trace_id)
         
         _structured_log("health_check", level="info", 
-                      message=f"Health check completed: {status}",
+                      message="Health check completed",
                       trace_id=trace_id, redis_ok=redis_ok, breaker_open=breaker_open,
                       duplex_healthy=duplex_healthy, duplex_enabled=CONFIG["DUPLEX_STREAMING_ENABLED"])
         
