@@ -654,21 +654,46 @@ def outbound_call():
         if callable(handle_outbound_call):
             # delegate to the real implementation if present
             try:
-                # Run the async function in an event loop
+                # Run the async function in an event loop and handle both success and validation errors
                 result = asyncio.run(handle_outbound_call(request))
+                
+                # Log the type and content of the result for debugging
+                log_event(service="app", event="outbound_call_handler_result", status="info",
+                          message=f"Outbound call handler returned result type: {type(result).__name__}",
+                          trace_id=trace_id, extra={"result_type": type(result).__name__, "result_keys": list(result.keys()) if isinstance(result, dict) else "not_dict"})
+                
+                # Check if the handler returned a validation error (accepted: False)
+                if isinstance(result, dict) and result.get("accepted") is False:
+                    get_metrics().inc_metric("api_outbound_call_rejected_total")
+                    log_event(service="app", event="outbound_call_rejected", status="warn",
+                              message="Outbound call rejected by handler due to invalid input",
+                              trace_id=trace_id, extra={"rejection_reason": result.get("error", "unknown")})
+                    return jsonify({
+                        "status": "error", 
+                        "message": result.get("error", "Invalid request"),
+                        "error_code": result.get("error_code", "VALIDATION_ERROR"),
+                        "trace_id": trace_id
+                    }), 400
+                
+                # Successful execution
+                get_metrics().inc_metric("api_outbound_call_dispatched_total")
                 log_event(service="app", event="outbound_call_dispatched", status="ok",
-                          message="Outbound call delegated to outbound_dialer", trace_id=trace_id)
+                          message="Outbound call delegated to outbound_dialer", trace_id=trace_id,
+                          extra={"result_type": type(result).__name__})
                 return jsonify({"status": "ok", "result": result, "trace_id": trace_id})
+                
             except Exception as e:
-                # log and fallthrough to stub response only for runtime execution errors
+                # log and return proper error response for runtime execution errors
                 get_metrics().inc_metric("api_outbound_call_runtime_failures_total")
                 log_event(service="app", event="outbound_call_handler_error", status="error",
                           message="Outbound call handler runtime error", 
                           trace_id=trace_id, extra={"error": str(e), "stack": traceback.format_exc()})
-                # Fall back to stub for runtime errors only
-                log_event(service="app", event="outbound_call_stub", status="ok",
-                          message="Outbound call stub endpoint called due to handler error", trace_id=trace_id)
-                return jsonify({"status": "ok", "message": "stub", "trace_id": trace_id})
+                return jsonify({
+                    "status": "error", 
+                    "message": "Outbound call handler execution failed",
+                    "error_code": "HANDLER_EXECUTION_ERROR",
+                    "trace_id": trace_id
+                }), 500
         else:
             # This should not happen if import succeeded, but handle defensively
             get_metrics().inc_metric("api_outbound_call_handler_invalid_total")
@@ -679,8 +704,13 @@ def outbound_call():
     except Exception as e:
         get_metrics().inc_metric("api_outbound_call_failures_total")
         log_event(service="app", event="outbound_call_stub_error", status="error",
-                  message=str(e), trace_id=trace_id)
-        return jsonify({"status": "error", "message": str(e), "trace_id": trace_id}), 500
+                  message=str(e), trace_id=trace_id, extra={"stack": traceback.format_exc()})
+        return jsonify({
+            "status": "error", 
+            "message": "Outbound call processing failed",
+            "error_code": "PROCESSING_ERROR",
+            "trace_id": trace_id
+        }), 500
 
 @app.route("/duplex_stream/start", methods=["POST"])
 def duplex_stream_start():
