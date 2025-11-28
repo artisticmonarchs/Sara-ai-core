@@ -11,6 +11,7 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 import signal
 import sys
 import logging
+import asyncio
 
 # Minimal process logger (prevents NameError in signal handler)
 logger = logging.getLogger("sara.app")
@@ -635,25 +636,46 @@ def outbound_call():
         # Lazy import so missing outbound_dialer does not break import-time.
         try:
             from outbound_dialer import handle_outbound_call  # type: ignore
-        except Exception:
-            handle_outbound_call = None
+        except ImportError as e:
+            # Import failure is now treated as an error since we expect the handler to exist
+            get_metrics().inc_metric("api_outbound_call_import_failures_total")
+            log_event(service="app", event="outbound_call_import_error", status="error",
+                      message="Outbound dialer handler import failed - module not found", 
+                      trace_id=trace_id, extra={"error": str(e), "stack": traceback.format_exc()})
+            return jsonify({"status": "error", "message": "Outbound call handler not available", "trace_id": trace_id}), 500
+        except Exception as e:
+            # Other import-related errors
+            get_metrics().inc_metric("api_outbound_call_import_failures_total")
+            log_event(service="app", event="outbound_call_import_error", status="error",
+                      message="Outbound dialer handler import failed", 
+                      trace_id=trace_id, extra={"error": str(e), "stack": traceback.format_exc()})
+            return jsonify({"status": "error", "message": "Outbound call handler import failed", "trace_id": trace_id}), 500
 
         if callable(handle_outbound_call):
             # delegate to the real implementation if present
             try:
-                result = handle_outbound_call(request)
+                # Run the async function in an event loop
+                result = asyncio.run(handle_outbound_call(request))
                 log_event(service="app", event="outbound_call_dispatched", status="ok",
                           message="Outbound call delegated to outbound_dialer", trace_id=trace_id)
                 return jsonify({"status": "ok", "result": result, "trace_id": trace_id})
             except Exception as e:
-                # log and fallthrough to stub response
+                # log and fallthrough to stub response only for runtime execution errors
+                get_metrics().inc_metric("api_outbound_call_runtime_failures_total")
                 log_event(service="app", event="outbound_call_handler_error", status="error",
-                          message=str(e), trace_id=trace_id, extra={"stack": traceback.format_exc()})
+                          message="Outbound call handler runtime error", 
+                          trace_id=trace_id, extra={"error": str(e), "stack": traceback.format_exc()})
+                # Fall back to stub for runtime errors only
+                log_event(service="app", event="outbound_call_stub", status="ok",
+                          message="Outbound call stub endpoint called due to handler error", trace_id=trace_id)
+                return jsonify({"status": "ok", "message": "stub", "trace_id": trace_id})
+        else:
+            # This should not happen if import succeeded, but handle defensively
+            get_metrics().inc_metric("api_outbound_call_handler_invalid_total")
+            log_event(service="app", event="outbound_call_handler_invalid", status="error",
+                      message="Imported outbound call handler is not callable", trace_id=trace_id)
+            return jsonify({"status": "error", "message": "Outbound call handler invalid", "trace_id": trace_id}), 500
 
-        # fallback stub
-        log_event(service="app", event="outbound_call_stub", status="ok",
-                  message="Outbound call stub endpoint called", trace_id=trace_id)
-        return jsonify({"status": "ok", "message": "stub", "trace_id": trace_id})
     except Exception as e:
         get_metrics().inc_metric("api_outbound_call_failures_total")
         log_event(service="app", event="outbound_call_stub_error", status="error",

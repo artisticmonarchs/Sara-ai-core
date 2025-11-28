@@ -43,6 +43,12 @@ def _to_int(val: str | None, default: int) -> int:
     except Exception:
         return default
 
+def _to_float(val: str | None, default: float) -> float:
+    try:
+        return float(str(val).strip()) if val is not None else default
+    except Exception:
+        return default
+
 def _csv_list(val: str | None, default: list[str]) -> list[str]:
     if not val:
         return list(default)
@@ -134,6 +140,26 @@ class Config:
     MAX_CONCURRENT_STREAMS: int = _to_int(os.getenv("MAX_CONCURRENT_STREAMS"), 50)
     STREAM_HEALTH_INTERVAL_SEC: int = _to_int(os.getenv("STREAM_HEALTH_INTERVAL_SEC"), 5)
 
+    # Twilio MediaStream Configuration - NEW
+    TWILIO_MEDIA_WS_URL: str = os.getenv("TWILIO_MEDIA_WS_URL", "wss://your-streaming-server.example.com/media")
+    DUPLEX_STREAMING_ENABLED: bool = _to_bool(os.getenv("DUPLEX_STREAMING_ENABLED", "true"), True)
+    
+    # MediaStream buffer and queue settings - NEW
+    MEDIA_STREAM_BUFFER_MS: int = _to_int(os.getenv("MEDIA_STREAM_BUFFER_MS"), 200)
+    MEDIA_STREAM_RECONNECT_ATTEMPTS: int = _to_int(os.getenv("MEDIA_STREAM_RECONNECT_ATTEMPTS"), 3)
+    MEDIA_STREAM_RECONNECT_DELAY: float = _to_float(os.getenv("MEDIA_STREAM_RECONNECT_DELAY"), 1.0)
+    MEDIA_STREAM_SILENCE_FRAME_MS: int = _to_int(os.getenv("MEDIA_STREAM_SILENCE_FRAME_MS"), 20)
+    MEDIA_STREAM_MAX_QUEUE_SIZE: int = _to_int(os.getenv("MEDIA_STREAM_MAX_QUEUE_SIZE"), 100)
+    MEDIA_STREAM_PING_INTERVAL: int = _to_int(os.getenv("MEDIA_STREAM_PING_INTERVAL"), 30)
+    WEBSOCKET_OPERATION_TIMEOUT: float = _to_float(os.getenv("WEBSOCKET_OPERATION_TIMEOUT"), 10.0)
+
+    # Duplex Controller Settings - NEW
+    CALL_STATE_TTL: int = _to_int(os.getenv("CALL_STATE_TTL"), 3600)
+    MAX_CONVERSATION_TURNS: int = _to_int(os.getenv("MAX_CONVERSATION_TURNS"), 20)
+    MAX_CONSECUTIVE_ERRORS: int = _to_int(os.getenv("MAX_CONSECUTIVE_ERRORS"), 5)
+    INTERRUPTION_DEBOUNCE_MS: int = _to_int(os.getenv("INTERRUPTION_DEBOUNCE_MS"), 150)
+    TTS_CANCEL_TIMEOUT: float = _to_float(os.getenv("TTS_CANCEL_TIMEOUT"), 0.15)
+
     # Snapshot for debug (no secrets in clear)
     @classmethod
     def as_dict(cls) -> dict:
@@ -176,6 +202,22 @@ class Config:
             "CB_HALF_OPEN_SUCCESS_THRESHOLD": cls.CB_HALF_OPEN_SUCCESS_THRESHOLD,
             "MAX_CONCURRENT_STREAMS": cls.MAX_CONCURRENT_STREAMS,
             "STREAM_HEALTH_INTERVAL_SEC": cls.STREAM_HEALTH_INTERVAL_SEC,
+            # NEW: Twilio MediaStream configs
+            "TWILIO_MEDIA_WS_URL": cls.TWILIO_MEDIA_WS_URL,
+            "DUPLEX_STREAMING_ENABLED": cls.DUPLEX_STREAMING_ENABLED,
+            "MEDIA_STREAM_BUFFER_MS": cls.MEDIA_STREAM_BUFFER_MS,
+            "MEDIA_STREAM_RECONNECT_ATTEMPTS": cls.MEDIA_STREAM_RECONNECT_ATTEMPTS,
+            "MEDIA_STREAM_RECONNECT_DELAY": cls.MEDIA_STREAM_RECONNECT_DELAY,
+            "MEDIA_STREAM_SILENCE_FRAME_MS": cls.MEDIA_STREAM_SILENCE_FRAME_MS,
+            "MEDIA_STREAM_MAX_QUEUE_SIZE": cls.MEDIA_STREAM_MAX_QUEUE_SIZE,
+            "MEDIA_STREAM_PING_INTERVAL": cls.MEDIA_STREAM_PING_INTERVAL,
+            "WEBSOCKET_OPERATION_TIMEOUT": cls.WEBSOCKET_OPERATION_TIMEOUT,
+            # NEW: Duplex Controller configs
+            "CALL_STATE_TTL": cls.CALL_STATE_TTL,
+            "MAX_CONVERSATION_TURNS": cls.MAX_CONVERSATION_TURNS,
+            "MAX_CONSECUTIVE_ERRORS": cls.MAX_CONSECUTIVE_ERRORS,
+            "INTERRUPTION_DEBOUNCE_MS": cls.INTERRUPTION_DEBOUNCE_MS,
+            "TTS_CANCEL_TIMEOUT": cls.TTS_CANCEL_TIMEOUT,
         }
 
 
@@ -208,6 +250,24 @@ CELERY_ACCEPT_CONTENT = Config.CELERY_ACCEPT_CONTENT
 
 SENTRY_DSN = Config.SENTRY_DSN
 
+# NEW: Twilio MediaStream upper-case aliases
+TWILIO_MEDIA_WS_URL = Config.TWILIO_MEDIA_WS_URL
+DUPLEX_STREAMING_ENABLED = Config.DUPLEX_STREAMING_ENABLED
+MEDIA_STREAM_BUFFER_MS = Config.MEDIA_STREAM_BUFFER_MS
+MEDIA_STREAM_RECONNECT_ATTEMPTS = Config.MEDIA_STREAM_RECONNECT_ATTEMPTS
+MEDIA_STREAM_RECONNECT_DELAY = Config.MEDIA_STREAM_RECONNECT_DELAY
+MEDIA_STREAM_SILENCE_FRAME_MS = Config.MEDIA_STREAM_SILENCE_FRAME_MS
+MEDIA_STREAM_MAX_QUEUE_SIZE = Config.MEDIA_STREAM_MAX_QUEUE_SIZE
+MEDIA_STREAM_PING_INTERVAL = Config.MEDIA_STREAM_PING_INTERVAL
+WEBSOCKET_OPERATION_TIMEOUT = Config.WEBSOCKET_OPERATION_TIMEOUT
+
+# NEW: Duplex Controller upper-case aliases
+CALL_STATE_TTL = Config.CALL_STATE_TTL
+MAX_CONVERSATION_TURNS = Config.MAX_CONVERSATION_TURNS
+MAX_CONSECUTIVE_ERRORS = Config.MAX_CONSECUTIVE_ERRORS
+INTERRUPTION_DEBOUNCE_MS = Config.INTERRUPTION_DEBOUNCE_MS
+TTS_CANCEL_TIMEOUT = Config.TTS_CANCEL_TIMEOUT
+
 # Lower-case aliases for legacy call-sites (defensive; you had errors like `phase_version`, `log_level`, etc.)
 service_name = SERVICE_NAME
 env_mode = ENV_MODE
@@ -228,6 +288,24 @@ celery_worker_concurrency = CELERY_WORKER_CONCURRENCY
 celery_task_serializer = CELERY_TASK_SERIALIZER
 celery_result_serializer = CELERY_RESULT_SERIALIZER
 celery_accept_content = CELERY_ACCEPT_CONTENT
+
+# NEW: Twilio MediaStream lower-case aliases
+twilio_media_ws_url = TWILIO_MEDIA_WS_URL
+duplex_streaming_enabled = DUPLEX_STREAMING_ENABLED
+media_stream_buffer_ms = MEDIA_STREAM_BUFFER_MS
+media_stream_reconnect_attempts = MEDIA_STREAM_RECONNECT_ATTEMPTS
+media_stream_reconnect_delay = MEDIA_STREAM_RECONNECT_DELAY
+media_stream_silence_frame_ms = MEDIA_STREAM_SILENCE_FRAME_MS
+media_stream_max_queue_size = MEDIA_STREAM_MAX_QUEUE_SIZE
+media_stream_ping_interval = MEDIA_STREAM_PING_INTERVAL
+websocket_operation_timeout = WEBSOCKET_OPERATION_TIMEOUT
+
+# NEW: Duplex Controller lower-case aliases
+call_state_ttl = CALL_STATE_TTL
+max_conversation_turns = MAX_CONVERSATION_TURNS
+max_consecutive_errors = MAX_CONSECUTIVE_ERRORS
+interruption_debounce_ms = INTERRUPTION_DEBOUNCE_MS
+tts_cancel_timeout = TTS_CANCEL_TIMEOUT
 
 # Optional: print a tiny config snapshot if requested (no secrets)
 if _to_bool(os.getenv("CONFIG_DEBUG_SNAPSHOT"), False):

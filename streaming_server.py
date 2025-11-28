@@ -1480,54 +1480,27 @@ def system_status():
 # --------------------------------------------------------------------------
 
 # -----------------------------
-# Realtime engine session map
+# Twilio Media Streams WebSocket Endpoint with Duplex Controller
 # -----------------------------
-try:
-    from realtime_voice_engine import RealtimeVoiceEngine
-except Exception:  # fallback stub to avoid import errors in offline tools
-    class RealtimeVoiceEngine:
-        def __init__(self, call_sid: str, trace_id: str | None = None):
-            self.call_sid = call_sid
-            self.trace_id = trace_id or ""
-        def push_pcm_frame(self, pcm_bytes: bytes, timestamp: float | None = None):
-            pass  # no-op
-        def read_tts_payloads(self):
-            if False:
-                yield ""  # generator stub
-        def on_start(self, info: dict):  # optional
-            pass
-        def on_stop(self):  # optional
-            pass
-
-_engine_sessions = {}
-def _get_or_create_engine(call_sid: str, trace_id: str | None = None) -> RealtimeVoiceEngine:
-    eng = _engine_sessions.get(call_sid)
-    if eng is None:
-        eng = RealtimeVoiceEngine(call_sid, trace_id=trace_id)
-        _engine_sessions[call_sid] = eng
-    return eng
-
-# SSE Streaming Endpoint with Enhanced Resilience and Retry Logic
-# --------------------------------------------------------------------------
-
-# --------------------------------------------------------------------------
-# Twilio Media Streams WebSocket Endpoint
-# --------------------------------------------------------------------------
 @sock.route("/media")
 def media(ws):
     """
-    Twilio Media Streams WebSocket endpoint.
+    Twilio Media Streams WebSocket endpoint integrated with duplex controller stack.
     Receives JSON text frames with events: start, media, mark, stop.
     Sends outbound audio as Twilio 'media' JSON messages.
     """
-    import json, base64, time
+    import json
+    import base64
+    import time
+    
     call_sid = None
     stream_sid = None
     trace_id = None
     session_id = str(uuid.uuid4())
     start_ts = time.time()
+    
     try:
-        # Capacity control (reuse same logic as SSE if available)
+        # Capacity control
         if not streams_manager.can_accept_new_stream():
             ws.close()
             return
@@ -1537,10 +1510,26 @@ def media(ws):
             "session_id": session_id,
             "stage": "open",
             "opened_at": start_ts,
+            "type": "twilio_media_stream"
         })
         if not streams_manager.increment_global_count():
             # best effort: still continue but logged upstream
             pass
+
+        # Initialize DuplexControllerManager from the correct module
+        from duplex_voice_controller import controller_manager
+        
+        log_event(
+            service="streaming_server",
+            event="twilio_media_stream_connected",
+            status="info",
+            message="Twilio Media Stream connected",
+            session_id=session_id,
+            extra={
+                "type": "websocket",
+                "active_connections": stream_state_mgr.get_active_stream_count()
+            }
+        )
 
         while True:
             msg = ws.receive()
@@ -1549,78 +1538,151 @@ def media(ws):
 
             try:
                 data = json.loads(msg)
-            except Exception:
-                # ignore invalid JSON
+            except Exception as e:
+                log_event(
+                    service="streaming_server",
+                    event="twilio_invalid_json",
+                    status="warn",
+                    message="Invalid JSON received from Twilio",
+                    session_id=session_id,
+                    extra={"error": str(e)}
+                )
                 continue
 
             event = (data.get("event") or "").lower()
+            
             if event == "start":
                 # Twilio sends streamSid + start info
                 stream_sid = data.get("start", {}).get("streamSid") or data.get("streamSid")
                 call_sid = data.get("start", {}).get("callSid") or data.get("callSid")
                 trace_id = data.get("start", {}).get("trace_id") or new_trace()
-                eng = _get_or_create_engine(call_sid or session_id, trace_id=trace_id)
-                # optional callback
-                try:
-                    eng.on_start(data)
-                except Exception:
-                    pass
+                
+                # Initialize duplex controller for this call
+                controller = controller_manager.get_or_create_controller(
+                    call_sid=call_sid or session_id,
+                    trace_id=trace_id,
+                    websocket=ws
+                )
+                
+                log_event(
+                    service="streaming_server",
+                    event="twilio_stream_started",
+                    status="info",
+                    message="Twilio media stream started",
+                    trace_id=trace_id,
+                    session_id=session_id,
+                    extra={
+                        "call_sid": call_sid,
+                        "stream_sid": stream_sid,
+                        "controller_initialized": True
+                    }
+                )
 
             elif event == "media":
-                # Inbound audio from Twilio (base64-encoded 8k PCM μ-law by default)
-                media = data.get("media") or {}
-                b64 = media.get("payload")
-                if b64:
+                # Inbound audio from Twilio (base64-encoded)
+                media_data = data.get("media") or {}
+                b64_payload = media_data.get("payload")
+                
+                if b64_payload and call_sid:
                     try:
-                        pcm = base64.b64decode(b64)
-                        eng = _get_or_create_engine(call_sid or session_id, trace_id=trace_id)
-                        eng.push_pcm_frame(pcm, timestamp=time.time())
+                        # Decode audio and forward to duplex controller
+                        audio_bytes = base64.b64decode(b64_payload)
+                        controller = controller_manager.get_controller(call_sid)
+                        if controller:
+                            controller.handle_inbound_audio(audio_bytes)
                     except Exception as e:
                         stream_errors_total.labels(error_type="media_decode").inc()
-                        # continue
-
-                # Drain any available outbound audio frames from the engine
-                try:
-                    for out_b64 in eng.read_tts_payloads():
-                        # Twilio expects a JSON text frame mirroring its 'media' schema
-                        ws.send(json.dumps({
-                            "event": "media",
-                            "streamSid": stream_sid,
-                            "media": {"payload": out_b64}
-                        }))
-                        # metrics
-                        try:
-                            stream_bytes_out_total.inc(len(out_b64) // 4 * 3)  # approx decoded size
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                        log_event(
+                            service="streaming_server",
+                            event="media_processing_error",
+                            status="error",
+                            message="Error processing inbound media",
+                            trace_id=trace_id,
+                            session_id=session_id,
+                            extra={"error": str(e)}
+                        )
 
             elif event == "mark":
-                # Marks are optional sync points; handle as needed
-                pass
+                # Marks are optional sync points
+                mark_name = data.get("mark", {}).get("name")
+                if mark_name and call_sid:
+                    controller = controller_manager.get_controller(call_sid)
+                    if controller:
+                        controller.handle_mark(mark_name)
 
             elif event == "stop":
                 # graceful end from Twilio
-                try:
-                    eng = _get_or_create_engine(call_sid or session_id, trace_id=trace_id)
-                    eng.on_stop()
-                except Exception:
-                    pass
+                if call_sid:
+                    controller = controller_manager.get_controller(call_sid)
+                    if controller:
+                        controller.handle_stream_stop()
+                        controller_manager.cleanup_controller(call_sid)
+                
+                log_event(
+                    service="streaming_server",
+                    event="twilio_stream_stopped",
+                    status="info",
+                    message="Twilio media stream stopped",
+                    trace_id=trace_id,
+                    session_id=session_id,
+                    extra={"call_sid": call_sid}
+                )
                 break
 
             else:
-                # Unknown/heartbeat
+                # Unknown event or heartbeat - handle gracefully
                 pass
 
     except Exception as e:
         stream_errors_total.labels(error_type="ws_media").inc()
-        log_event(service="streaming_server", event="ws_media_error", status="error",
-                  message=str(e), extra={"stack": traceback.format_exc()})
+        log_event(
+            service="streaming_server",
+            event="twilio_media_stream_error",
+            status="error",
+            message="Twilio media stream error",
+            session_id=session_id,
+            trace_id=trace_id,
+            extra={
+                "error": str(e),
+                "stack": traceback.format_exc(),
+                "call_sid": call_sid
+            }
+        )
+        # Capture exception with Sentry
+        capture_exception_safe(e, {
+            "service": "streaming_server",
+            "session_id": session_id,
+            "trace_id": trace_id,
+            "call_sid": call_sid,
+            "endpoint": "media_websocket"
+        })
     finally:
-        # cleanup
+        # Cleanup
+        if call_sid:
+            try:
+                controller_manager.cleanup_controller(call_sid)
+            except Exception:
+                pass
+        
         stream_state_mgr.remove_stream(session_id)
         streams_manager.decrement_global_count()
+        
+        log_event(
+            service="streaming_server",
+            event="twilio_media_stream_closed",
+            status="info",
+            message="Twilio media stream connection closed",
+            session_id=session_id,
+            trace_id=trace_id,
+            extra={
+                "call_sid": call_sid,
+                "duration_seconds": round(time.time() - start_ts, 2),
+                "active_connections": stream_state_mgr.get_active_stream_count()
+            }
+        )
+
+# SSE Streaming Endpoint with Enhanced Resilience and Retry Logic
+# --------------------------------------------------------------------------
 
 @app.route("/stream", methods=["POST"])
 def stream():

@@ -800,9 +800,9 @@ def stop_call(call_sid: str, reason: str = "normal", trace_id: Optional[str] = N
         # PHASE 11-F ADDITION: Notify duplex controller if available
         if DUPLEX_STREAMING_ENABLED and DuplexVoiceController:
             try:
-                controller = DuplexVoiceController.get_instance()
-                if controller:
-                    controller.stop_call(call_sid, trace)
+                # FIX: Use proper duplex controller access pattern
+                controller = DuplexVoiceController()
+                controller.stop_call(call_sid, trace)
             except Exception as e:
                 _structured_log(
                     "duplex_stop_failed",
@@ -1232,14 +1232,14 @@ def _handle_partial_result(call_sid: str, text: str, payload: dict, trace_id: st
         # PHASE 11-F ADDITION: Use duplex controller if available and enabled
         if DUPLEX_STREAMING_ENABLED and DuplexVoiceController:
             try:
-                controller = DuplexVoiceController.get_instance()
-                if controller:
-                    controller.handle_partial_transcript(call_sid, text, trace_id)
-                    _structured_log("partial_handled_duplex", message="Partial transcript handled via duplex controller", 
-                                  trace_id=trace_id, call_sid=call_sid)
-                    latency_ms = (time.time() - start_time) * 1000
-                    _record_metrics("partial_dispatch", "success", latency_ms, trace_id)
-                    return
+                # FIX: Use proper duplex controller access pattern
+                controller = DuplexVoiceController()
+                controller.handle_partial_transcript(call_sid, text, trace_id)
+                _structured_log("partial_handled_duplex", message="Partial transcript handled via duplex controller", 
+                              trace_id=trace_id, call_sid=call_sid)
+                latency_ms = (time.time() - start_time) * 1000
+                _record_metrics("partial_dispatch", "success", latency_ms, trace_id)
+                return
             except Exception as e:
                 _structured_log("duplex_partial_failed", level="warn",
                               message="Duplex controller failed, falling back to standard dispatch",
@@ -1351,7 +1351,8 @@ def process_audio_chunk(call_sid: str, audio_chunk: bytes,
     # PHASE 11-F ADDITION: Route to duplex engine if available
     if DUPLEX_STREAMING_ENABLED and RealtimeVoiceEngine:
         try:
-            engine = RealtimeVoiceEngine.get_instance()
+            # FIX: Use proper realtime engine access pattern
+            engine = RealtimeVoiceEngine()
             if engine:
                 # NEW: Use jitter buffer for duplex engine
                 buffered_chunk = _jitter_buffer.dequeue()
@@ -1454,13 +1455,13 @@ def process_final_transcript(call_sid: str, final_text: str,
         # PHASE 11-F ADDITION: Use duplex controller for final transcript if available
         if DUPLEX_STREAMING_ENABLED and DuplexVoiceController:
             try:
-                controller = DuplexVoiceController.get_instance()
-                if controller:
-                    controller.handle_final_transcript(call_sid, final_text, trace_id)
-                    _structured_log("final_handled_duplex", message="Final transcript handled via duplex controller", 
-                                  trace_id=resolved, call_sid=call_sid)
-                    dispatch_success = True
-                    info = {"ok": True, "via": "duplex_controller"}
+                # FIX: Use proper duplex controller access pattern
+                controller = DuplexVoiceController()
+                controller.handle_final_transcript(call_sid, final_text, trace_id)
+                _structured_log("final_handled_duplex", message="Final transcript handled via duplex controller", 
+                              trace_id=resolved, call_sid=call_sid)
+                dispatch_success = True
+                info = {"ok": True, "via": "duplex_controller"}
             except Exception as e:
                 _structured_log("duplex_final_failed", level="warn",
                               message="Duplex controller failed, falling back to standard dispatch",

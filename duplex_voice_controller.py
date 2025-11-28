@@ -163,6 +163,34 @@ class DuplexVoiceController:
         })
     
     # --------------------------------------------------------------------------
+    # Static Accessor Methods for External Modules
+    # --------------------------------------------------------------------------
+    
+    @staticmethod
+    async def get_instance(call_sid: str, websocket = None, config: Optional[Dict[str, Any]] = None) -> 'DuplexVoiceController':
+        """
+        Static method to get controller instance for compatibility with existing code.
+        Uses the global controller_manager to ensure consistent access patterns.
+        """
+        return await controller_manager.get_controller(call_sid, websocket, config)
+    
+    @staticmethod
+    async def get_existing_controller(call_sid: str) -> Optional['DuplexVoiceController']:
+        """
+        Get existing controller without creating a new one.
+        Used by voice pipeline and other modules that need to access existing controllers.
+        """
+        # Access the controller manager's internal dictionary safely
+        if hasattr(controller_manager, 'controllers') and call_sid in controller_manager.controllers:
+            return controller_manager.controllers[call_sid]
+        return None
+    
+    @staticmethod
+    async def remove_controller(call_sid: str):
+        """Remove controller instance - delegates to controller manager"""
+        await controller_manager.remove_controller(call_sid)
+    
+    # --------------------------------------------------------------------------
     # Public API with Resilience Patterns
     # --------------------------------------------------------------------------
     
@@ -883,12 +911,13 @@ class DuplexVoiceController:
         """Send audio frame to Twilio WebSocket with resilience"""
         try:
             if self.websocket and not self.websocket.closed:
-                # Twilio MediaStream format
+                # Twilio MediaStream format - use base64 encoding for PCM audio
+                import base64
                 message = {
                     "event": "media",
                     "streamSid": self.call_sid,
                     "media": {
-                        "payload": audio_data.hex()  # Convert to hex string
+                        "payload": base64.b64encode(audio_data).decode('utf-8')  # Convert to base64 string
                     }
                 }
                 await self.websocket.send(json.dumps(message))

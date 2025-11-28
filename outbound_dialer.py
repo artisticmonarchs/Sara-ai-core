@@ -462,6 +462,123 @@ async def _sleep_backoff(base_delay: float, attempt: int):
     await asyncio.sleep(min(delay, 30))  # cap at 30 seconds
 
 # --------------------------------------------------------------------------
+# HTTP Request Handler Function
+# --------------------------------------------------------------------------
+
+async def handle_outbound_call(request) -> Dict[str, Any]:
+    """
+    Handle HTTP request to initiate outbound call
+    Connects Flask HTTP endpoint to outbound dialer engine
+    """
+    try:
+        # Parse JSON request body
+        if not request.is_json:
+            return {
+                "accepted": False,
+                "error": "Request must be JSON",
+                "error_code": "invalid_content_type"
+            }
+        
+        data = request.get_json()
+        
+        # Validate required fields
+        phone_number = data.get("phone_number")
+        campaign_id = data.get("campaign_id", "default")
+        
+        if not phone_number:
+            return {
+                "accepted": False,
+                "error": "Missing required field: phone_number",
+                "error_code": "missing_phone_number"
+            }
+        
+        if not isinstance(phone_number, str) or not phone_number.strip():
+            return {
+                "accepted": False,
+                "error": "Invalid phone_number format",
+                "error_code": "invalid_phone_number"
+            }
+        
+        # Validate phone number format
+        if not validate_phone_number(phone_number.strip()):
+            return {
+                "accepted": False,
+                "error": "Invalid E.164 phone number format",
+                "error_code": "invalid_phone_format"
+            }
+        
+        # Extract optional fields
+        lead_id = data.get("lead_id", str(uuid.uuid4()))
+        source = data.get("source", "http_api")
+        metadata = data.get("metadata", {})
+        priority = data.get("priority", 1)
+        timezone = data.get("timezone")
+        
+        # Enhance metadata with HTTP request context
+        enhanced_metadata = {
+            **metadata,
+            "source": source,
+            "http_request_time": time.time(),
+            "user_agent": request.headers.get("User-Agent", ""),
+            "remote_addr": request.headers.get("X-Forwarded-For", request.remote_addr or ""),
+        }
+        
+        # Create lead object
+        lead = Lead(
+            phone_number=phone_number.strip(),
+            campaign_id=campaign_id,
+            lead_id=lead_id,
+            metadata=enhanced_metadata,
+            timezone=timezone,
+            priority=priority
+        )
+        
+        # Get dialer instance and add lead to queue
+        dialer = await get_outbound_dialer()
+        success = await dialer.add_lead(lead)
+        
+        if success:
+            logger.info("Outbound call request accepted", extra={
+                "phone_number": phone_number,
+                "campaign_id": campaign_id,
+                "lead_id": lead_id,
+                "source": source
+            })
+            
+            return {
+                "accepted": True,
+                "phone": phone_number,
+                "campaign_id": campaign_id,
+                "lead_id": lead_id,
+                "call_status": "queued",
+                "message": "Call request accepted and queued for processing"
+            }
+        else:
+            logger.error("Failed to queue outbound call request", extra={
+                "phone_number": phone_number,
+                "campaign_id": campaign_id,
+                "lead_id": lead_id
+            })
+            
+            return {
+                "accepted": False,
+                "error": "Failed to queue call request - dialer unavailable",
+                "error_code": "dialer_unavailable"
+            }
+            
+    except Exception as e:
+        logger.error("Error handling outbound call request", extra={
+            "error": str(e),
+            "stack": traceback.format_exc()
+        })
+        
+        return {
+            "accepted": False,
+            "error": f"Internal server error: {str(e)}",
+            "error_code": "internal_error"
+        }
+
+# --------------------------------------------------------------------------
 # Main OutboundDialer Class
 # --------------------------------------------------------------------------
 
