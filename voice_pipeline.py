@@ -469,7 +469,6 @@ except Exception:
 # Centralized configuration (from config.settings) - ENHANCED
 # --------------------------------------------------------------------------
 SERVICE_NAME = __service__
-SARA_ENV = Config.SARA_ENV
 
 CALL_STATE_TTL = Config.CALL_STATE_TTL
 PARTIAL_THROTTLE_SECONDS = Config.PARTIAL_THROTTLE_SECONDS
@@ -1678,7 +1677,6 @@ def process_final_transcript(call_sid: str, final_text: str,
                                     trace_id=resolved, call_sid=call_sid, extra={"result": res})
                     dispatch_success = True
                     info = {"ok": True, "via": "twilio_client"}
-
             if not dispatch_success:
                 # fallback or no twilio_client
                 celery.send_task(
