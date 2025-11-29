@@ -177,6 +177,34 @@ def _verify_twilio_signature() -> bool:
 @twilio_router_bp.route("/twilio/answer", methods=["GET", "POST"])
 def twilio_answer():
     """Handle incoming Twilio call - returns TwiML (XML) for both GET and POST"""
+    # --- DEBUG LOG: Twilio hit /twilio/answer ---
+    try:
+        media_ws_url = _media_ws_url()
+    except Exception as e:
+        # If something goes wrong computing it, we still want to know
+        log_event(
+            service="twilio_router",
+            event="twilio_answer_hit_error",
+            level="error",
+            message="Error computing media_ws_url in twilio_answer",
+            http_method=request.method,
+            remote_addr=request.headers.get("X-Forwarded-For", request.remote_addr),
+            error=str(e),
+        )
+        media_ws_url = None
+    else:
+        log_event(
+            service="twilio_router",
+            event="twilio_answer_hit",
+            level="info",
+            message="Twilio /twilio/answer invoked",
+            http_method=request.method,
+            remote_addr=request.headers.get("X-Forwarded-For", request.remote_addr),
+            media_ws_url=media_ws_url,
+            has_stream_url=bool(media_ws_url and media_ws_url.startswith("wss://")),
+        )
+    # --- END DEBUG LOG BLOCK ---
+
     trace_id = get_trace_id()
     
     # Verify Twilio signature if enabled
@@ -442,7 +470,6 @@ def playback():
                               message="Duplex playback failed, falling back to standard Twilio",
                               trace_id=trace_id, session_id=safe_session_id, 
                               error=str(e))
-
         # Fallback to standard Twilio client
         client = _init_twilio_client()
         if client is None:
