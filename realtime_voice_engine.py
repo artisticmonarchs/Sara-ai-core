@@ -948,7 +948,8 @@ class RealtimeVoiceEngine:
         """
         self.stream_start_time = time.time()
         chunks_yielded = 0
-        provider: Optional[TTSProvider] = None  # CRITICAL FIX: Pre-declare to prevent UnboundLocalError
+        # CRITICAL FIX: Pre-declare provider to prevent UnboundLocalError
+        provider: Optional[TTSProvider] = None
 
         try:
             metrics.increment_metric("tts_stream_requests_total")
@@ -1068,6 +1069,53 @@ class RealtimeVoiceEngine:
                     raise TransientError(f"Primary and fallback TTS failed: {str(e)}") from e
             else:
                 raise TransientError(f"TTS stream failed: {str(e)}") from e
+
+    async def synthesize_text_to_frames(self, text: str, voice_settings: Optional[Dict] = None) -> List[bytes]:
+        """
+        Synthesize text to Twilio-compatible audio frames.
+        
+        Returns:
+            List[bytes]: List of 20ms PCM frames at 8kHz sample rate suitable for Twilio
+        """
+        frames = []
+        total_audio = b""
+        
+        try:
+            # Collect all audio chunks from TTS stream
+            async for audio_chunk in self.text_to_speech_stream(text, voice_settings):
+                if audio_chunk:
+                    total_audio += audio_chunk
+            
+            # Split into 20ms frames (160 bytes per frame for 8kHz 16-bit PCM)
+            frame_size = 160  # 8000 samples/sec * 2 bytes/sample * 0.02 sec = 160 bytes
+            for i in range(0, len(total_audio), frame_size):
+                frame = total_audio[i:i + frame_size]
+                if len(frame) == frame_size:  # Only yield complete frames
+                    frames.append(frame)
+                elif len(frame) > 0:  # Pad final frame if needed
+                    padded_frame = frame + b"\x00" * (frame_size - len(frame))
+                    frames.append(padded_frame)
+            
+            logger.info("Text synthesized to frames", extra={
+                "text_length": len(text),
+                "total_audio_bytes": len(total_audio),
+                "frames_generated": len(frames),
+                "service": "realtime_voice_engine"
+            })
+            
+            metrics.increment_metric("tts_frames_generated_total", len(frames))
+            metrics.histogram("tts_frame_count_per_synthesis", len(frames))
+            
+        except Exception as e:
+            logger.error("Failed to synthesize text to frames", extra={
+                "error": str(e),
+                "text": text[:100],
+                "service": "realtime_voice_engine"
+            })
+            metrics.increment_metric("tts_frame_synthesis_errors_total")
+            raise
+        
+        return frames
     
     async def _analyze_audio_chunk(self, audio_chunk: bytes) -> bool:
         """Analyze audio chunk for silence detection with Phase 12 resilience"""

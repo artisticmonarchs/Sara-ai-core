@@ -77,6 +77,23 @@ except ImportError:
     def external_api_call(service, operation, *args, trace_id=None, **kwargs):
         return operation(*args, **kwargs)
 
+# Phase 12: Jitter buffer import for inbound audio
+try:
+    from voice_pipeline import JitterBuffer
+except ImportError:
+    # Fallback implementation
+    class JitterBuffer:
+        def __init__(self):
+            self.buffer = bytearray()
+        def push(self, pcm_bytes: bytes):
+            self.buffer.extend(pcm_bytes)
+        def pop_available(self) -> bytes:
+            data = bytes(self.buffer)
+            self.buffer.clear()
+            return data
+        def has_data(self) -> bool:
+            return len(self.buffer) > 0
+
 # Phase 12: Circuit breaker check
 def _is_circuit_breaker_open(service: str = "duplex_controller") -> bool:
     """Check if circuit breaker is open for duplex operations"""
@@ -155,6 +172,14 @@ class DuplexVoiceController:
         self.last_context_log_time = time.time()
         self.last_activity_time = time.time()
         
+        # Twilio media session for outbound audio queue
+        self.twilio_media_session = None
+        
+        # Phase 12: Per-call state for inbound/outbound audio bridging
+        self.jitter_buffer = JitterBuffer()  # Inbound buffer for STT
+        self.outbound_frames = asyncio.Queue()  # Thread-safe queue of PCM frames for Twilio
+        self.greeting_sent = False  # Flag to track if initial greeting has been sent
+        
         logger.info("DuplexVoiceController initialized", extra={
             "call_sid": call_sid,
             "trace_id": self.trace_id,
@@ -189,6 +214,192 @@ class DuplexVoiceController:
     async def remove_controller(call_sid: str):
         """Remove controller instance - delegates to controller manager"""
         await controller_manager.remove_controller(call_sid)
+    
+    # --------------------------------------------------------------------------
+    # Twilio Media Session Attachment
+    # --------------------------------------------------------------------------
+    
+    def attach_twilio_session(self, media_session):
+        """
+        Attach Twilio media session for outbound audio queue
+        Called when /media receives "start" to establish the session
+        """
+        self.twilio_media_session = media_session
+        logger.info("Twilio media session attached to controller", extra={
+            "call_sid": self.call_sid,
+            "trace_id": self.trace_id,
+            "service": "streaming_server",
+            "controller": "duplex"
+        })
+    
+    # --------------------------------------------------------------------------
+    # Phase 12: Outbound Methods (TTS → Twilio)
+    # --------------------------------------------------------------------------
+    
+    async def enqueue_greeting_if_needed(self):
+        """
+        Enqueue initial greeting if not already sent.
+        Uses persona-appropriate greeting text (no AI mentions).
+        """
+        if self.greeting_sent:
+            return
+            
+        try:
+            # Persona-appropriate greeting (no AI/system/bot mentions)
+            greeting_text = "Hey, this is Sara calling from Noblecom Solutions. Just checking you can hear me clearly on your side."
+            
+            await self.enqueue_tts_text(greeting_text)
+            self.greeting_sent = True
+            
+            logger.info("Greeting enqueued", extra={
+                "call_sid": self.call_sid,
+                "greeting_text": greeting_text,
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            
+        except Exception as e:
+            logger.error("Error enqueuing greeting", extra={
+                "call_sid": self.call_sid,
+                "error": str(e),
+                "stack": traceback.format_exc(),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            await self._handle_error()
+    
+    async def enqueue_tts_text(self, text: str):
+        """
+        Convert text to TTS audio and enqueue as PCM frames for Twilio.
+        Only accepts persona-appropriate text (no AI mentions).
+        """
+        try:
+            # Phase 12: Circuit breaker check
+            if _is_circuit_breaker_open("tts_generation"):
+                logger.warning("TTS generation blocked by circuit breaker", extra={
+                    "call_sid": self.call_sid,
+                    "trace_id": self.trace_id,
+                    "service": "streaming_server",
+                    "controller": "duplex"
+                })
+                metrics.increment_metric("tts_generation_circuit_breaker_hits_total")
+                return
+            
+            start_time = time.time()
+            
+            # Generate TTS audio frames using voice engine
+            async for audio_frame in self.voice_engine.text_to_speech_stream(text):
+                # Convert to Twilio-compatible format
+                twilio_frame = await self._convert_to_twilio_format(audio_frame)
+                
+                # Enqueue frame for outbound streaming
+                await self.outbound_frames.put(twilio_frame)
+                
+                logger.debug("TTS frame enqueued", extra={
+                    "call_sid": self.call_sid,
+                    "frame_length": len(twilio_frame),
+                    "service": "streaming_server",
+                    "controller": "duplex"
+                })
+            
+            generation_latency = (time.time() - start_time) * 1000
+            metrics.observe_latency("tts_generation_latency_ms", generation_latency)
+            
+            logger.info("TTS text enqueued successfully", extra={
+                "call_sid": self.call_sid,
+                "text_length": len(text),
+                "generation_latency_ms": generation_latency,
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            
+            metrics.increment_metric("tts_texts_enqueued_total")
+            
+        except Exception as e:
+            logger.error("Error enqueuing TTS text", extra={
+                "call_sid": self.call_sid,
+                "error": str(e),
+                "stack": traceback.format_exc(),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            metrics.increment_metric("tts_enqueue_errors_total")
+            await self._handle_error()
+    
+    async def next_outbound_frame(self, timeout_ms: int = 100) -> Optional[bytes]:
+        """
+        Get next outbound PCM frame for Twilio streaming.
+        Returns None if no frames available within timeout.
+        """
+        try:
+            # Try to get frame with timeout
+            frame = await asyncio.wait_for(
+                self.outbound_frames.get(), 
+                timeout=timeout_ms / 1000.0
+            )
+            return frame
+            
+        except asyncio.TimeoutError:
+            return None
+        except Exception as e:
+            logger.error("Error getting next outbound frame", extra={
+                "call_sid": self.call_sid,
+                "error": str(e),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            return None
+    
+    # --------------------------------------------------------------------------
+    # Phase 12: Inbound Methods (Twilio → STT)
+    # --------------------------------------------------------------------------
+    
+    async def handle_inbound_audio(self, pcm_bytes: bytes):
+        """
+        Handle incoming PCM audio from Twilio.
+        Stores in jitter buffer for STT processing.
+        """
+        try:
+            # Phase 12: Circuit breaker check
+            if _is_circuit_breaker_open("audio_processing"):
+                logger.warning("Inbound audio processing blocked by circuit breaker", extra={
+                    "call_sid": self.call_sid,
+                    "trace_id": self.trace_id,
+                    "service": "streaming_server",
+                    "controller": "duplex"
+                })
+                metrics.increment_metric("inbound_audio_circuit_breaker_hits_total")
+                return
+            
+            # Push to jitter buffer for STT processing
+            self.jitter_buffer.push(pcm_bytes)
+            
+            # Update activity timestamp
+            self.last_activity_time = time.time()
+            
+            # For MVP: Option A - Just store, don't process STT yet
+            # Future: Option B - Process STT when enough audio buffered
+            
+            logger.debug("Inbound audio handled", extra={
+                "call_sid": self.call_sid,
+                "audio_length": len(pcm_bytes),
+                "jitter_buffer_has_data": self.jitter_buffer.has_data(),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            
+            metrics.increment_metric("inbound_audio_chunks_processed_total")
+            
+        except Exception as e:
+            logger.error("Error handling inbound audio", extra={
+                "call_sid": self.call_sid,
+                "error": str(e),
+                "stack": traceback.format_exc(),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            metrics.increment_metric("inbound_audio_processing_errors_total")
+            await self._handle_error()
     
     # --------------------------------------------------------------------------
     # Public API with Resilience Patterns
@@ -468,7 +679,10 @@ class DuplexVoiceController:
                 "is_listening": self.is_listening,
                 "trace_id": self.trace_id,
                 "circuit_breaker_open": circuit_breaker_open,
-                "redis_ok": redis_ok
+                "redis_ok": redis_ok,
+                "greeting_sent": self.greeting_sent,
+                "outbound_queue_size": self.outbound_frames.qsize(),
+                "jitter_buffer_has_data": self.jitter_buffer.has_data()
             }
             
         except Exception as e:
@@ -753,9 +967,11 @@ class DuplexVoiceController:
     async def _stream_tts_response(self, text: str):
         """
         Stream TTS response to WebSocket with interrupt capability and resilience
+        Now also enqueues TTS chunks to Twilio outbound queue
         """
         try:
             start_time = time.time()
+            frame_sequence = 0
             
             # Convert text to audio frames (streaming) with external API wrapper
             async for audio_frame in self.voice_engine.text_to_speech_stream(text):
@@ -764,6 +980,30 @@ class DuplexVoiceController:
                 
                 # Send audio frame to Twilio WebSocket
                 await self._send_audio_frame(audio_frame)
+                
+                # Also enqueue to Twilio outbound queue if session is available
+                if self.twilio_media_session and hasattr(self.twilio_media_session, 'enqueue_outbound_frame'):
+                    try:
+                        # Convert audio frame to Twilio format (8 kHz μ-law mono)
+                        twilio_frame = await self._convert_to_twilio_format(audio_frame)
+                        self.twilio_media_session.enqueue_outbound_frame(twilio_frame)
+                        
+                        frame_sequence += 1
+                        logger.debug("TTS frame enqueued for Twilio", extra={
+                            "call_sid": self.call_sid,
+                            "frame_sequence": frame_sequence,
+                            "frame_length": len(twilio_frame),
+                            "service": "streaming_server",
+                            "controller": "duplex"
+                        })
+                    except Exception as e:
+                        logger.error("Error enqueuing TTS frame to Twilio", extra={
+                            "call_sid": self.call_sid,
+                            "error": str(e),
+                            "frame_sequence": frame_sequence,
+                            "service": "streaming_server",
+                            "controller": "duplex"
+                        })
                 
                 # Small delay to maintain real-time streaming
                 await asyncio.sleep(0.02)  # 50ms chunks
@@ -774,6 +1014,7 @@ class DuplexVoiceController:
             logger.info("TTS streaming completed", extra={
                 "call_sid": self.call_sid,
                 "streaming_latency_ms": streaming_latency,
+                "total_frames": frame_sequence,
                 "interrupted": not self.is_playing,
                 "service": "streaming_server",
                 "controller": "duplex"
@@ -797,6 +1038,34 @@ class DuplexVoiceController:
             await self._handle_error()
         finally:
             self.is_playing = False
+    
+    async def _convert_to_twilio_format(self, audio_frame: bytes) -> bytes:
+        """
+        Convert audio frame to Twilio-compatible format (8 kHz μ-law mono)
+        This is a placeholder - implement actual audio conversion based on your TTS output format
+        """
+        try:
+            # If your TTS engine already outputs Twilio-compatible format, return as-is
+            # Otherwise, implement conversion here:
+            # - Resample to 8 kHz if needed
+            # - Convert to mono if stereo
+            # - Apply μ-law encoding
+            # - Adjust byte order if necessary
+            
+            # For now, return as-is assuming compatibility
+            # TODO: Implement proper audio conversion based on your TTS output format
+            return audio_frame
+            
+        except Exception as e:
+            logger.error("Error converting audio to Twilio format", extra={
+                "call_sid": self.call_sid,
+                "error": str(e),
+                "input_length": len(audio_frame),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            # Return original frame as fallback
+            return audio_frame
     
     # --------------------------------------------------------------------------
     # Error Handling & Circuit Breaker
@@ -1085,7 +1354,11 @@ class DuplexVoiceController:
             "last_context_log_time": self.last_context_log_time,
             "consecutive_errors": self.consecutive_errors,
             "last_activity_seconds": time.time() - self.last_activity_time,
-            "circuit_breaker_open": _is_circuit_breaker_open("duplex_controller")
+            "circuit_breaker_open": _is_circuit_breaker_open("duplex_controller"),
+            "twilio_session_attached": self.twilio_media_session is not None,
+            "greeting_sent": self.greeting_sent,
+            "outbound_queue_size": self.outbound_frames.qsize(),
+            "jitter_buffer_has_data": self.jitter_buffer.has_data()
         }
 
 

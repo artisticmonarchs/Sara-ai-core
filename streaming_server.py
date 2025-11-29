@@ -1503,7 +1503,8 @@ def media(ws):
         service="streaming_server",
         event="twilio_ws_connect",
         status="info",
-        message="Twilio WebSocket connection opened"
+        message="Twilio WebSocket connection opened",
+        extra={"stream_sid": stream_sid, "session_id": session_id}
     )
 
     try:
@@ -1540,18 +1541,75 @@ def media(ws):
             session_id=session_id,
             extra={
                 "type": "websocket",
-                "active_connections": stream_state_mgr.get_active_stream_count()
+                "active_connections": stream_state_mgr.get_active_stream_count(),
+                "stream_sid": stream_sid
             }
         )
 
+        # Outbound audio tracking
+        outbound_frame_sequence = 0
+        
         while True:
+            # Check for outbound audio frames from controller
+            if call_sid:
+                controller = controller_manager.get_controller(call_sid)
+                if controller:
+                    # Poll for outbound audio frames
+                    outbound_audio = controller.get_next_outbound_frame()
+                    if outbound_audio:
+                        # Encode and send outbound audio to Twilio
+                        try:
+                            encoded_payload = base64.b64encode(outbound_audio).decode('utf-8')
+                            media_message = {
+                                "event": "media",
+                                "streamSid": stream_sid,
+                                "media": {
+                                    "payload": encoded_payload
+                                }
+                            }
+                            ws.send(json.dumps(media_message))
+                            outbound_frame_sequence += 1
+                            
+                            log_event(
+                                service="streaming_server",
+                                event="twilio_outbound_audio_sent",
+                                status="info",
+                                message="Sent outbound audio frame to Twilio",
+                                trace_id=trace_id,
+                                session_id=session_id,
+                                extra={
+                                    "frame_sequence": outbound_frame_sequence,
+                                    "audio_bytes": len(outbound_audio),
+                                    "encoded_length": len(encoded_payload),
+                                    "stream_sid": stream_sid,
+                                    "call_sid": call_sid
+                                }
+                            )
+                        except Exception as e:
+                            stream_errors_total.labels(error_type="outbound_media_send").inc()
+                            log_event(
+                                service="streaming_server",
+                                event="outbound_audio_send_error",
+                                status="error",
+                                message="Error sending outbound audio to Twilio",
+                                trace_id=trace_id,
+                                session_id=session_id,
+                                extra={
+                                    "error": str(e),
+                                    "frame_sequence": outbound_frame_sequence,
+                                    "call_sid": call_sid,
+                                    "stream_sid": stream_sid
+                                }
+                            )
+
             raw_msg = ws.receive()
             if raw_msg is None:
                 log_event(
                     service="streaming_server",
                     event="twilio_ws_closed",
                     status="info",
-                    message="Twilio WebSocket closed (None received)"
+                    message="Twilio WebSocket closed (None received)",
+                    extra={"call_sid": call_sid, "stream_sid": stream_sid}
                 )
                 break
 
@@ -1563,7 +1621,7 @@ def media(ws):
                     event="twilio_ws_bad_json",
                     status="error",
                     message="Received non-JSON frame from Twilio",
-                    extra={"raw": raw_msg[:200] if raw_msg else "empty", "error": str(e)}
+                    extra={"raw": raw_msg[:200] if raw_msg else "empty", "error": str(e), "call_sid": call_sid, "stream_sid": stream_sid}
                 )
                 continue
 
@@ -1573,7 +1631,7 @@ def media(ws):
                 event="twilio_ws_inbound",
                 status="info",
                 message=f"Received Twilio WS event: {event_type}",
-                extra={"event_type": event_type}
+                extra={"event_type": event_type, "stream_sid": stream_sid, "call_sid": call_sid}
             )
 
             event = (msg.get("event") or "").lower()
@@ -1591,6 +1649,10 @@ def media(ws):
                     websocket=ws
                 )
                 
+                # Enqueue greeting message
+                greeting_text = "Hey, this is Sara calling from Noblecom Solutions. Just checking you can hear me clearly on your side."
+                controller.enqueue_greeting(greeting_text)
+                
                 log_event(
                     service="streaming_server",
                     event="twilio_stream_started",
@@ -1601,7 +1663,8 @@ def media(ws):
                     extra={
                         "call_sid": call_sid,
                         "stream_sid": stream_sid,
-                        "controller_initialized": True
+                        "controller_initialized": True,
+                        "greeting_enqueued": True
                     }
                 )
 
@@ -1626,7 +1689,9 @@ def media(ws):
                             session_id=session_id,
                             extra={
                                 "payload_length": len(b64_payload),
-                                "audio_bytes": len(audio_bytes)
+                                "audio_bytes": len(audio_bytes),
+                                "stream_sid": stream_sid,
+                                "call_sid": call_sid
                             }
                         )
                     except Exception as e:
@@ -1638,7 +1703,7 @@ def media(ws):
                             message="Error processing inbound media",
                             trace_id=trace_id,
                             session_id=session_id,
-                            extra={"error": str(e)}
+                            extra={"error": str(e), "call_sid": call_sid, "stream_sid": stream_sid}
                         )
 
             elif event == "mark":
@@ -1655,7 +1720,7 @@ def media(ws):
                         message="Received mark event from Twilio",
                         trace_id=trace_id,
                         session_id=session_id,
-                        extra={"mark_name": mark_name}
+                        extra={"mark_name": mark_name, "call_sid": call_sid, "stream_sid": stream_sid}
                     )
 
             elif event == "stop":
@@ -1668,12 +1733,12 @@ def media(ws):
                 
                 log_event(
                     service="streaming_server",
-                    event="twilio_stream_stopped",
+                    event="twilio_media_ws_session_stopped",
                     status="info",
-                    message="Twilio media stream stopped",
+                    message="Twilio media WebSocket session stopped",
                     trace_id=trace_id,
                     session_id=session_id,
-                    extra={"call_sid": call_sid}
+                    extra={"call_sid": call_sid, "stream_sid": stream_sid}
                 )
                 break
 
@@ -1686,7 +1751,7 @@ def media(ws):
                     message="Received unknown event type from Twilio",
                     trace_id=trace_id,
                     session_id=session_id,
-                    extra={"event_type": event_type}
+                    extra={"event_type": event_type, "call_sid": call_sid, "stream_sid": stream_sid}
                 )
 
     except Exception as e:
@@ -1701,7 +1766,8 @@ def media(ws):
             extra={
                 "error": str(e),
                 "stack": traceback.format_exc(),
-                "call_sid": call_sid
+                "call_sid": call_sid,
+                "stream_sid": stream_sid
             }
         )
         # Capture exception with Sentry
@@ -1710,6 +1776,7 @@ def media(ws):
             "session_id": session_id,
             "trace_id": trace_id,
             "call_sid": call_sid,
+            "stream_sid": stream_sid,
             "endpoint": "media_websocket"
         })
     finally:
@@ -1749,7 +1816,9 @@ def media(ws):
             trace_id=trace_id,
             extra={
                 "call_sid": call_sid,
+                "stream_sid": stream_sid,
                 "duration_seconds": round(time.time() - start_ts, 2),
+                "outbound_frames_sent": outbound_frame_sequence,
                 "active_connections": stream_state_mgr.get_active_stream_count()
             }
         )

@@ -217,16 +217,49 @@ def twilio_answer():
         r = VoiceResponse()
         ws_url = _media_ws_url()
         
-        if ws_url and isinstance(ws_url, str) and ws_url.strip().startswith("wss://"):
-            # Safest approach: omit track parameter and let Twilio default to inbound
+        # Enhanced validation for WebSocket URL
+        is_valid_ws_url = ws_url and isinstance(ws_url, str) and ws_url.strip().startswith("wss://")
+        
+        if is_valid_ws_url:
+            # Use WebSocket streaming
             with r.connect() as c:
                 c.stream(url=ws_url.strip())
+            twiml_path = "websocket_stream"
+            
+            # Log media stream mode usage
+            _structured_log("twilio_answer_mode", level="info",
+                          message="TwiML with WebSocket stream emitted",
+                          trace_id=trace_id, media_ws_url=ws_url.strip(), twiml_path=twiml_path,
+                          mode="media_stream")
+            
+            _structured_log("twilio_answer_twiML_emitted", level="info",
+                          message="TwiML with WebSocket stream emitted",
+                          trace_id=trace_id, media_ws_url=ws_url.strip(), twiml_path=twiml_path)
         else:
+            # Fallback to Say-only (should not happen in production)
             r.say("Hello, this is Sara. Please hold while we connect.")
-        
-        _structured_log("twilio_answer_webhook", level="info",
-                      message="Processed Twilio answer webhook",
-                      trace_id=trace_id, media_ws_available=bool(ws_url and ws_url.strip().startswith("wss://")))
+            twiml_path = "say_only_fallback"
+            
+            # Determine reason for fallback
+            reason = "missing_or_invalid_media_ws_url"
+            if not ws_url:
+                reason = "missing_media_ws_url"
+            elif not isinstance(ws_url, str):
+                reason = "media_ws_url_not_string"
+            elif not ws_url.strip().startswith("wss://"):
+                reason = "media_ws_url_invalid_format"
+            
+            # Log fallback mode usage
+            _structured_log("twilio_answer_mode", level="warning",
+                          message="TwiML fallback to Say-only - WebSocket URL missing or invalid",
+                          trace_id=trace_id, media_ws_url=ws_url, twiml_path=twiml_path,
+                          mode="fallback_say_only", reason=reason)
+            
+            _structured_log("twilio_answer_fallback", level="warning",
+                          message="TwiML fallback to Say-only - WebSocket URL missing or invalid",
+                          trace_id=trace_id, media_ws_url=ws_url, twiml_path=twiml_path,
+                          ws_url_empty=not bool(ws_url),
+                          ws_url_valid_format=bool(ws_url and ws_url.strip().startswith("wss://")))
         
         return Response(str(r), status=200, mimetype="application/xml")
     except Exception as e:

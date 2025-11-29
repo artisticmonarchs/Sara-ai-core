@@ -43,6 +43,7 @@ except ImportError:
         PORT = int(os.getenv("PORT", "5000"))
         # TODO: Move hardcoded port number to config.py
         R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME")
+        TWILIO_MEDIA_WS_URL = os.getenv("TWILIO_MEDIA_WS_URL")
 
 # --------------------------------------------------------------------------
 # Phase 11-D Metrics Integration - Lazy Import Shim
@@ -848,6 +849,16 @@ if __name__ == "__main__":
         startup_components = validate_system_dependencies()
     except Exception:
         startup_components = {}
+
+    # Log TWILIO_MEDIA_WS_URL configuration at startup
+    twilio_media_ws_url = getattr(Config, "TWILIO_MEDIA_WS_URL", None)
+    log_event(
+        service="app",
+        event="twilio_media_ws_url_loaded",
+        status="ok" if twilio_media_ws_url else "missing",
+        message="TWILIO_MEDIA_WS_URL configuration loaded",
+        extra={"twilio_media_ws_url": twilio_media_ws_url or "missing"}
+    )
 
     log_event(
         service="app",

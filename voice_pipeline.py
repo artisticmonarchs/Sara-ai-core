@@ -253,6 +253,163 @@ def _unregister_tts_task(call_sid: str, task_id: str, trace_id: str):
         _store_call_state(call_sid, trace_id, session_state)
 
 # --------------------------------------------------------------------------
+# NEW: Streaming TTS Integration for Live Calls
+# --------------------------------------------------------------------------
+async def stream_tts_to_call(call_sid: str, text: str, trace_id: str) -> Dict[str, Any]:
+    """
+    Stream TTS audio directly to call in real-time using duplex controller.
+    This ensures immediate playback during live calls instead of buffering.
+    """
+    start_time = time.time()
+    
+    try:
+        # Check if duplex streaming is available and enabled
+        if not DUPLEX_STREAMING_ENABLED or not DuplexVoiceController:
+            _structured_log(
+                "streaming_tts_skipped",
+                level="warn",
+                message="Duplex streaming not available, falling back to async TTS",
+                trace_id=trace_id,
+                call_sid=call_sid
+            )
+            # Fall back to standard async TTS
+            tts_task = process_tts_async.delay(call_sid, text, {"trace_id": trace_id})
+            _register_tts_task(call_sid, tts_task.id, trace_id)
+            return {"ok": True, "mode": "async", "task_id": tts_task.id}
+        
+        # Initialize realtime voice engine for streaming
+        try:
+            engine = RealtimeVoiceEngine()
+            await engine.start()
+        except Exception as e:
+            _structured_log(
+                "streaming_engine_init_failed",
+                level="warn",
+                message="Failed to initialize streaming engine, falling back to async TTS",
+                trace_id=trace_id,
+                call_sid=call_sid,
+                extra={"error": str(e)}
+            )
+            # Fall back to standard async TTS
+            tts_task = process_tts_async.delay(call_sid, text, {"trace_id": trace_id})
+            _register_tts_task(call_sid, tts_task.id, trace_id)
+            return {"ok": True, "mode": "async_fallback", "task_id": tts_task.id}
+        
+        # Get duplex controller for streaming
+        controller = DuplexVoiceController()
+        
+        # Stream TTS chunks directly to duplex controller
+        chunks_streamed = 0
+        total_bytes = 0
+        
+        _structured_log(
+            "streaming_tts_started",
+            level="info",
+            message="Starting real-time TTS streaming to call",
+            trace_id=trace_id,
+            call_sid=call_sid,
+            extra={"text_length": len(text)}
+        )
+        
+        try:
+            async for audio_chunk in engine.text_to_speech_stream(text):
+                if audio_chunk and len(audio_chunk) > 0:
+                    # Stream chunk directly to duplex controller for immediate playback
+                    controller.stream_tts_chunk(call_sid, audio_chunk, trace_id)
+                    chunks_streamed += 1
+                    total_bytes += len(audio_chunk)
+                    
+                    # Log progress every 10 chunks to avoid excessive logging
+                    if chunks_streamed % 10 == 0:
+                        _structured_log(
+                            "streaming_tts_progress",
+                            level="debug",
+                            message="TTS streaming in progress",
+                            trace_id=trace_id,
+                            call_sid=call_sid,
+                            extra={
+                                "chunks_streamed": chunks_streamed,
+                                "total_bytes": total_bytes,
+                                "avg_chunk_size": total_bytes / chunks_streamed
+                            }
+                        )
+            
+            # TTS streaming completed successfully
+            stream_duration = (time.time() - start_time) * 1000
+            _structured_log(
+                "streaming_tts_completed",
+                level="info",
+                message="TTS streaming completed successfully",
+                trace_id=trace_id,
+                call_sid=call_sid,
+                extra={
+                    "chunks_streamed": chunks_streamed,
+                    "total_bytes": total_bytes,
+                    "stream_duration_ms": stream_duration,
+                    "throughput_kbps": (total_bytes * 8) / (stream_duration / 1000) / 1024 if stream_duration > 0 else 0
+                }
+            )
+            
+            # Record streaming metrics
+            try:
+                increment_metric, observe_latency, _ = _get_metrics()
+                increment_metric("voice_pipeline_streaming_tts_completed_total")
+                observe_latency("voice_pipeline_streaming_tts_duration_seconds", stream_duration / 1000.0)
+                increment_metric("voice_pipeline_tts_chunks_streamed_total", chunks_streamed)
+            except Exception:
+                pass
+            
+            return {
+                "ok": True,
+                "mode": "streaming",
+                "chunks_streamed": chunks_streamed,
+                "total_bytes": total_bytes,
+                "stream_duration_ms": stream_duration
+            }
+            
+        except Exception as streaming_error:
+            _structured_log(
+                "streaming_tts_failed",
+                level="error",
+                message="TTS streaming failed",
+                trace_id=trace_id,
+                call_sid=call_sid,
+                extra={
+                    "error": str(streaming_error),
+                    "chunks_streamed": chunks_streamed,
+                    "total_bytes": total_bytes
+                }
+            )
+            # Fall back to async TTS
+            tts_task = process_tts_async.delay(call_sid, text, {"trace_id": trace_id})
+            _register_tts_task(call_sid, tts_task.id, trace_id)
+            return {
+                "ok": True,
+                "mode": "async_after_stream_failure",
+                "task_id": tts_task.id,
+                "streaming_error": str(streaming_error)
+            }
+            
+    except Exception as e:
+        latency_ms = (time.time() - start_time) * 1000
+        _record_metrics("streaming_tts", "failure", latency_ms, trace_id)
+        _, capture_exception_safe = _get_sentry()
+        capture_exception_safe(e, {"service": SERVICE_NAME, "trace_id": trace_id, "call_sid": call_sid})
+        _structured_log(
+            "streaming_tts_setup_failed",
+            level="error",
+            message="TTS streaming setup failed",
+            trace_id=trace_id,
+            call_sid=call_sid,
+            extra={"error": str(e), "traceback": traceback.format_exc()}
+        )
+        
+        # Final fallback to standard async TTS
+        tts_task = process_tts_async.delay(call_sid, text, {"trace_id": trace_id})
+        _register_tts_task(call_sid, tts_task.id, trace_id)
+        return {"ok": True, "mode": "async_fallback_final", "task_id": tts_task.id}
+
+# --------------------------------------------------------------------------
 # Initialization - ENHANCED FOR DUPLEX STREAMING
 # --------------------------------------------------------------------------
 def initialize_voice_pipeline():
@@ -660,28 +817,68 @@ def process_inference_async(self, call_sid: str, transcript: str, payload: Optio
             except Exception:
                 pass
             
-            # Dispatch TTS asynchronously and register for potential cancellation
-            tts_task = process_tts_async.delay(call_sid, reply_text, {"trace_id": trace_id})
-            _register_tts_task(call_sid, tts_task.id, trace_id)
-            
-            total_latency_ms = (time.time() - start_time) * 1000
-            _record_metrics("async_inference_processing", "success", total_latency_ms, trace_id)
-            
-            # SUCCESS: Now set idempotency key
-            if redis_client:
-                redis_client.setex(task_id, 3600, "done")
-            
-            logger.info("Task completed successfully", extra={"task": self.name, "id": self.request.id, "call_sid": call_sid, "processing_time_ms": total_latency_ms})
-            
-            return {
-                "ok": True,
-                "call_sid": call_sid,
-                "trace_id": trace_id,
-                "reply_text": reply_text,
-                "inference_latency_ms": inference_latency_ms,
-                "total_processing_time_ms": total_latency_ms,
-                "tts_task_id": tts_task.id
-            }
+            # NEW: Use streaming TTS for live calls when duplex is available
+            if DUPLEX_STREAMING_ENABLED and DuplexVoiceController:
+                # Import asyncio for streaming TTS
+                import asyncio
+                streaming_result = asyncio.run(stream_tts_to_call(call_sid, reply_text, trace_id))
+                
+                _structured_log(
+                    "inference_with_streaming_tts",
+                    level="info",
+                    message="Inference completed with streaming TTS",
+                    trace_id=trace_id,
+                    call_sid=call_sid,
+                    extra={
+                        "streaming_mode": streaming_result.get("mode"),
+                        "reply_length": len(reply_text),
+                        "inference_latency_ms": inference_latency_ms
+                    }
+                )
+                
+                total_latency_ms = (time.time() - start_time) * 1000
+                _record_metrics("async_inference_processing", "success", total_latency_ms, trace_id)
+                
+                # SUCCESS: Now set idempotency key
+                if redis_client:
+                    redis_client.setex(task_id, 3600, "done")
+                
+                logger.info("Task completed successfully with streaming TTS", extra={"task": self.name, "id": self.request.id, "call_sid": call_sid, "processing_time_ms": total_latency_ms})
+                
+                return {
+                    "ok": True,
+                    "call_sid": call_sid,
+                    "trace_id": trace_id,
+                    "reply_text": reply_text,
+                    "inference_latency_ms": inference_latency_ms,
+                    "total_processing_time_ms": total_latency_ms,
+                    "tts_mode": "streaming",
+                    "streaming_result": streaming_result
+                }
+            else:
+                # Fallback to async TTS dispatch
+                tts_task = process_tts_async.delay(call_sid, reply_text, {"trace_id": trace_id})
+                _register_tts_task(call_sid, tts_task.id, trace_id)
+                
+                total_latency_ms = (time.time() - start_time) * 1000
+                _record_metrics("async_inference_processing", "success", total_latency_ms, trace_id)
+                
+                # SUCCESS: Now set idempotency key
+                if redis_client:
+                    redis_client.setex(task_id, 3600, "done")
+                
+                logger.info("Task completed successfully", extra={"task": self.name, "id": self.request.id, "call_sid": call_sid, "processing_time_ms": total_latency_ms})
+                
+                return {
+                    "ok": True,
+                    "call_sid": call_sid,
+                    "trace_id": trace_id,
+                    "reply_text": reply_text,
+                    "inference_latency_ms": inference_latency_ms,
+                    "total_processing_time_ms": total_latency_ms,
+                    "tts_task_id": tts_task.id,
+                    "tts_mode": "async"
+                }
             
         except ImportError:
             raise Exception("GPT service not available")
@@ -1606,7 +1803,9 @@ __all__ = [
     # NEW: Session management and async processing
     "start_call", "stop_call", "process_audio_async", "process_tts_async", "process_inference_async",
     # NEW: Barge-in cancellation and jitter buffer
-    "cancel_pending_tts_tasks", "_jitter_buffer"
+    "cancel_pending_tts_tasks", "_jitter_buffer",
+    # NEW: Streaming TTS integration
+    "stream_tts_to_call"
 ]
 
 # --------------------------------------------------------------------------
