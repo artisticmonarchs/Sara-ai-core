@@ -160,6 +160,21 @@ class Config:
     INTERRUPTION_DEBOUNCE_MS: int = _to_int(os.getenv("INTERRUPTION_DEBOUNCE_MS"), 150)
     TTS_CANCEL_TIMEOUT: float = _to_float(os.getenv("TTS_CANCEL_TIMEOUT"), 0.15)
 
+    # Outbound Dialer Settings - NEW
+    DIAL_TIMEOUT_SECONDS: int = _to_int(os.getenv("DIAL_TIMEOUT_SECONDS"), 30)
+    
+    # Webhook URLs for Twilio callbacks - NEW (fixes missing attributes)
+    VOICE_WEBHOOK_BASE: str = os.getenv("VOICE_WEBHOOK_BASE", os.getenv("APP_URL", "https://your-app-url.example.com"))
+    STATUS_WEBHOOK_BASE: str = os.getenv("STATUS_WEBHOOK_BASE", os.getenv("APP_URL", "https://your-app-url.example.com"))
+
+    # Outbound Dialer Settings - MISSING ATTRIBUTES (FIX)
+    MAX_CONCURRENT_CALLS: int = _to_int(os.getenv("MAX_CONCURRENT_CALLS"), 10)
+    RATE_LIMIT_CALLS_PER_MINUTE: int = _to_int(os.getenv("RATE_LIMIT_CALLS_PER_MINUTE"), 60)
+    RETRY_ATTEMPTS: int = _to_int(os.getenv("RETRY_ATTEMPTS"), 2)
+    RETRY_DELAY_SECONDS: int = _to_int(os.getenv("RETRY_BACKOFF_SECONDS"), 1)  # Maps RETRY_BACKOFF_SECONDS to RETRY_DELAY_SECONDS
+    TIMEZONE_CHECK_ENABLED: bool = _to_bool(os.getenv("TIMEZONE_CHECK_ENABLED", "true"), True)
+    DNC_CHECK_ENABLED: bool = _to_bool(os.getenv("DNC_CHECK_ENABLED", "true"), True)
+
     # Snapshot for debug (no secrets in clear)
     @classmethod
     def as_dict(cls) -> dict:
@@ -218,6 +233,18 @@ class Config:
             "MAX_CONSECUTIVE_ERRORS": cls.MAX_CONSECUTIVE_ERRORS,
             "INTERRUPTION_DEBOUNCE_MS": cls.INTERRUPTION_DEBOUNCE_MS,
             "TTS_CANCEL_TIMEOUT": cls.TTS_CANCEL_TIMEOUT,
+            # NEW: Outbound Dialer configs
+            "DIAL_TIMEOUT_SECONDS": cls.DIAL_TIMEOUT_SECONDS,
+            # NEW: Webhook URL configs
+            "VOICE_WEBHOOK_BASE": cls.VOICE_WEBHOOK_BASE,
+            "STATUS_WEBHOOK_BASE": cls.STATUS_WEBHOOK_BASE,
+            # NEW: Missing Outbound Dialer configs
+            "MAX_CONCURRENT_CALLS": cls.MAX_CONCURRENT_CALLS,
+            "RATE_LIMIT_CALLS_PER_MINUTE": cls.RATE_LIMIT_CALLS_PER_MINUTE,
+            "RETRY_ATTEMPTS": cls.RETRY_ATTEMPTS,
+            "RETRY_DELAY_SECONDS": cls.RETRY_DELAY_SECONDS,
+            "TIMEZONE_CHECK_ENABLED": cls.TIMEZONE_CHECK_ENABLED,
+            "DNC_CHECK_ENABLED": cls.DNC_CHECK_ENABLED,
         }
 
 
@@ -268,6 +295,21 @@ MAX_CONSECUTIVE_ERRORS = Config.MAX_CONSECUTIVE_ERRORS
 INTERRUPTION_DEBOUNCE_MS = Config.INTERRUPTION_DEBOUNCE_MS
 TTS_CANCEL_TIMEOUT = Config.TTS_CANCEL_TIMEOUT
 
+# NEW: Outbound Dialer upper-case aliases
+DIAL_TIMEOUT_SECONDS = Config.DIAL_TIMEOUT_SECONDS
+
+# NEW: Webhook URL upper-case aliases
+VOICE_WEBHOOK_BASE = Config.VOICE_WEBHOOK_BASE
+STATUS_WEBHOOK_BASE = Config.STATUS_WEBHOOK_BASE
+
+# NEW: Missing Outbound Dialer upper-case aliases
+MAX_CONCURRENT_CALLS = Config.MAX_CONCURRENT_CALLS
+RATE_LIMIT_CALLS_PER_MINUTE = Config.RATE_LIMIT_CALLS_PER_MINUTE
+RETRY_ATTEMPTS = Config.RETRY_ATTEMPTS
+RETRY_DELAY_SECONDS = Config.RETRY_DELAY_SECONDS
+TIMEZONE_CHECK_ENABLED = Config.TIMEZONE_CHECK_ENABLED
+DNC_CHECK_ENABLED = Config.DNC_CHECK_ENABLED
+
 # Lower-case aliases for legacy call-sites (defensive; you had errors like `phase_version`, `log_level`, etc.)
 service_name = SERVICE_NAME
 env_mode = ENV_MODE
@@ -306,6 +348,21 @@ max_conversation_turns = MAX_CONVERSATION_TURNS
 max_consecutive_errors = MAX_CONSECUTIVE_ERRORS
 interruption_debounce_ms = INTERRUPTION_DEBOUNCE_MS
 tts_cancel_timeout = TTS_CANCEL_TIMEOUT
+
+# NEW: Outbound Dialer lower-case aliases
+dial_timeout_seconds = DIAL_TIMEOUT_SECONDS
+
+# NEW: Webhook URL lower-case aliases
+voice_webhook_base = VOICE_WEBHOOK_BASE
+status_webhook_base = STATUS_WEBHOOK_BASE
+
+# NEW: Missing Outbound Dialer lower-case aliases
+max_concurrent_calls = MAX_CONCURRENT_CALLS
+rate_limit_calls_per_minute = RATE_LIMIT_CALLS_PER_MINUTE
+retry_attempts = RETRY_ATTEMPTS
+retry_delay_seconds = RETRY_DELAY_SECONDS
+timezone_check_enabled = TIMEZONE_CHECK_ENABLED
+dnc_check_enabled = DNC_CHECK_ENABLED
 
 # Optional: print a tiny config snapshot if requested (no secrets)
 if _to_bool(os.getenv("CONFIG_DEBUG_SNAPSHOT"), False):

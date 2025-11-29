@@ -881,10 +881,10 @@ class OutboundDialer:
             
             logger.info("Call initiated successfully", extra={
                 "trace_id": call_attempt.trace_id,
-                "contact_id": lead.lead_id,
+                "contact_id": call_attempt.lead.lead_id,
                 "call_sid": call_sid,
-                "lead_id": lead.lead_id,
-                "campaign_id": lead.campaign_id
+                "lead_id": call_attempt.lead.lead_id,
+                "campaign_id": call_attempt.lead.campaign_id
             })
             
         except Exception as e:
@@ -1032,10 +1032,27 @@ class OutboundDialer:
         return False
     
     def _get_caller_id(self, campaign_id: str) -> str:
-        """Get caller ID for campaign (placeholder implementation)"""
-        # In production, this would map campaign_id to specific caller IDs
-        # For now, use a default caller ID
-        return "+15551234567"  # Default caller ID
+        """Get caller ID for campaign - use configured Twilio phone number"""
+        try:
+            # Use the configured Twilio phone number from environment/config
+            # This should be the same number used for the streaming service
+            from twilio_client import TWILIO_PHONE_NUMBER
+            if TWILIO_PHONE_NUMBER and validate_phone_number(TWILIO_PHONE_NUMBER):
+                return TWILIO_PHONE_NUMBER
+        except (ImportError, AttributeError):
+            pass
+        
+        # Fallback: try to get from Config
+        try:
+            twilio_number = getattr(Config, 'TWILIO_PHONE_NUMBER', None)
+            if twilio_number and validate_phone_number(twilio_number):
+                return twilio_number
+        except Exception:
+            pass
+        
+        # Final fallback: log error and use empty string (will fail validation in twilio_client)
+        logger.error("No valid Twilio phone number configured - calls will fail")
+        return ""
     
     def _get_webhook_url(self, lead: Lead) -> str:
         """Generate webhook URL for Twilio call"""

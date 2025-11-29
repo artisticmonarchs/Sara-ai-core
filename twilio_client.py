@@ -455,6 +455,49 @@ def place_outbound_call(to_number: str, from_number: Optional[str] = None,
         return {"ok": False, "error": "call_place_failed", "trace_id": trace_id}
 
 # --------------------------------------------------------------------------
+# make_outbound_call wrapper for outbound_dialer compatibility
+# --------------------------------------------------------------------------
+async def make_outbound_call(phone_number: str, call_config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Async wrapper for place_outbound_call to maintain compatibility with outbound_dialer.
+    This function is awaited by TwilioAPIWrapper.make_outbound_call_with_guardrails.
+    """
+    try:
+        # Extract parameters from call_config to match place_outbound_call signature
+        from_number = call_config.get("from_")
+        initial_payload = call_config.get("initial_payload", {})
+        trace_id = call_config.get("trace_id")
+        
+        # Call the synchronous place_outbound_call function
+        result = place_outbound_call(
+            to_number=phone_number,
+            from_number=from_number,
+            initial_payload=initial_payload,
+            trace_id=trace_id
+        )
+        
+        # Convert the result to match outbound_dialer expected format
+        if result.get("ok"):
+            return {
+                "call_sid": result["call_sid"],
+                "trace_id": result["trace_id"]
+            }
+        else:
+            return {
+                "error": result.get("error", "unknown_error"),
+                "error_code": result.get("detail") or result.get("error"),
+                "trace_id": result.get("trace_id")
+            }
+            
+    except Exception as e:
+        _structured_log("make_outbound_call_error", level="ERROR",
+                      message=str(e), extra={"traceback": traceback.format_exc()})
+        return {
+            "error": str(e),
+            "error_code": "exception"
+        }
+
+# --------------------------------------------------------------------------
 # TwiML helpers (kept for internal use, not exposed as routes)
 # --------------------------------------------------------------------------
 def make_answer_twiml(trace_id: str, play_audio_url: Optional[str] = None, start_media_stream: bool = False) -> str:
@@ -542,6 +585,7 @@ def play_audio_on_call(call_sid: str, local_audio_path: Optional[str] = None,
 # --------------------------------------------------------------------------
 __all__ = [
     "place_outbound_call",
+    "make_outbound_call",
     "play_audio_on_call",
 ]
 
