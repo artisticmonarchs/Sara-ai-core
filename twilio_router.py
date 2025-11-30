@@ -215,8 +215,8 @@ def twilio_answer():
         from twilio.twiml.voice_response import VoiceResponse
         r = VoiceResponse()
         if _ws_url and isinstance(_ws_url, str) and _ws_url.strip().startswith("wss://"):
-            with r.connect() as c:
-                c.stream(url=_ws_url.strip())
+            # Use <Start><Stream track="both_tracks"/> for full duplex
+            r.start().stream(url=_ws_url.strip(), track="both_tracks")
         else:
             r.say("Hello, this is Sara. Please hold while we connect.")
         return str(r)
@@ -224,8 +224,12 @@ def twilio_answer():
     # Hard fallback: static XML that Twilio accepts even if the SDK is not available
     def _emit_static_twiml(_ws_url: str | None) -> str:
         if _ws_url and isinstance(_ws_url, str) and _ws_url.strip().startswith("wss://"):
-            # Minimal <Response><Connect><Stream/></Connect></Response> without SDK
-            return f'<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="{_ws_url.strip()}"/></Connect></Response>'
+            return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Start>
+    <Stream url="{_ws_url.strip()}" track="both_tracks"/>
+  </Start>
+</Response>"""
         # Minimal say-only fallback
         return '<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice">Hello, this is Sara. Please hold while we connect.</Say></Response>'
 
