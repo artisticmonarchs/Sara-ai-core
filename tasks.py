@@ -31,7 +31,7 @@ except ImportError:
     # Fallback config for backward compatibility
     import os
     class config:
-        REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        REDIS_URL = os.getenv("REDIS_URL")
         DG_API_KEY = os.getenv("DEEPGRAM_API_KEY")
         DG_SPEAK_MODEL = os.getenv("DEEPGRAM_SPEAK_MODEL", "aura-2-asteria-en")
         MAX_TTS_TEXT_LEN = int(os.getenv("MAX_TTS_TEXT_LEN", "2000"))
@@ -40,7 +40,7 @@ except ImportError:
         R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID")
         R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
         R2_REGION = os.getenv("R2_REGION", "auto")
-        PUBLIC_AUDIO_HOST = os.getenv("PUBLIC_AUDIO_HOST", "").strip().rstrip("/")
+        PUBLIC_AUDIO_HOST = os.getenv("PUBLIC_AUDIO_HOST", "https://pub-dc4b36bcc13f45a3aa77dc092e3b2cd4.r2.dev").strip().rstrip("/")
         PUBLIC_AUDIO_INCLUDE_BUCKET = os.getenv("PUBLIC_AUDIO_INCLUDE_BUCKET", "false").lower() in ("1", "true", "yes")
         PUBLIC_URL_EXPIRES = int(os.getenv("PUBLIC_URL_EXPIRES", "3600"))
         CELERY_MAX_RETRIES = int(os.getenv("CELERY_MAX_RETRIES", "3"))
@@ -53,7 +53,7 @@ CELERY_RETRY_BACKOFF_MAX = getattr(config, "CELERY_RETRY_BACKOFF_MAX", 600)
 CELERY_SOFT_TIME_LIMIT = getattr(config, "CELERY_SOFT_TIME_LIMIT", 300)
 
 # Bucket name compatibility (env may use R2_BUCKET or R2_BUCKET_NAME)
-R2_BUCKET_NAME = getattr(config, "R2_BUCKET_NAME", None) or getattr(config, "R2_BUCKET", None) or os.getenv("R2_BUCKET")
+R2_BUCKET_NAME = getattr(config, "R2_BUCKET_NAME", None) or getattr(config, "R2_BUCKET", None) or os.getenv("R2_BUCKET_NAME")
 
 # Phase 12: Transient error detection
 class TransientError(Exception):
@@ -646,7 +646,7 @@ def upload_to_r2(session_id: str, trace_id: str, audio_bytes: bytes) -> Tuple[st
             Bucket=R2_BUCKET_NAME,
             Key=key,
             Body=audio_bytes,
-            ContentType="audio/wav",  # Already correct - kept for consistency
+            ContentType="audio/wav",
         )
         duration_ms = round((time.time() - start) * 1000, 2)
         url = make_public_url(R2_BUCKET_NAME, key)
@@ -666,7 +666,7 @@ def upload_to_r2(session_id: str, trace_id: str, audio_bytes: bytes) -> Tuple[st
         return url, duration_ms
     except Exception as e:
         inc_metric, obs_latency = get_metrics()
-        inc_metric("tts_failures_total", labels={"reason": f"exc_{type(e).__name__}"})  # Fixed: Added exception class name
+        inc_metric("tts_failures_total", labels={"reason": f"exc_{type(e).__name__}"})
         log_event(
             service="tasks", 
             event="upload_failure", 
@@ -691,12 +691,10 @@ def deepgram_tts_rest(text: str, timeout: int = 30) -> Tuple[bytes, float]:
         )
         raise ConfigurationError("Missing Deepgram API key")  # Non-transient
 
-    url = f"https://api.deepgram.com/v1/speak?model={config.DG_SPEAK_MODEL}&encoding=linear16&container=wav"
+    url = f"https://api.deepgram.com/v1/speak?model={config.DG_SPEAK_MODEL}&encoding=mulaw&sample_rate=8000&container=none"
     headers = {"Authorization": f"Token {config.DG_API_KEY}", "Content-Type": "text/plain"}
 
     start = time.time()
-    
-    # Use external_api wrapper for Deepgram calls (already imported at top)
     
     def make_deepgram_request():
         """Encapsulate Deepgram API call for external_api wrapper"""
@@ -719,7 +717,6 @@ def deepgram_tts_rest(text: str, timeout: int = 30) -> Tuple[bytes, float]:
             )
             raise TransientError("Deepgram rate limited (429)")
         elif 400 <= resp.status_code < 500:
-            # Client errors are non-transient
             inc_metric, obs_latency = get_metrics()
             inc_metric("tts_failures_total", labels={"reason": f"client_error_{resp.status_code}"})
             log_event(
@@ -731,7 +728,6 @@ def deepgram_tts_rest(text: str, timeout: int = 30) -> Tuple[bytes, float]:
             )
             raise ConfigurationError(f"Deepgram client error: {resp.status_code}")
         else:
-            # Server errors are transient
             inc_metric, obs_latency = get_metrics()
             inc_metric("tts_failures_total", labels={"reason": f"server_error_{resp.status_code}"})
             log_event(
@@ -745,7 +741,7 @@ def deepgram_tts_rest(text: str, timeout: int = 30) -> Tuple[bytes, float]:
             
     except Exception as e:
         inc_metric, obs_latency = get_metrics()
-        inc_metric("tts_failures_total", labels={"reason": f"exc_{type(e).__name__}"})  # Fixed: Added exception class name
+        inc_metric("tts_failures_total", labels={"reason": f"exc_{type(e).__name__}"})
         log_event(
             service="tasks", 
             event="deepgram_failed", 
@@ -858,7 +854,7 @@ def perform_tts_core(payload: Any, raise_on_error: bool = True) -> Dict[str, Any
                 "audio_url": upload_url, "total_ms": total_ms}
 
     except Exception as e:
-        inc_metric("tts_failures_total", labels={"reason": f"exc_{type(e).__name__}"})  # Fixed: Added exception class name
+        inc_metric("tts_failures_total", labels={"reason": f"exc_{type(e).__name__}"})
         log_event(
             service="tasks", 
             event="tts_error", 
@@ -943,7 +939,7 @@ def run_inference(self, payload):
         session_id=session_id
     )
 
-    inc_metric, obs_latency = get_metrics()  # Fixed: Initialize metrics before try block
+    inc_metric, obs_latency = get_metrics()
     try:
         t0 = time.time()
         reply_text = generate_reply(transcript, trace_id=trace_id)

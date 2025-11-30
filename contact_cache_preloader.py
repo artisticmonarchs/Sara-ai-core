@@ -16,13 +16,11 @@ import uuid
 try:
     from config import Config
     KNOWLEDGE_DIR = getattr(Config, "KNOWLEDGE_DIR", ".")
-    REDIS_URL = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
-    # TODO: Move hardcoded port number to config.py
+    REDIS_URL = getattr(Config, "REDIS_URL", os.getenv("REDIS_URL", "redis://localhost:6379/0"))
 except ImportError:
     # Minimal fallbacks
     KNOWLEDGE_DIR = "."
-    REDIS_URL = "redis://localhost:6379/0"
-    # TODO: Move hardcoded port number to config.py
+    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # Structured logging with lazy shim
 def _get_logger():
@@ -137,7 +135,6 @@ def preload_contact(contact: dict, knowledge_files: list = None, redis_prefix: s
             increment_metric("contact_cache.preloaded")
             
             latency_ms = (time.time() - start_time) * 1000
-            # TODO: Move hardcoded port number to config.py
             observe_latency("contact_cache.preload_latency", latency_ms)
             
             log_event("contact_cache_preloader", "cache_preloaded", "info",

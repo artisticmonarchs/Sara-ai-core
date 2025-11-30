@@ -6,6 +6,7 @@ Sara AI Core Celery task for outbound calls with full fault tolerance, idempoten
 import time
 import json
 import uuid
+import os
 
 # Phase 12: Use shared_task with proper resilience decorators
 from celery import shared_task
@@ -44,9 +45,13 @@ def _get_logger():
         from logging_utils import log_event, get_trace_id
         return log_event, get_trace_id
     except Exception:
-        def _noop_log(*a, **k): pass
+        import logging
+        logger = logging.getLogger(__name__)
+        def _fallback_log(event, level="info", message=None, **extra):
+            log_level = getattr(logging, level.upper(), logging.INFO)
+            logger.log(log_level, f"{event}: {message or event}", extra=extra)
         def _fallback_trace_id(): return str(uuid.uuid4())[:8]
-        return _noop_log, _fallback_trace_id
+        return _fallback_log, _fallback_trace_id
 
 log_event, get_trace_id = _get_logger()
 
@@ -59,6 +64,8 @@ def _get_metrics():
         def _noop_metric(*args, **kwargs): pass
         def _noop_latency(*args, **kwargs): pass
         return _noop_metric, _noop_latency
+
+increment_metric, observe_latency = _get_metrics()
 
 # Phase 12: Duplex streaming integration
 def _get_duplex_modules():
@@ -88,7 +95,6 @@ def _structured_log(event: str, level: str = "info", message: str = None, trace_
 def _record_metrics(event_type: str, status: str, latency_ms: float = None, trace_id: str = None):
     """Record metrics for outbound task operations"""
     try:
-        increment_metric, observe_latency = _get_metrics()
         increment_metric(f"outbound_tasks_{event_type}_{status}_total")
         if latency_ms is not None:
             observe_latency(f"outbound_tasks_{event_type}_latency_seconds", latency_ms / 1000.0)
@@ -172,7 +178,6 @@ def outbound_call_task(self, payload):
     
     trace_id = get_trace_id()
     start_time = time.time()
-    increment_metric, observe_latency = _get_metrics()
     
     contact = payload.get("contact", {})
     campaign = payload.get("campaign", "default")

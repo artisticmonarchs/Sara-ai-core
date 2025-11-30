@@ -146,7 +146,6 @@ except ImportError:
         "service_ttl_seconds": 300,  # 5 minutes default TTL
         "counter_reset_threshold": 0.8,  # 80% decrease triggers reset detection
         "max_metrics_per_service": 1000
-        # TODO: Move hardcoded port number to config.py
     }
     SERVICE_NAME = "unknown_service"
 
@@ -154,7 +153,6 @@ SNAPSHOT_INTERVAL = METRICS_CONFIG.get("snapshot_interval", 30)
 SERVICE_TTL_SECONDS = METRICS_CONFIG.get("service_ttl_seconds", 300)
 COUNTER_RESET_THRESHOLD = METRICS_CONFIG.get("counter_reset_threshold", 0.8)
 MAX_METRICS_PER_SERVICE = METRICS_CONFIG.get("max_metrics_per_service", 1000)
-# TODO: Move hardcoded port number to config.py
 
 # ------------------------------------------------------------------
 # Phase 11-F: Enhanced Global Snapshot with Service TTL Support
@@ -674,17 +672,52 @@ try:
         restore_snapshot_to_collector,
     )
 except Exception:
-    def save_metrics_snapshot(x): raise RuntimeError("metrics_registry unavailable")
-    def load_metrics_snapshot(): return {}
-    def push_snapshot_from_collector(f): raise RuntimeError("metrics_registry unavailable")
-    def restore_snapshot_to_collector(m): raise RuntimeError("metrics_registry unavailable")
+    def save_metrics_snapshot(x): 
+        log_event(
+            service="global_metrics_store",
+            event="save_metrics_snapshot_unavailable",
+            status="error",
+            message="metrics_registry.save_metrics_snapshot unavailable"
+        )
+        return False
+    def load_metrics_snapshot(): 
+        log_event(
+            service="global_metrics_store",
+            event="load_metrics_snapshot_unavailable", 
+            status="warn",
+            message="metrics_registry.load_metrics_snapshot unavailable"
+        )
+        return {}
+    def push_snapshot_from_collector(f): 
+        log_event(
+            service="global_metrics_store",
+            event="push_snapshot_unavailable",
+            status="warn",
+            message="metrics_registry.push_snapshot_from_collector unavailable"
+        )
+        return False
+    def restore_snapshot_to_collector(m): 
+        log_event(
+            service="global_metrics_store",
+            event="restore_snapshot_unavailable",
+            status="warn",
+            message="metrics_registry.restore_snapshot_to_collector unavailable"
+        )
+        return False
 
 try:
     import metrics_collector as metrics_collector
     from metrics_collector import get_snapshot
 except Exception:
     metrics_collector = None
-    def get_snapshot(): return {}
+    def get_snapshot(): 
+        log_event(
+            service="global_metrics_store",
+            event="get_snapshot_unavailable",
+            status="warn",
+            message="metrics_collector.get_snapshot unavailable"
+        )
+        return {}
 
 # ------------------------------------------------------------------
 # Phase 11-F: Enhanced Sync Operations

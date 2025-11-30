@@ -191,7 +191,6 @@ def enqueue_contact(contact: Dict[str,str], campaign: str = "default", dry_run: 
         increment_metric("contacts.enqueued")
         
         latency_ms = (time.time() - start_time) * 1000
-        # TODO: Move hardcoded port number to config.py
         observe_latency("contacts.enqueue_latency", latency_ms)
         log_event("contacts_loader", "contact_enqueued", "info",
                   f"Enqueued contact {contact.get('phone')} -> task={task_id}",
@@ -266,7 +265,6 @@ def main():
 
         # Process completion metrics
         main_duration = (time.time() - main_start_time) * 1000
-        # TODO: Move hardcoded port number to config.py
         observe_latency("contacts_loader.total_duration", main_duration)
         increment_metric("contacts_loader.completed")
         

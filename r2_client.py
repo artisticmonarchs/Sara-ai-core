@@ -53,9 +53,12 @@ try:
 except ImportError:
     # Fallback for metrics unavailable
     class FallbackMetrics:
-        def inc_metric(self, name, increment=1): pass
-        def increment_metric(self, name, increment=1): pass
-        def observe_latency(self, name, value): pass
+        def inc_metric(self, name, increment=1): 
+            pass
+        def increment_metric(self, name, increment=1): 
+            pass
+        def observe_latency(self, name, value): 
+            pass
     metrics = FallbackMetrics()
 
 # --------------------------------------------------------------------------

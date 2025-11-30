@@ -470,6 +470,7 @@ except Exception:
 # --------------------------------------------------------------------------
 SERVICE_NAME = __service__
 
+# FIX: Use Config attributes directly instead of duplicating them
 CALL_STATE_TTL = Config.CALL_STATE_TTL
 PARTIAL_THROTTLE_SECONDS = Config.PARTIAL_THROTTLE_SECONDS
 PARTIAL_THROTTLE_PREFIX = "partial_throttle:"

@@ -587,10 +587,10 @@ def _emit_log_event(
                 "status": "error",
                 "message": f"[LOG_FALLBACK] service={service} event={event} status={status} message={message} error={e}",
             }
-            print(json.dumps(fallback_payload, ensure_ascii=False, separators=(',', ':')))
+            logger.info(json.dumps(fallback_payload, ensure_ascii=False, separators=(',', ':')))
         except Exception:
             # Ultimate fallback - don't break the application
-            print(f"[LOG_ULTIMATE_FALLBACK] service={service} event={event} status={status} message={message} error={e}")
+            logger.info(f"[LOG_ULTIMATE_FALLBACK] service={service} event={event} status={status} message={message} error={e}")
         return False
 
 # --------------------------------------------------------------------------

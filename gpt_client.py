@@ -830,8 +830,12 @@ async def test_streaming():
         message="Streaming response:"
     )
     async for token in generate_reply_streaming(prompt):
-        print(token, end="", flush=True)
-    print("\n")
+        log_event(
+            service="gpt_client",
+            event="local_test_token",
+            status="debug",
+            message=token
+        )
 
 if __name__ == "__main__":
     # Test both synchronous and streaming
@@ -844,14 +848,31 @@ if __name__ == "__main__":
     
     # Test synchronous (for backward compatibility)
     sample = asyncio.run(generate_reply("Hello Sara, what is your role?"))
-    print("→ Synchronous:", sample)
+    log_event(
+        service="gpt_client",
+        event="local_test_result",
+        status="info",
+        message=f"Synchronous: {sample}"
+    )
     
     # Test streaming
     asyncio.run(test_streaming())
     
     # Test model info
-    print("Model Info:", get_model_info())
+    model_info = get_model_info()
+    log_event(
+        service="gpt_client",
+        event="local_test_model_info",
+        status="info",
+        message=f"Model Info: {model_info}"
+    )
     
     # Test connection validation
-    print("Connection validation:", asyncio.run(validate_gpt_connection()))
-    print("Streaming validation:", asyncio.run(validate_gpt_streaming()))
+    conn_valid = asyncio.run(validate_gpt_connection())
+    stream_valid = asyncio.run(validate_gpt_streaming())
+    log_event(
+        service="gpt_client",
+        event="local_test_validation",
+        status="info",
+        message=f"Connection validation: {conn_valid}, Streaming validation: {stream_valid}"
+    )

@@ -171,9 +171,18 @@ class Config:
     MAX_CONCURRENT_CALLS: int = _to_int(os.getenv("MAX_CONCURRENT_CALLS"), 10)
     RATE_LIMIT_CALLS_PER_MINUTE: int = _to_int(os.getenv("RATE_LIMIT_CALLS_PER_MINUTE"), 60)
     RETRY_ATTEMPTS: int = _to_int(os.getenv("RETRY_ATTEMPTS"), 2)
-    RETRY_DELAY_SECONDS: int = _to_int(os.getenv("RETRY_BACKOFF_SECONDS"), 1)  # Maps RETRY_BACKOFF_SECONDS to RETRY_DELAY_SECONDS
+    RETRY_DELAY_SECONDS: int = _to_int(os.getenv("RETRY_DELAY_SECONDS", os.getenv("RETRY_BACKOFF_SECONDS", "1")), 1)  # FIX: Fixed env var name
     TIMEZONE_CHECK_ENABLED: bool = _to_bool(os.getenv("TIMEZONE_CHECK_ENABLED", "true"), True)
     DNC_CHECK_ENABLED: bool = _to_bool(os.getenv("DNC_CHECK_ENABLED", "true"), True)
+
+    # NEW: Voice pipeline specific settings - ADDED MISSING ATTRIBUTES
+    SARA_ENV: str = os.getenv("SARA_ENV", "prod")
+    PARTIAL_THROTTLE_SECONDS: float = _to_float(os.getenv("PARTIAL_THROTTLE_SECONDS"), 0.6)
+    INFERENCE_TASK_NAME: str = os.getenv("INFERENCE_TASK_NAME", "gpt_inference")
+    EVENT_TASK_NAME: str = os.getenv("EVENT_TASK_NAME", "voice_event")
+    CELERY_VOICE_QUEUE: str = os.getenv("CELERY_VOICE_QUEUE", "voice")
+    CELERY_MAX_RETRIES: int = _to_int(os.getenv("CELERY_MAX_RETRIES"), 3)
+    VOICE_PIPELINE_PORT: int = _to_int(os.getenv("VOICE_PIPELINE_PORT"), 8080)
 
     # Snapshot for debug (no secrets in clear)
     @classmethod
@@ -245,6 +254,14 @@ class Config:
             "RETRY_DELAY_SECONDS": cls.RETRY_DELAY_SECONDS,
             "TIMEZONE_CHECK_ENABLED": cls.TIMEZONE_CHECK_ENABLED,
             "DNC_CHECK_ENABLED": cls.DNC_CHECK_ENABLED,
+            # NEW: Voice pipeline configs - ADDED MISSING ATTRIBUTES
+            "SARA_ENV": cls.SARA_ENV,
+            "PARTIAL_THROTTLE_SECONDS": cls.PARTIAL_THROTTLE_SECONDS,
+            "INFERENCE_TASK_NAME": cls.INFERENCE_TASK_NAME,
+            "EVENT_TASK_NAME": cls.EVENT_TASK_NAME,
+            "CELERY_VOICE_QUEUE": cls.CELERY_VOICE_QUEUE,
+            "CELERY_MAX_RETRIES": cls.CELERY_MAX_RETRIES,
+            "VOICE_PIPELINE_PORT": cls.VOICE_PIPELINE_PORT,
         }
 
 
@@ -310,6 +327,15 @@ RETRY_DELAY_SECONDS = Config.RETRY_DELAY_SECONDS
 TIMEZONE_CHECK_ENABLED = Config.TIMEZONE_CHECK_ENABLED
 DNC_CHECK_ENABLED = Config.DNC_CHECK_ENABLED
 
+# NEW: Voice pipeline upper-case aliases - ADDED MISSING ATTRIBUTES
+SARA_ENV = Config.SARA_ENV
+PARTIAL_THROTTLE_SECONDS = Config.PARTIAL_THROTTLE_SECONDS
+INFERENCE_TASK_NAME = Config.INFERENCE_TASK_NAME
+EVENT_TASK_NAME = Config.EVENT_TASK_NAME
+CELERY_VOICE_QUEUE = Config.CELERY_VOICE_QUEUE
+CELERY_MAX_RETRIES = Config.CELERY_MAX_RETRIES
+VOICE_PIPELINE_PORT = Config.VOICE_PIPELINE_PORT
+
 # Lower-case aliases for legacy call-sites (defensive; you had errors like `phase_version`, `log_level`, etc.)
 service_name = SERVICE_NAME
 env_mode = ENV_MODE
@@ -363,6 +389,15 @@ retry_attempts = RETRY_ATTEMPTS
 retry_delay_seconds = RETRY_DELAY_SECONDS
 timezone_check_enabled = TIMEZONE_CHECK_ENABLED
 dnc_check_enabled = DNC_CHECK_ENABLED
+
+# NEW: Voice pipeline lower-case aliases - ADDED MISSING ATTRIBUTES
+sara_env = SARA_ENV
+partial_throttle_seconds = PARTIAL_THROTTLE_SECONDS
+inference_task_name = INFERENCE_TASK_NAME
+event_task_name = EVENT_TASK_NAME
+celery_voice_queue = CELERY_VOICE_QUEUE
+celery_max_retries = CELERY_MAX_RETRIES
+voice_pipeline_port = VOICE_PIPELINE_PORT
 
 # Optional: print a tiny config snapshot if requested (no secrets)
 if _to_bool(os.getenv("CONFIG_DEBUG_SNAPSHOT"), False):

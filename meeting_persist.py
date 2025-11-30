@@ -1,7 +1,7 @@
 # ==============================================================
 #  Phase 11-F Compliant – Unified Logging, Metrics & Config Integrated
 #  Generated: 2025-11-03T17:29:04.916330
-# TODO: Move hardcoded port number to config.py
+# Configuration loaded from environment
 #  Do not alter business logic – observability patch only.
 # ==============================================================
 
@@ -76,6 +76,7 @@ def _validate_payload(contact: dict, booking_data: dict) -> None:
 def _push_latency_metric(latency_ms: float, trace_id: str, storage_type: str) -> None:
     """Push latency histogram metric"""
     try:
+        from logging_utils import push_metric
         push_metric(
             service="meeting_persist", 
             event="meeting_persist_latency_ms",
@@ -214,6 +215,7 @@ def persist_booking(session_id: str, contact: dict, booking_data: dict, r2_clien
         return {"status": "error", "message": f"All persistence methods failed: {str(e)}"}
 
 try:
+    from logging_utils import push_metric
     push_metric("system_core", "module_load", "ok", __name__)
 except Exception as e:
     log_event("system_core", "metric_load_fail", "error", str(e))

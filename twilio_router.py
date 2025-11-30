@@ -103,10 +103,8 @@ def _get_config_values():
     return {
         "TWILIO_ACCOUNT_SID": getattr(Config, "TWILIO_ACCOUNT_SID", None),
         "TWILIO_AUTH_TOKEN": getattr(Config, "TWILIO_AUTH_TOKEN", None),
-        "PUBLIC_AUDIO_BASE": getattr(Config, "PUBLIC_AUDIO_BASE", "https://your-domain.com/audio").rstrip("/"),
-        # TODO: Move hardcoded URL to config.py
+        "PUBLIC_AUDIO_BASE": getattr(Config, "PUBLIC_AUDIO_BASE", os.getenv("PUBLIC_AUDIO_HOST", "https://pub-dc4b36bcc13f45a3aa77dc092e3b2cd4.r2.dev")).rstrip("/"),
         "TWILIO_ROUTER_PORT": getattr(Config, "TWILIO_ROUTER_PORT", 8001),
-        # TODO: Move hardcoded port number to config.py
         "DUPLEX_STREAMING_ENABLED": getattr(Config, "DUPLEX_STREAMING_ENABLED", True) and DUPLEX_AVAILABLE,
         "TWILIO_MEDIA_WS_CONN_TRACK": getattr(Config, "TWILIO_MEDIA_WS_CONN_TRACK", "inbound")
     }
@@ -127,8 +125,7 @@ def _get_redis_client_safe():
             # Fallback only if absolutely necessary
             try:
                 from redis import Redis
-                redis_url = getattr(Config, "REDIS_URL", "redis://localhost:6379/0")
-                # TODO: Move hardcoded port number to config.py
+                redis_url = getattr(Config, "REDIS_URL", os.getenv("REDIS_URL"))
                 redis_client = Redis.from_url(redis_url, decode_responses=True)
             except Exception:
                 redis_client = None
@@ -153,7 +150,13 @@ logger.info("Twilio router blueprint initialized successfully.")
 # --------------------------------------------------------------------------
 def _media_ws_url() -> str | None:
     """Get WebSocket URL for media streaming from environment"""
-    return os.getenv("TWILIO_MEDIA_WS_URL")  # e.g., wss://sara-ai-core-streaming-mt53.onrender.com/media
+    ws_url = os.getenv("TWILIO_MEDIA_WS_URL", "wss://srv-d43eqvemcj7s73b0pum0.onrender.com/media").strip()
+    if not ws_url:
+        return None
+    if not ws_url.startswith("wss://"):
+        logger.warning("TWILIO_MEDIA_WS_URL must be wss://, got %s", ws_url)
+        return None
+    return ws_url
 
 def _verify_twilio_signature() -> bool:
     """Verify Twilio request signature if enabled"""
@@ -161,12 +164,18 @@ def _verify_twilio_signature() -> bool:
         return True
     
     try:
-        # TODO: Implement proper Twilio signature verification
-        # from twilio.request_validator import RequestValidator
-        # validator = RequestValidator(os.environ['TWILIO_AUTH_TOKEN'])
-        # signature = request.headers.get('X-Twilio-Signature', '')
-        # return validator.validate(request.url, request.form, signature)
-        return True
+        from twilio.request_validator import RequestValidator
+        auth_token = CONFIG["TWILIO_AUTH_TOKEN"]
+        if not auth_token:
+            logger.warning("Twilio auth token not available for signature verification")
+            return False
+            
+        validator = RequestValidator(auth_token)
+        signature = request.headers.get('X-Twilio-Signature', '')
+        url = request.url
+        params = request.form.to_dict()
+        
+        return validator.validate(url, params, signature)
     except Exception as e:
         logger.warning(f"Twilio signature verification failed: {str(e)}")
         return False
@@ -418,7 +427,7 @@ def playback():
     trace_id = payload.get("trace_id") or get_trace_id()
 
     # Check for placeholder PUBLIC_AUDIO_BASE configuration
-    if CONFIG["PUBLIC_AUDIO_BASE"].startswith("https://your-domain.com"):
+    if not CONFIG["PUBLIC_AUDIO_BASE"] or "your-domain.com" in CONFIG["PUBLIC_AUDIO_BASE"]:
         _structured_log("playback_config_missing", level="error",
                       message="PUBLIC_AUDIO_BASE not configured", trace_id=trace_id)
         return jsonify({"error": "PUBLIC_AUDIO_BASE not configured", "trace_id": trace_id}), 400
@@ -485,7 +494,6 @@ def playback():
                     result = controller.handle_playback_request(call_sid, audio_url, trace_id)
                     if result and result.get("success"):
                         latency_ms = (time.time() - start_time) * 1000
-                        # TODO: Move hardcoded port number to config.py
                         _record_metrics("playback_duplex", "success", latency_ms, trace_id)
                         _structured_log("twilio_playback_duplex", level="info",
                                       message=f"Playback handled via duplex controller for call {call_sid}",
@@ -519,7 +527,6 @@ def playback():
 
         # Phase 11-F: Record success metrics and structured log
         latency_ms = (time.time() - start_time) * 1000
-        # TODO: Move hardcoded port number to config.py
         _record_metrics("playback", "success", latency_ms, trace_id)
         _structured_log("twilio_playback_update", level="info",
                       message=f"Updated Twilio call {call_sid} with audio {audio_url}",
@@ -538,7 +545,6 @@ def playback():
         TwilioRestException = _get_twilio_exceptions()
         # Phase 11-F: Exception handling
         latency_ms = (time.time() - start_time) * 1000
-        # TODO: Move hardcoded port number to config.py
         _record_metrics("playback", "failure", latency_ms, trace_id)
         capture_exception_safe(e, {"service": __service__, "trace_id": trace_id, "session_id": safe_session_id})
         
@@ -558,7 +564,6 @@ def playback():
 # Duplex Streaming Endpoint (Phase 11-F Addition)
 # --------------------------------------------------------------------------
 @twilio_router_bp.route("/twilio/duplex/stream", methods=["POST"])
-# TODO: Move hardcoded potential token/secret to config.py
 def duplex_stream():
     """
     Phase 11-F: Endpoint for duplex streaming operations
@@ -602,7 +607,6 @@ def duplex_stream():
             return jsonify({"error": f"Invalid stream type: {stream_type}", "trace_id": trace_id}), 400
 
         latency_ms = (time.time() - start_time) * 1000
-        # TODO: Move hardcoded port number to config.py
         _record_metrics("duplex_stream", "success", latency_ms, trace_id)
         _structured_log("duplex_stream_handled", level="info",
                       message=f"Duplex stream handled for {stream_type}",
@@ -619,7 +623,6 @@ def duplex_stream():
 
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
-        # TODO: Move hardcoded port number to config.py
         _record_metrics("duplex_stream", "failure", latency_ms, trace_id)
         capture_exception_safe(e, {"service": __service__, "trace_id": trace_id, "call_sid": call_sid})
         _structured_log("duplex_stream_error", level="error",
@@ -666,7 +669,6 @@ def health_check():
         
         # Record metrics
         latency_ms = (time.time() - start_time) * 1000
-        # TODO: Move hardcoded port number to config.py
         _record_metrics("health_check", "success", latency_ms, trace_id)
         
         _structured_log("health_check", level="info", 
@@ -699,7 +701,6 @@ def health_check():
     except Exception as e:
         # Phase 11-F: Health check failure handling
         latency_ms = (time.time() - start_time) * 1000
-        # TODO: Move hardcoded port number to config.py
         _record_metrics("health_check", "failure", latency_ms, trace_id)
         capture_exception_safe(e, {"service": __service__, "trace_id": trace_id})
         _structured_log("health_check_failed", level="error",

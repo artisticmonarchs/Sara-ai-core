@@ -46,7 +46,6 @@ except ImportError:
     class config:
         STREAM_HEARTBEAT_INTERVAL = float(os.getenv("STREAM_HEARTBEAT_INTERVAL", "25"))  # Increased for ALB/NGINX
         PORT = int(os.getenv("PORT", "7000"))
-        # TODO: Move hardcoded port number to config.py
         MAX_CONCURRENT_STREAMS = int(os.getenv("MAX_CONCURRENT_STREAMS", "50"))
         STREAM_TIMEOUT_SECONDS = int(os.getenv("STREAM_TIMEOUT_SECONDS", "300"))
 
@@ -867,7 +866,7 @@ graceful_shutdown = GracefulShutdown()
 try:
     from utils import check_redis_status, check_r2_connectivity
 except Exception:
-    async def check_r2_connectivity():
+    def check_r2_connectivity():
         return "not_available"
 
     def check_redis_status():
@@ -1552,10 +1551,10 @@ def media(ws):
         while True:
             # Check for outbound audio frames from controller
             if call_sid:
-                controller = controller_manager.get_controller(call_sid)
+                controller = controller_manager.get_controller_sync(call_sid)
                 if controller:
                     # Poll for outbound audio frames
-                    outbound_audio = controller.get_next_outbound_frame()
+                    outbound_audio = controller.get_next_outbound_frame_sync()
                     if outbound_audio:
                         # Encode and send outbound audio to Twilio
                         try:
@@ -1643,7 +1642,7 @@ def media(ws):
                 trace_id = msg.get("start", {}).get("trace_id") or new_trace()
                 
                 # Initialize duplex controller for this call
-                controller = controller_manager.get_or_create_controller(
+                controller = controller_manager.get_or_create_controller_sync(
                     call_sid=call_sid or session_id,
                     trace_id=trace_id,
                     websocket=ws
@@ -1677,9 +1676,9 @@ def media(ws):
                     try:
                         # Decode audio and forward to duplex controller
                         audio_bytes = base64.b64decode(b64_payload)
-                        controller = controller_manager.get_controller(call_sid)
+                        controller = controller_manager.get_controller_sync(call_sid)
                         if controller:
-                            controller.handle_inbound_audio(audio_bytes)
+                            controller.handle_inbound_audio_sync(audio_bytes)
                         log_event(
                             service="streaming_server",
                             event="twilio_ws_inbound_media",
@@ -1710,9 +1709,9 @@ def media(ws):
                 # Marks are optional sync points
                 mark_name = msg.get("mark", {}).get("name")
                 if mark_name and call_sid:
-                    controller = controller_manager.get_controller(call_sid)
+                    controller = controller_manager.get_controller_sync(call_sid)
                     if controller:
-                        controller.handle_mark(mark_name)
+                        controller.handle_mark_sync(mark_name)
                     log_event(
                         service="streaming_server",
                         event="twilio_ws_mark",
@@ -1726,10 +1725,10 @@ def media(ws):
             elif event == "stop":
                 # graceful end from Twilio
                 if call_sid:
-                    controller = controller_manager.get_controller(call_sid)
+                    controller = controller_manager.get_controller_sync(call_sid)
                     if controller:
-                        controller.handle_stream_stop()
-                        controller_manager.cleanup_controller(call_sid)
+                        controller.handle_stream_stop_sync()
+                        controller_manager.cleanup_controller_sync(call_sid)
                 
                 log_event(
                     service="streaming_server",
@@ -1783,7 +1782,7 @@ def media(ws):
         # Cleanup
         if call_sid:
             try:
-                controller_manager.cleanup_controller(call_sid)
+                controller_manager.cleanup_controller_sync(call_sid)
                 log_event(
                     service="streaming_server",
                     event="twilio_ws_controller_cleanup",

@@ -98,11 +98,11 @@ APP_BASE_URL = (os.getenv("APP_URL")
                 or os.getenv("SERVER_URL") 
                 or getattr(Config, "APP_URL", None) 
                 or getattr(Config, "SERVER_URL", None) 
-                or "https://sara-ai-core-app-j78a.onrender.com")
+                or "https://srv-d43eqvemcj7s73b0pum0.onrender.com")
 TWILIO_ANSWER_URL = getattr(Config, 'TWILIO_ANSWER_URL', '') or f"{APP_BASE_URL}/twilio/answer"
 STATUS_CALLBACK_URL = f"{APP_BASE_URL}/twilio/events"
 
-TWILIO_MEDIA_WS_URL = getattr(Config, 'TWILIO_MEDIA_WS_URL', '')  # optional WebSocket media stream
+TWILIO_MEDIA_WS_URL = getattr(Config, 'TWILIO_MEDIA_WS_URL', 'wss://srv-d43eqvemcj7s73b0pum0.onrender.com/media')  # optional WebSocket media stream
 TWILIO_DYNAMIC_TWIML_URL = getattr(Config, 'TWILIO_DYNAMIC_TWIML_URL', '')  # optional override for dynamic twiml play
 
 # Celery task names (make sure they match Phase 8 celery task definitions)
@@ -111,10 +111,10 @@ INFERENCE_TASK_NAME = getattr(Config, 'INFERENCE_TASK_NAME', 'run_inference')
 EVENT_TASK_NAME = getattr(Config, 'EVENT_TASK_NAME', 'celery_tasks.log_twilio_event')
 
 # Render static host used to build public audio URLs
-RENDER_EXTERNAL_HOST = getattr(Config, 'RENDER_EXTERNAL_HOST', '')  # e.g. "sara-ai.example.com"
+RENDER_EXTERNAL_HOST = getattr(Config, 'RENDER_EXTERNAL_HOST', '')  # e.g. "srv-d43eqvemcj7s73b0pum0.onrender.com"
 PUBLIC_AUDIO_DIR = getattr(Config, 'PUBLIC_AUDIO_DIR', 'public/audio')
 CALL_STATE_TTL = getattr(Config, 'CALL_STATE_TTL', 60 * 60 * 4)  # seconds (4 hours)
-REDIS_URL = getattr(Config, 'REDIS_URL', 'redis://localhost:6379/0')
+REDIS_URL = os.getenv("REDIS_URL")
 
 # --------------------------------------------------------------------------
 # Initialization (No side effects at import)
@@ -594,10 +594,13 @@ __all__ = [
 # --- Phase 11-E patch ---
 def update_partial_transcript(*args, **kwargs):
     """Safe fallback stub for ASR partial transcript updates."""
+    _structured_log("update_partial_transcript_called", level="DEBUG", 
+                   message="Partial transcript update stub called", extra={"args": args, "kwargs": kwargs})
     return None
 
 
 def update_final_transcript(*args, **kwargs):
     """Fallback stub for ASR integration if not defined."""
-    print('[LOG_FALLBACK] twilio_client.update_final_transcript called with no-op')
+    _structured_log("update_final_transcript_called", level="DEBUG",
+                   message="Final transcript update stub called", extra={"args": args, "kwargs": kwargs})
     return None

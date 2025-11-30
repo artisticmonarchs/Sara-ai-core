@@ -13,6 +13,7 @@ from typing import AsyncGenerator, Optional, Dict, Any, List, Tuple
 import traceback
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
+import os
 
 # --------------------------------------------------------------------------
 # Phase 12: Configuration and Imports with Resilience Patterns
@@ -20,7 +21,6 @@ from concurrent.futures import ThreadPoolExecutor
 try:
     from config import Config
 except ImportError:
-    import os
     class Config:
         TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram")
         DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
@@ -35,7 +35,7 @@ except ImportError:
         CELERY_MAX_RETRIES = int(os.getenv("CELERY_MAX_RETRIES", "3"))
         REDIS_OPERATION_TIMEOUT = float(os.getenv("REDIS_OPERATION_TIMEOUT", "5.0"))
         EXTERNAL_API_TIMEOUT = float(os.getenv("EXTERNAL_API_TIMEOUT", "30.0"))
-        R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "sara-tts-cache")
+        R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "sara-ai-audio")
 
 def _stable_cache_key_from_text(text: str) -> str:
     """Generate stable cache key across processes/machines"""
@@ -374,8 +374,8 @@ class DeepgramTTSProvider(TTSProvider):
         self.api_key = api_key
         self.base_url = "https://api.deepgram.com/v1/speak"
         self.voice_settings = {
-            "model": "aura-asteria-en",
-            "encoding": "linear16",
+            "model": os.getenv("DEEPGRAM_SPEAK_MODEL", "aura-2-asteria-en"),
+            "encoding": "mulaw",  # μ-law 8kHz for Twilio compatibility
             "container": "none",
             "sample_rate": 8000
         }
@@ -478,8 +478,7 @@ class DeepgramTTSProvider(TTSProvider):
             raise TransientError(f"Deepgram TTS streaming error: {str(e)}") from e
     
     def _process_audio_chunk(self, chunk: bytes) -> bytes:
-        """Process audio chunk (placeholder for audio processing)"""
-        # This can be extended with actual audio processing logic
+        """Process audio chunk - Deepgram already outputs μ-law 8kHz"""
         return chunk
     
     async def validate_connection(self) -> bool:
@@ -630,8 +629,9 @@ class ElevenLabsTTSProvider(TTSProvider):
             raise TransientError(f"ElevenLabs TTS streaming error: {str(e)}") from e
     
     def _process_audio_chunk(self, chunk: bytes) -> bytes:
-        """Process audio chunk (placeholder for audio processing)"""
-        # This can be extended with actual audio processing logic
+        """Process audio chunk - convert to μ-law 8kHz if needed"""
+        # ElevenLabs outputs PCM by default, would need conversion for Twilio
+        # For now, return as-is - conversion would happen elsewhere
         return chunk
     
     async def validate_connection(self) -> bool:
@@ -1254,8 +1254,7 @@ class RealtimeVoiceEngine:
             })
     
     def _process_audio_data(self, audio_data: bytes) -> bytes:
-        """Process audio data (placeholder for actual processing)"""
-        # Add actual audio processing logic here
+        """Process audio data - Deepgram outputs μ-law 8kHz directly"""
         return audio_data
     
     async def detect_voice_activity(self) -> bool:

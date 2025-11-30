@@ -26,7 +26,7 @@ except ImportError:
         TTS_CACHE_CLEANUP_THRESHOLD = float(os.getenv("TTS_CACHE_CLEANUP_THRESHOLD", "0.8"))
         TTS_CACHE_RETRY_ATTEMPTS = int(os.getenv("TTS_CACHE_RETRY_ATTEMPTS", "2"))
         CELERY_MAX_RETRIES = int(os.getenv("CELERY_MAX_RETRIES", "3"))
-        R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "")
+        R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "sara-ai-audio")
 
 # Phase 12: Transient error detection
 class TransientError(Exception):
@@ -38,17 +38,52 @@ try:
     from redis_client import get_redis_client, safe_redis_operation
 except ImportError:
     def get_redis_client():
-        return None
+        import redis
+        redis_url = os.getenv("REDIS_URL", "redis://red-d43ertemcj7s73b0qrcg:6379")
+        return redis.from_url(redis_url)
+    
     def safe_redis_operation(operation, operation_name="unknown", trace_id=None, fallback=None):
-        return fallback
+        try:
+            return operation()
+        except Exception as e:
+            logger.error("Redis operation failed", extra={
+                "operation_name": operation_name,
+                "trace_id": trace_id,
+                "error": str(e),
+                "service": "tts_cache_manager"
+            })
+            return fallback
 
 try:
     from r2_client import get_r2_client, upload_to_r2
 except ImportError:
     def get_r2_client():
-        return None
-    def upload_to_r2(*args, **kwargs):
-        raise Exception("R2 client not available")
+        import boto3
+        return boto3.client('s3',
+            endpoint_url=os.getenv("R2_ENDPOINT_URL", "https://6970388a67efe7f4ca9feed97b7838b6.r2.cloudflarestorage.com"),
+            aws_access_key_id=os.getenv("R2_ACCESS_KEY_ID", ""),
+            aws_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY", ""),
+            region_name='auto'
+        )
+    
+    def upload_to_r2(client, bucket, key, data, content_type='audio/mpeg', trace_id=None):
+        try:
+            client.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=data,
+                ContentType=content_type
+            )
+            return True, {"key": key, "size": len(data)}
+        except Exception as e:
+            logger.error("R2 upload failed", extra={
+                "bucket": bucket,
+                "key": key,
+                "trace_id": trace_id,
+                "error": str(e),
+                "service": "tts_cache_manager"
+            })
+            return False, None
 
 # Phase 12: Metrics integration
 try:
@@ -531,7 +566,7 @@ class TTSCacheManager:
                 from config import Config
                 bucket = Config.R2_BUCKET_NAME
             except Exception:
-                bucket = os.getenv("R2_BUCKET_NAME")
+                bucket = os.getenv("R2_BUCKET_NAME", "sara-ai-audio")
 
             if not bucket:
                 logger.error("R2_BUCKET_NAME not configured", extra={

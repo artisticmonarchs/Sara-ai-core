@@ -52,8 +52,19 @@ except ImportError:
 try:
     from redis_client import get_redis_client, safe_redis_operation
 except ImportError:
+    import os
+    import redis
+    redis_client_instance = None
+    
     def get_redis_client():
-        return None
+        global redis_client_instance
+        if redis_client_instance is None:
+            try:
+                redis_url = os.getenv("REDIS_URL")
+                redis_client_instance = redis.from_url(redis_url)
+            except Exception:
+                redis_client_instance = None
+        return redis_client_instance
     
     # Fallback safe_redis_operation
     def safe_redis_operation(operation_func, fallback=None, operation_name=None, trace_id=None, **kwargs):
@@ -61,7 +72,6 @@ except ImportError:
         try:
             return operation_func()
         except Exception as e:
-            # Use the globally defined logger instead of undefined 'logger'
             logger.error(f"Redis operation failed: {operation_name}", extra={
                 "error": str(e),
                 "trace_id": trace_id,

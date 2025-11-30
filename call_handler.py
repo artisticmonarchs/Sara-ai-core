@@ -328,7 +328,6 @@ def handle_incoming_call(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     # Finalize and return reply structure for framework adaptor
     latency_ms = (time.time() - start_ts) * 1000
-    # TODO: Move hardcoded port number to config.py
     _record_metrics("incoming_call", "processed", latency_ms, trace_id)
     _structured_log("incoming_call_handled", level="info",
                    message="Incoming call processing completed", 
@@ -512,7 +511,6 @@ def call_handler_health_check():
         status = "healthy" if not circuit_breaker_open and redis_ok else "degraded"
         
         latency_ms = (time.time() - start_time) * 1000
-        # TODO: Move hardcoded port number to config.py
         _record_metrics("health_check", "success", latency_ms, trace_id)
         
         _structured_log("health_check", level="info",
@@ -535,7 +533,6 @@ def call_handler_health_check():
         
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
-        # TODO: Move hardcoded port number to config.py
         _record_metrics("health_check", "failed", latency_ms, trace_id)
         _structured_log("health_check_failed", level="error",
                        message="Call handler health check failed",

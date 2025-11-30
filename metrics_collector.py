@@ -232,7 +232,7 @@ def _rate_limited_redis_log(event: str, level: str = "warn", **kwargs):
         except Exception:
             # fallback print to avoid silent failures
             try:
-                print(f"[metrics][{event}] {kwargs}")
+                _get_logger()(service="metrics_collector", event=event, status=level, message=str(kwargs))
             except Exception:
                 pass
 
@@ -1246,13 +1246,13 @@ def increment(metric_name: str, value: int = 1):
             try:
                 return increment_metric(metric_name=metric_name, value=value)
             except Exception:
-                print(f"[WARN] increment() failed for {metric_name}: {e}")
+                _get_logger()(service="metrics_collector", event="increment_failed", status="warn", message=f"increment() failed for {metric_name}: {e}")
                 return None
         else:
-            print(f"[WARN] increment() failed for {metric_name}: {e}")
+            _get_logger()(service="metrics_collector", event="increment_failed", status="warn", message=f"increment() failed for {metric_name}: {e}")
             return None
     except Exception as e:
-        print(f"[WARN] increment() failed for {metric_name}: {e}")
+        _get_logger()(service="metrics_collector", event="increment_failed", status="warn", message=f"increment() failed for {metric_name}: {e}")
         return None
 
 def observe(metric_name: str, value: float):
@@ -1266,13 +1266,13 @@ def observe(metric_name: str, value: float):
             try:
                 return observe_latency(name=metric_name, value_ms=value)
             except Exception:
-                print(f"[WARN] observe() failed for {metric_name}: {e}")
+                _get_logger()(service="metrics_collector", event="observe_failed", status="warn", message=f"observe() failed for {metric_name}: {e}")
                 return None
         else:
-            print(f"[WARN] observe() failed for {metric_name}: {e}")
+            _get_logger()(service="metrics_collector", event="observe_failed", status="warn", message=f"observe() failed for {metric_name}: {e}")
             return None
     except Exception as e:
-        print(f"[WARN] observe() failed for {metric_name}: {e}")
+        _get_logger()(service="metrics_collector", event="observe_failed", status="warn", message=f"observe() failed for {metric_name}: {e}")
         return None
 
 def set_value(metric_name: str, value: float):
@@ -1286,13 +1286,13 @@ def set_value(metric_name: str, value: float):
             try:
                 return set_metric(name=metric_name, value=float(value))
             except Exception:
-                print(f"[WARN] set_value() failed for {metric_name}: {e}")
+                _get_logger()(service="metrics_collector", event="set_value_failed", status="warn", message=f"set_value() failed for {metric_name}: {e}")
                 return None
         else:
-            print(f"[WARN] set_value() failed for {metric_name}: {e}")
+            _get_logger()(service="metrics_collector", event="set_value_failed", status="warn", message=f"set_value() failed for {metric_name}: {e}")
             return None
     except Exception as e:
-        print(f"[WARN] set_value() failed for {metric_name}: {e}")
+        _get_logger()(service="metrics_collector", event="set_value_failed", status="warn", message=f"set_value() failed for {metric_name}: {e}")
         return None
 
 # Initialize on module import - moved to prevent circular imports

@@ -44,8 +44,8 @@ try:
 except ImportError:
     # Fallback configuration for backward compatibility
     class Config:
-        REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        SARA_ENV = os.getenv("SARA_ENV", "development")
+        REDIS_URL = os.getenv("REDIS_URL", "redis://red-d43ertemcj7s73b0qrcg:6379/0")
+        SARA_ENV = os.getenv("SARA_ENV", "production")
         PARTIAL_THROTTLE_SECONDS = float(os.getenv("PARTIAL_THROTTLE_SECONDS", "1.5"))
         ASR_ENGINE = os.getenv("ASR_ENGINE", "speech_recognition")
 

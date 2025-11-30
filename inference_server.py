@@ -12,6 +12,7 @@ from flask import Flask, request, jsonify
 from werkzeug.exceptions import HTTPException
 import signal
 import sys
+import os
 
 def _graceful_shutdown(signum, frame):
     """Phase 12: Graceful shutdown handler"""
@@ -69,7 +70,17 @@ def get_redis_client():
     """Lazy Redis client initialization."""
     global _redis_client
     if _redis_client is None:
-        _redis_client = get_client()
+        redis_url = os.getenv("REDIS_URL")
+        if not redis_url:
+            log_event(
+                service=SERVICE_NAME,
+                event="redis_url_missing",
+                status="error",
+                message="REDIS_URL environment variable not set"
+            )
+            _redis_client = None
+        else:
+            _redis_client = get_client()  # get_client already uses os.getenv("REDIS_URL")
     return _redis_client
 
 def initialize_inference_server():
@@ -304,7 +315,7 @@ def infer():
         "source": source,
         "session_id": incoming.get("session_id"),
         "input": content,
-        "model": incoming.get("model", "gpt-4"),
+        "model": incoming.get("model", os.getenv("OPENAI_MODEL", "gpt-5-mini")),
         "meta": incoming.get("meta", {}),
         "received_at": start_ts,
     }

@@ -17,6 +17,8 @@ from typing import Optional, Dict, Any, Callable, List
 import traceback
 import signal
 import sys
+import os
+import base64
 
 def _graceful_shutdown(signum, frame):
     """Phase 12: Graceful shutdown handler"""
@@ -33,7 +35,6 @@ signal.signal(signal.SIGTERM, _graceful_shutdown)
 try:
     from config import Config
 except ImportError:
-    import os
     class Config:
         MEDIA_STREAM_BUFFER_MS = int(os.getenv("MEDIA_STREAM_BUFFER_MS", "200"))
         MEDIA_STREAM_RECONNECT_ATTEMPTS = int(os.getenv("MEDIA_STREAM_RECONNECT_ATTEMPTS", "3"))
@@ -72,7 +73,7 @@ class MediaStreamEvents:
     MARK = "mark"
     CLEAR = "clear"
     ERROR = "error"
-    STOPPED = "stopped"
+    STOPPED = "stop"
 
 class AudioFormats:
     """Supported audio formats"""
@@ -168,7 +169,7 @@ class TwilioMediaStream:
         await self._send_connected_event()
         
         metrics.increment_metric("media_stream_started_total")
-        metrics.set_gauge("active_media_streams", 1)
+        metrics.set_gauge("active_media_streams", 1, operation="increment")
         
         logger.info("TwilioMediaStream started", extra={"call_sid": self.call_sid})
     
@@ -196,7 +197,7 @@ class TwilioMediaStream:
             except:
                 break
         
-        metrics.set_gauge("active_media_streams", -1)
+        metrics.set_gauge("active_media_streams", -1, operation="decrement")
         metrics.increment_metric("media_stream_stopped_total")
         
         logger.info("TwilioMediaStream stopped", extra={
@@ -372,7 +373,7 @@ class TwilioMediaStream:
                 await self._handle_clear_message(message_data)
             elif event_type == MediaStreamEvents.ERROR:
                 await self._handle_error_message(message_data)
-            elif event_type == MediaStreamEvents.STOPPED:
+            elif event_type == MediaStreamEvents.STOP:
                 await self._handle_stopped_message(message_data)
             else:
                 logger.debug("Unknown MediaStream event", extra={
@@ -410,8 +411,6 @@ class TwilioMediaStream:
             payload_b64 = media_data.get("payload")
             
             if payload_b64:
-                # Decode base64 audio data
-                import base64
                 audio_data = base64.b64decode(payload_b64)
                 
                 self.frames_received += 1
@@ -529,9 +528,9 @@ class TwilioMediaStream:
                         timeout=Config.WEBSOCKET_OPERATION_TIMEOUT
                     )
                     
-                    if message.type == 'websocket.receive':
-                        await self._handle_websocket_message(message.text)
-                    elif message.type == 'websocket.disconnect':
+                    if message.type in ("text", "binary"):
+                        await self._handle_websocket_message(message.data if hasattr(message, "data") else message.text)
+                    elif message.type == "disconnect":
                         logger.info("WebSocket disconnected", extra={"call_sid": self.call_sid})
                         await self._handle_disconnect()
                         break
@@ -613,18 +612,13 @@ class TwilioMediaStream:
         try:
             start_time = time.time()
             
-            # Convert audio to base64 for Twilio
-            import base64
             payload_b64 = base64.b64encode(audio_data).decode('utf-8')
             
             media_message = {
                 "event": MediaStreamEvents.MEDIA,
                 "streamSid": self.call_sid,
                 "media": {
-                    "payload": payload_b64,
-                    "track": "outbound",
-                    "chunk": self.frames_sent + 1,
-                    "timestamp": int(time.time() * 1000)
+                    "payload": payload_b64
                 }
             }
             
@@ -660,25 +654,22 @@ class TwilioMediaStream:
     
     def _create_silence_generator(self):
         """Generator that produces silence frames"""
-        # Generate mu-law silence (0x7F for mu-law, 0x00 for linear)
-        # Using mu-law as it's commonly used with Twilio
-        silence_byte = b'\x7F' * 160  # 20ms of mu-law silence at 8kHz
-        
+        # mu-law silence byte = 0xFF (inverted zero)
+        silence_byte = b'\xff' * 160  # 20ms at 8kHz
         while True:
             yield silence_byte
     
     def _generate_silence_frames(self, duration_ms: int) -> List[bytes]:
         """Generate multiple silence frames for specified duration"""
-        frames_needed = duration_ms // Config.MEDIA_STREAM_SILENCE_FRAME_MS
+        frames_needed = max(1, duration_ms // Config.MEDIA_STREAM_SILENCE_FRAME_MS)
         return [next(self.silence_generator) for _ in range(frames_needed)]
     
     def _should_send_silence(self) -> bool:
         """Determine if we should send silence frames"""
-        # Send silence if we have an active connection but no audio data
         return (self.is_connected and 
                 self.is_running and 
                 self.audio_queue.empty() and
-                time.time() - self._last_send_time > 0.05)  # 50ms gap
+                time.time() - self._last_send_time > 0.05)
     
     # --------------------------------------------------------------------------
     # Connection Management
@@ -689,8 +680,9 @@ class TwilioMediaStream:
         try:
             connected_message = {
                 "event": MediaStreamEvents.CONNECT,
+                "streamSid": self.call_sid,
                 "protocol": "Call",
-                "version": "1.0"
+                "version": "1.0.0"
             }
             
             await self._send_websocket_message(connected_message)
@@ -725,13 +717,11 @@ class TwilioMediaStream:
         })
         
         try:
-            # In production, this would re-establish the WebSocket connection
-            # For now, we'll simulate a brief delay and mark as reconnected
             reconnect_delay = Config.MEDIA_STREAM_RECONNECT_DELAY * (2 ** (self.reconnect_attempts - 1))
-            # CRITICAL FIX: Replace blocking time.sleep with async asyncio.sleep
             await asyncio.sleep(reconnect_delay)
             
-            # Simulate successful reconnection
+            # Note: actual reconnection must be performed by the server framework
+            # We only reset state here — the new WS will be passed via create_stream()
             self.is_connected = True
             self.reconnect_attempts = 0
             
@@ -747,7 +737,6 @@ class TwilioMediaStream:
                 "error": str(e)
             })
             
-            # Try again or give up
             if self.reconnect_attempts < Config.MEDIA_STREAM_RECONNECT_ATTEMPTS:
                 await self._attempt_reconnect()
             else:

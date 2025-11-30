@@ -12,6 +12,7 @@ import signal
 import sys
 import logging
 import asyncio
+import os
 
 # Minimal process logger (prevents NameError in signal handler)
 logger = logging.getLogger("sara.app")
@@ -41,9 +42,8 @@ except ImportError:
     import os
     class Config:
         PORT = int(os.getenv("PORT", "5000"))
-        # TODO: Move hardcoded port number to config.py
         R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME")
-        TWILIO_MEDIA_WS_URL = os.getenv("TWILIO_MEDIA_WS_URL")
+        TWILIO_MEDIA_WS_URL = os.getenv("TWILIO_MEDIA_WS_URL", "wss://srv-d43eqvemcj7s73b0pum0.onrender.com/media")
 
 # --------------------------------------------------------------------------
 # Phase 11-D Metrics Integration - Lazy Import Shim
@@ -333,7 +333,6 @@ def check_r2_connection(trace_id=None, session_id=None):
             if callable(r2_check):
                 ok, meta = r2_check(client=client, bucket=Config.R2_BUCKET_NAME)
                 latency_ms = round((time.time() - start) * 1000, 2)
-                # TODO: Move hardcoded port number to config.py
                 if ok:
                     get_metrics().inc_metric("r2_health_checks_ok_total")
                     log_event(
@@ -361,7 +360,6 @@ def check_r2_connection(trace_id=None, session_id=None):
                 bucket = Config.R2_BUCKET_NAME
                 client.list_objects_v2(Bucket=bucket, MaxKeys=1)
                 latency_ms = round((time.time() - start) * 1000, 2)
-                # TODO: Move hardcoded port number to config.py
                 get_metrics().inc_metric("r2_health_checks_ok_total")
                 log_event(
                     service="app",
@@ -874,7 +872,6 @@ if __name__ == "__main__":
     # Use dedicated config values with safe fallbacks
     host = getattr(Config, "HOST", "0.0.0.0")
     port = getattr(Config, "FLASK_PORT", getattr(Config, "PORT", 5000))
-    # TODO: Move hardcoded port number to config.py
 
     app.run(
         host=host,

@@ -12,11 +12,11 @@ from datetime import datetime, timedelta
 import sys
 import uuid
 import signal
-import sys
+import os
 
 def _graceful_shutdown(signum, frame):
     """Phase 12: Graceful shutdown handler"""
-    logger.info(f"Received signal {{signum}}, shutting down gracefully...")
+    logger.info(f"Received signal {signum}, shutting down gracefully...")
     sys.exit(0)
 
 signal.signal(signal.SIGINT, _graceful_shutdown)
@@ -35,8 +35,7 @@ except ImportError:
     # Minimal fallback that doesn't violate isolation
     import os
     class Config:
-        REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        # TODO: Move hardcoded port number to config.py
+        REDIS_URL = os.getenv("REDIS_URL")
         SERVICE_NAME = "campaign_runner"
 
 # Phase 11-F: Structured logging with proper observability integration
@@ -112,7 +111,7 @@ def _is_circuit_breaker_open(service: str = "campaign_runner") -> bool:
         # Emit metric for Redis failure
         try:
             from metrics_collector import increment_metric
-            increment_metric("redis.circuit.breaker.open")
+            increment_metric("redis.circuit.breaker.failure")
             increment_metric("redis.call.error")
         except Exception:
             pass
@@ -131,7 +130,6 @@ def execute_call_directly(contact_row, campaign_name: str, duplex_enabled: bool 
     
     try:
         # Import the actual call execution function
-        # This assumes you have a function that makes the actual call
         try:
             from outbound_tasks import execute_outbound_call
             call_function = execute_outbound_call
@@ -331,7 +329,6 @@ def run_campaign(csv_path: str, campaign_name: str, daily_cap: int = 300, dry_ru
             
             # Record successful call
             contact_latency = (time.time() - contact_start_time) * 1000
-            # TODO: Move hardcoded port number to config.py
             _record_metrics("contact_call", "success", contact_latency, trace_id)
             
             # Update Redis count
@@ -345,11 +342,9 @@ def run_campaign(csv_path: str, campaign_name: str, daily_cap: int = 300, dry_ru
                            campaign=campaign_name, error=str(e), trace_id=trace_id)
         
         # NOTE: No sleep interval - calls run sequentially, one after another
-        # Each call blocks until complete before starting the next
     
     # Campaign completion metrics
     campaign_duration = (time.time() - campaign_start_time) * 1000
-    # TODO: Move hardcoded port number to config.py
     _record_metrics("campaign", "completed", campaign_duration, trace_id)
     
     _structured_log("campaign_finished", level="info", 
@@ -384,7 +379,6 @@ def campaign_runner_health_check():
         status = "healthy" if not circuit_breaker_open and redis_ok else "degraded"
         
         latency_ms = (time.time() - start_time) * 1000
-        # TODO: Move hardcoded port number to config.py
         _record_metrics("health_check", "success", latency_ms, trace_id)
         
         _structured_log("health_check", level="info",
@@ -407,7 +401,6 @@ def campaign_runner_health_check():
         
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
-        # TODO: Move hardcoded port number to config.py
         _record_metrics("health_check", "failed", latency_ms, trace_id)
         _structured_log("health_check_failed", level="error",
                        message="Campaign runner health check failed",
@@ -431,7 +424,6 @@ def main():
     p.add_argument("--dry-run", action="store_true", help="Simulate without making calls")
     p.add_argument("--duplex-enabled", action="store_true", help="Enable duplex streaming (auto-detected if not specified)")
     p.add_argument("--no-duplex", action="store_true", help="Disable duplex streaming")
-    # REMOVED: --rate parameter since we're running sequentially
     
     args = p.parse_args()
 

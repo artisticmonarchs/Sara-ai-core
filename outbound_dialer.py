@@ -18,6 +18,7 @@ import random
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
 import traceback
+import os
 
 # --------------------------------------------------------------------------
 # Configuration and Imports
@@ -34,8 +35,8 @@ except ImportError:
         RATE_LIMIT_CALLS_PER_MINUTE = int(os.getenv("RATE_LIMIT_CALLS_PER_MINUTE", "60"))
         TIMEZONE_CHECK_ENABLED = os.getenv("TIMEZONE_CHECK_ENABLED", "true").lower() == "true"
         DNC_CHECK_ENABLED = os.getenv("DNC_CHECK_ENABLED", "true").lower() == "true"
-        VOICE_WEBHOOK_BASE = os.getenv("VOICE_WEBHOOK_BASE", "https://your-app.com")
-        STATUS_WEBHOOK_BASE = os.getenv("STATUS_WEBHOOK_BASE", "https://your-app.com")
+        VOICE_WEBHOOK_BASE = os.getenv("VOICE_WEBHOOK_BASE", "https://srv-d43eqvemcj7s73b0pum0.onrender.com")
+        STATUS_WEBHOOK_BASE = os.getenv("STATUS_WEBHOOK_BASE", "https://srv-d43eqvemcj7s73b0pum0.onrender.com")
 
 try:
     # Phase 12: use the unified helpers and avoid raw ops
@@ -69,7 +70,7 @@ try:
     from call_disposition_tracker import track_call_disposition
 except ImportError:
     async def track_call_disposition(call_sid: str, disposition: str, metadata: Dict[str, Any]):
-        pass
+        logger.info("Track call disposition", extra={"call_sid": call_sid, "disposition": disposition, "metadata": metadata})
 
 try:
     import metrics_collector as metrics

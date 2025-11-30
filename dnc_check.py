@@ -25,7 +25,7 @@ try:
     DNC_FILE_OPERATION_TIMEOUT = getattr(Config, "DNC_FILE_OPERATION_TIMEOUT", 5)  # seconds
 except ImportError:
     # Minimal fallback - these should be defined in config.py
-    DNC_FILE = "dnc_list.txt"
+    DNC_FILE = os.getenv("DNC_FILE", "dnc_list.txt")
     DNC_SAFE_MODE_ON_FAILURE = True
     DNC_REDIS_KEY = "sara:dnc:numbers"
     DNC_FILE_OPERATION_TIMEOUT = 5
@@ -131,7 +131,7 @@ def is_suppressed(phone: str) -> bool:
     masked_phone = _mask_phone_number(phone)
     
     if not phone:
-        log_event("dnc_check", "empty_phone_check", "debug",  # Demoted to debug
+        log_event("dnc_check", "empty_phone_check", "debug",
                   "Empty phone number provided for DNC check",
                   trace_id=trace_id)
         # Safe mode: treat empty numbers as suppressed
@@ -153,12 +153,10 @@ def is_suppressed(phone: str) -> bool:
             )
             
             if is_suppressed_result is not None:
-                # Metrics - lazy loaded with proper namespacing
                 increment_metric, observe_latency = _get_metrics()
                 increment_metric("sara_dnc_redis_check_total")
                 
                 latency_ms = (time.time() - start_time) * 1000
-                # TODO: Move hardcoded port number to config.py
                 observe_latency("sara_dnc_redis_check_latency_ms", latency_ms)
                 
                 if is_suppressed_result:
@@ -174,11 +172,10 @@ def is_suppressed(phone: str) -> bool:
                     return False
                 
         except Exception as e:
-            # Metrics - lazy loaded with proper namespacing
             increment_metric, _ = _get_metrics()
             increment_metric("sara_dnc_redis_check_failed_total")
             
-            log_event("dnc_check", "redis_dnc_check_failed", "warning",  # Demoted to warning
+            log_event("dnc_check", "redis_dnc_check_failed", "warning",
                       f"Redis DNC check failed: {e}",
                       phone_masked=masked_phone, error=str(e), trace_id=trace_id)
     
@@ -188,7 +185,6 @@ def is_suppressed(phone: str) -> bool:
     def file_check_operation():
         if os.path.exists(DNC_FILE):
             with open(DNC_FILE, "r", encoding="utf-8") as fh:
-                # Use set for O(1) lookups
                 nums = set(line.strip() for line in fh if line.strip())
             return phone in nums
         return False
@@ -200,12 +196,10 @@ def is_suppressed(phone: str) -> bool:
     )
     
     if is_suppressed_result is not None:
-        # Metrics - lazy loaded with proper namespacing
         increment_metric, observe_latency = _get_metrics()
         increment_metric("sara_dnc_file_check_total")
         
         file_latency_ms = (time.time() - file_start_time) * 1000
-        # TODO: Move hardcoded port number to config.py
         observe_latency("sara_dnc_file_check_latency_ms", file_latency_ms)
         
         if is_suppressed_result:
@@ -220,11 +214,10 @@ def is_suppressed(phone: str) -> bool:
                       phone_masked=masked_phone, source="file", trace_id=trace_id)
             return False
     else:
-        # File operation failed or timed out
         increment_metric, _ = _get_metrics()
         increment_metric("sara_dnc_file_check_failed_total")
         
-        log_event("dnc_check", "file_dnc_check_failed", "warning",  # Demoted to warning
+        log_event("dnc_check", "file_dnc_check_failed", "warning",
                   f"Failed to read DNC file for: {masked_phone}",
                   phone_masked=masked_phone, dnc_file=DNC_FILE, trace_id=trace_id)
     
@@ -251,7 +244,7 @@ def add_to_dnc(phone: str) -> bool:
     masked_phone = _mask_phone_number(phone)
     
     if not phone:
-        log_event("dnc_check", "empty_phone_add", "debug",  # Demoted to debug
+        log_event("dnc_check", "empty_phone_add", "debug",
                   "Empty phone number provided for DNC addition",
                   trace_id=trace_id)
         return False
@@ -270,7 +263,6 @@ def add_to_dnc(phone: str) -> bool:
             )
             
             if result is not None:
-                # Metrics - lazy loaded with proper namespacing
                 increment_metric, _ = _get_metrics()
                 increment_metric("sara_dnc_number_added_redis_total")
                 
@@ -280,17 +272,15 @@ def add_to_dnc(phone: str) -> bool:
                 return True
                 
         except Exception as e:
-            # Metrics - lazy loaded with proper namespacing
             increment_metric, _ = _get_metrics()
             increment_metric("sara_dnc_redis_add_failed_total")
             
-            log_event("dnc_check", "redis_dnc_add_failed", "warning",  # Demoted to warning
+            log_event("dnc_check", "redis_dnc_add_failed", "warning",
                       f"Failed to add to Redis DNC: {e}",
                       phone_masked=masked_phone, error=str(e), trace_id=trace_id)
     
     # Fallback to file-based DNC addition with timeout protection
     def file_add_operation():
-        # Ensure directory exists
         os.makedirs(os.path.dirname(os.path.abspath(DNC_FILE)), exist_ok=True)
         
         with open(DNC_FILE, "a", encoding="utf-8") as fh:
@@ -300,7 +290,6 @@ def add_to_dnc(phone: str) -> bool:
     result = _safe_file_operation(file_add_operation, "dnc_file_add", fallback=False)
     
     if result:
-        # Metrics - lazy loaded with proper namespacing
         increment_metric, _ = _get_metrics()
         increment_metric("sara_dnc_number_added_file_total")
         
@@ -309,11 +298,10 @@ def add_to_dnc(phone: str) -> bool:
                   phone_masked=masked_phone, dnc_file=DNC_FILE, trace_id=trace_id)
         return True
     else:
-        # Metrics - lazy loaded with proper namespacing
         increment_metric, _ = _get_metrics()
         increment_metric("sara_dnc_file_add_failed_total")
         
-        log_event("dnc_check", "file_dnc_add_failed", "warning",  # Demoted to warning
+        log_event("dnc_check", "file_dnc_add_failed", "warning",
                   f"Failed to add to file DNC: {masked_phone}",
                   phone_masked=masked_phone, dnc_file=DNC_FILE, trace_id=trace_id)
         return False
@@ -325,7 +313,7 @@ def remove_from_dnc(phone: str) -> bool:
     masked_phone = _mask_phone_number(phone)
     
     if not phone:
-        log_event("dnc_check", "empty_phone_remove", "debug",  # Demoted to debug
+        log_event("dnc_check", "empty_phone_remove", "debug",
                   "Empty phone number provided for DNC removal",
                   trace_id=trace_id)
         return False
@@ -344,7 +332,6 @@ def remove_from_dnc(phone: str) -> bool:
             )
             
             if result is not None:
-                # Metrics - lazy loaded with proper namespacing
                 increment_metric, _ = _get_metrics()
                 increment_metric("sara_dnc_number_removed_redis_total")
                 
@@ -354,11 +341,10 @@ def remove_from_dnc(phone: str) -> bool:
                 return True
                 
         except Exception as e:
-            # Metrics - lazy loaded with proper namespacing
             increment_metric, _ = _get_metrics()
             increment_metric("sara_dnc_redis_remove_failed_total")
             
-            log_event("dnc_check", "redis_dnc_remove_failed", "warning",  # Demoted to warning
+            log_event("dnc_check", "redis_dnc_remove_failed", "warning",
                       f"Failed to remove from Redis DNC: {e}",
                       phone_masked=masked_phone, error=str(e), trace_id=trace_id)
     
@@ -368,10 +354,8 @@ def remove_from_dnc(phone: str) -> bool:
             with open(DNC_FILE, "r", encoding="utf-8") as fh:
                 lines = fh.readlines()
             
-            # Remove the number from the list
             new_lines = [line for line in lines if line.strip() != phone]
             
-            # Only write back if something changed
             if len(new_lines) != len(lines):
                 with open(DNC_FILE, "w", encoding="utf-8") as fh:
                     fh.writelines(new_lines)
@@ -381,7 +365,6 @@ def remove_from_dnc(phone: str) -> bool:
     result = _safe_file_operation(file_remove_operation, "dnc_file_remove", fallback=False)
     
     if result:
-        # Metrics - lazy loaded with proper namespacing
         increment_metric, _ = _get_metrics()
         increment_metric("sara_dnc_number_removed_file_total")
         
@@ -439,16 +422,15 @@ def _simple_test():
     test_number = "+1234567890"
     masked_number = _mask_phone_number(test_number)
     
-    logger.info(f"Testing DNC check with number: {masked_number}")
+    log_event("dnc_check", "test_start", "info", f"Testing DNC check with number: {masked_number}")
     
-    # Test basic operations
     result = is_suppressed(test_number)
-    logger.info(f"is_suppressed result: {result}")
+    log_event("dnc_check", "test_result", "info", f"is_suppressed result: {result}")
     
     stats = get_dnc_stats()
-    logger.info(f"DNC stats: {stats}")
+    log_event("dnc_check", "test_stats", "info", f"DNC stats: {stats}")
     
-    logger.info("Basic DNC check validation completed")
+    log_event("dnc_check", "test_complete", "info", "Basic DNC check validation completed")
 
 if __name__ == "__main__":
     _simple_test()

@@ -27,17 +27,35 @@ except ImportError:
 try:
     from metrics_collector import increment_metric, observe_latency
 except ImportError:
-    def increment_metric(*args, **kwargs): pass
-    def observe_latency(*args, **kwargs): pass
+    def increment_metric(*args, **kwargs): 
+        logging.debug(f"Metrics not available: {args} {kwargs}")
+    def observe_latency(*args, **kwargs): 
+        logging.debug(f"Latency observation not available: {args} {kwargs}")
 
 # Redis circuit breaker
 try:
     from redis_client import get_redis_client, safe_redis_operation
 except ImportError:
-    def get_redis_client(): return None
+    import os
+    import redis
+    redis_client = None
+    
+    def get_redis_client():
+        global redis_client
+        if redis_client is None:
+            try:
+                redis_url = os.getenv("REDIS_URL")
+                redis_client = redis.from_url(redis_url)
+            except Exception as e:
+                logging.warning(f"Failed to initialize Redis client: {e}")
+        return redis_client
+    
     def safe_redis_operation(operation, fallback=None, operation_name=None):
-        try: return operation()
-        except: return fallback
+        try: 
+            return operation()
+        except Exception as e:
+            logging.debug(f"Redis operation failed: {operation_name or 'unknown'}: {e}")
+            return fallback
 
 # Structured logging
 try:

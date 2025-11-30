@@ -247,7 +247,7 @@ def _update_reconnect_delay(success: bool):
 def _connect() -> Optional[redis.Redis]:
     """Attempt to establish a Redis connection and perform a health check."""
     # Read environment variables directly to avoid import cycles
-    url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    url = os.getenv("REDIS_URL", "redis://red-d43ertemcj7s73b0qrcg:6379/0")
 
     try:
         client = redis.Redis.from_url(
@@ -856,7 +856,7 @@ def _get_metric_impl(client: redis.Redis, key: str, field: str) -> int:
 def health_check() -> dict:
     """Return a health snapshot for diagnostics."""
     # Read environment variables directly to avoid import cycles
-    url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    url = os.getenv("REDIS_URL", "redis://red-d43ertemcj7s73b0qrcg:6379/0")
 
     client = get_client()
     status = "ok"
@@ -1218,7 +1218,7 @@ class RedisClient:
             url: Redis URL (new parameter name)
         """
         # Phase 11-F Requirement #2: Support both parameter names
-        self.redis_url = redis_url or url or os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        self.redis_url = redis_url or url or os.getenv("REDIS_URL", "redis://red-d43ertemcj7s73b0qrcg:6379/0")
         self.client = None
         self.logger = _get_logger()
         self._degraded_mode = False

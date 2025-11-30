@@ -1,0 +1,38 @@
+{
+  "timestamp": "2025-10-28T18:51:54.232764",
+  "json_results": {
+    "Sara_CallFlow.json": {
+      "ok": true,
+      "errors": []
+    },
+    "Sara_KnowledgeBase.json": {
+      "ok": true,
+      "errors": []
+    },
+    "Sara_Objections.json": {
+      "ok": true,
+      "errors": []
+    },
+    "Sara_Opening.json": {
+      "ok": true,
+      "errors": []
+    },
+    "Sara_Playbook.json": {
+      "ok": true,
+      "errors": []
+    },
+    "Sara_SystemPrompt_Production.json": {
+      "ok": true,
+      "errors": []
+    }
+  },
+  "module_results": {
+    "gpt_client": "OK",
+    "voice_pipeline": "OK",
+    "call_handler": "OK",
+    "twilio_router": "OK",
+    "campaign_runner": "OK",
+    "persona_engine": "OK",
+    "inference_server": "OK"
+  }
+}

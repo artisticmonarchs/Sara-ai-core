@@ -21,7 +21,7 @@ except ImportError:
         R2_RECONCILE_LOCK_TIMEOUT = int(os.getenv("R2_RECONCILE_LOCK_TIMEOUT", "300"))
         R2_RECONCILE_STALE_HOURS = int(os.getenv("R2_RECONCILE_STALE_HOURS", "24"))
         R2_RECONCILE_MAX_RETRIES = int(os.getenv("R2_RECONCILE_MAX_RETRIES", "3"))
-        R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "tts-cache")
+        R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME", "sara-ai-audio")
         R2_RECONCILE_MAX_KEYS_PER_CYCLE = int(os.getenv("R2_RECONCILE_MAX_KEYS_PER_CYCLE", "1000"))
 
 # Redis client
@@ -29,7 +29,14 @@ try:
     from redis_client import get_redis_client, safe_redis_operation
 except ImportError:
     def get_redis_client():
-        return None
+        redis_url = os.getenv("REDIS_URL")
+        if not redis_url:
+            return None
+        try:
+            import redis
+            return redis.from_url(redis_url)
+        except ImportError:
+            return None
     def safe_redis_operation(op, fallback=None, operation_name:str="r2_reconciler_op"):
         try:
             return op()
@@ -51,11 +58,14 @@ try:
 except ImportError:
     class metrics:
         @staticmethod
-        def increment_metric(name, labels=None, amount=1): pass
+        def increment_metric(name, labels=None, amount=1): 
+            logger.info(f"Metric incremented: {name}", extra={"labels": labels, "amount": amount})
         @staticmethod
-        def observe_latency(name, value_ms, labels=None): pass
+        def observe_latency(name, value_ms, labels=None): 
+            logger.debug(f"Latency observed: {name}", extra={"value_ms": value_ms, "labels": labels})
         @staticmethod
-        def set_gauge(name, value, labels=None): pass
+        def set_gauge(name, value, labels=None): 
+            logger.debug(f"Gauge set: {name}", extra={"value": value, "labels": labels})
 
 # Structured logging
 try:
@@ -604,7 +614,7 @@ class R2Reconciler:
                 from config import Config
                 bucket = Config.R2_BUCKET_NAME
             except Exception:
-                bucket = os.getenv("R2_BUCKET_NAME")
+                bucket = os.getenv("R2_BUCKET_NAME", "sara-ai-audio")
             
             if not bucket:
                 logger.error("R2_BUCKET_NAME not configured", extra={

@@ -8,6 +8,7 @@ import json
 import time
 import uuid
 import os
+import audioop
 from typing import Optional, Dict, Any, Callable
 import traceback
 
@@ -178,6 +179,7 @@ class DuplexVoiceController:
         # Phase 12: Per-call state for inbound/outbound audio bridging
         self.jitter_buffer = JitterBuffer()  # Inbound buffer for STT
         self.outbound_frames = asyncio.Queue()  # Thread-safe queue of PCM frames for Twilio
+        self._sync_outbound_frames = asyncio.Queue()  # Mirror queue for sync access
         self.greeting_sent = False  # Flag to track if initial greeting has been sent
         
         logger.info("DuplexVoiceController initialized", extra={
@@ -294,6 +296,7 @@ class DuplexVoiceController:
                 
                 # Enqueue frame for outbound streaming
                 await self.outbound_frames.put(twilio_frame)
+                await self._sync_outbound_frames.put(twilio_frame)
                 
                 logger.debug("TTS frame enqueued", extra={
                     "call_sid": self.call_sid,
@@ -348,6 +351,24 @@ class DuplexVoiceController:
                 "service": "streaming_server",
                 "controller": "duplex"
             })
+            return None
+    
+    def next_outbound_frame_sync(self, timeout_ms: int = 100) -> Optional[bytes]:
+        """
+        Synchronous version for Twilio media session access.
+        Returns next outbound frame or None if timeout.
+        """
+        try:
+            # Use the mirror queue for synchronous access
+            frame = asyncio.run_coroutine_threadsafe(
+                asyncio.wait_for(
+                    self._sync_outbound_frames.get(),
+                    timeout=timeout_ms / 1000.0
+                ),
+                asyncio.get_event_loop()
+            ).result(timeout=(timeout_ms + 50) / 1000.0)
+            return frame
+        except Exception as e:
             return None
     
     # --------------------------------------------------------------------------
@@ -1042,19 +1063,16 @@ class DuplexVoiceController:
     async def _convert_to_twilio_format(self, audio_frame: bytes) -> bytes:
         """
         Convert audio frame to Twilio-compatible format (8 kHz μ-law mono)
-        This is a placeholder - implement actual audio conversion based on your TTS output format
         """
         try:
-            # If your TTS engine already outputs Twilio-compatible format, return as-is
-            # Otherwise, implement conversion here:
-            # - Resample to 8 kHz if needed
-            # - Convert to mono if stereo
-            # - Apply μ-law encoding
-            # - Adjust byte order if necessary
+            # Assume input is 16-bit PCM, 16kHz, mono
+            # Convert to 8kHz using audioop.ratecv
+            converted_frame = audioop.ratecv(audio_frame, 2, 1, 16000, 8000, None)
             
-            # For now, return as-is assuming compatibility
-            # TODO: Implement proper audio conversion based on your TTS output format
-            return audio_frame
+            # Convert to μ-law
+            ulaw_frame = audioop.lin2ulaw(converted_frame[0], 2)
+            
+            return ulaw_frame
             
         except Exception as e:
             logger.error("Error converting audio to Twilio format", extra={

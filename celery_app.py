@@ -272,6 +272,7 @@ if not wait_for_redis():
 # Use config-driven result ignoring for consistency
 TASK_IGNORE_RESULT = getattr(config, "TASK_IGNORE_RESULT", False)
 
+# FIX: Ensure the celery instance is properly created and exported
 celery = Celery(
     "sara_core",
     broker=config.CELERY_BROKER_URL,
@@ -702,8 +703,15 @@ logger.info("[BOOT] Consolidated task registration completed.")
 logger.info("[BOOT] Celery app is production-ready with Phase 12 resilience.")
 
 # --------------------------------------------------------------------------- #
-# Defensive Exports
+# Defensive Exports - FIX: Ensure celery instance is properly exported
 # --------------------------------------------------------------------------- #
+# The celery instance MUST be available at module level for Celery CLI to find it
 __all__ = ["celery", "health_ping", "redis_cleanup_task", "metrics_flush_task"]
+
+# FIX: Explicitly ensure the celery instance is accessible
 if "outbound_call_task" in globals():
     __all__.append("outbound_call_task")
+
+# FIX: Add explicit export confirmation
+logger.info(f"[BOOT] Celery instance created and exported: {type(celery).__name__}")
+logger.info("[BOOT] Module ready for Celery CLI with -A celery_app:celery")

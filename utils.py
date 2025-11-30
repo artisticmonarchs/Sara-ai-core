@@ -41,9 +41,6 @@ def increment_metric(name: str, amount: int = 1, labels: dict = None):
     except Exception:
         return None
 
-# Remove Redis I/O helpers to keep module pure
-# These should be moved to a separate redis_utils.py module
-
 def _safe_inc_metric(metric_name: str, value: int = 1, labels: Optional[dict] = None) -> None:
     """Safely increment metrics counter with fallback and label support"""
     try:
