@@ -121,7 +121,6 @@ def _get_redis_client_safe():
     try:
         redis_client = get_redis_client()
         if redis_client is None:
-            # Fallback only if absolutely necessary
             try:
                 from redis import Redis
                 redis_url = getattr(Config, "REDIS_URL", os.getenv("REDIS_URL"))
@@ -186,7 +185,7 @@ def _verify_twilio_signature() -> bool:
 def twilio_answer():
     """
     Handle incoming Twilio call. Always returns valid TwiML with application/xml content-type.
-    If Twilio SDK is unavailable at call-time, fall back to static TwiML string.
+    Uses <Connect><Stream/></Connect> for proper full-duplex Media Streams (blocking verb).
     """
     trace_id = get_trace_id()
 
@@ -211,29 +210,28 @@ def twilio_answer():
 
     # Helper: safe TwiML emitter via SDK
     def _emit_twiml_with_sdk(_ws_url: str | None) -> str:
-        # Lazy import at call-time so import issues don't break module import
         from twilio.twiml.voice_response import VoiceResponse
         r = VoiceResponse()
         if _ws_url and isinstance(_ws_url, str) and _ws_url.strip().startswith("wss://"):
-            # Use <Start><Stream track="both_tracks"/> for full duplex
-            r.start().stream(url=_ws_url.strip(), track="both_tracks")
+            # <Connect><Stream/></Connect> is the blocking verb required for full-duplex
+            with r.connect() as c:
+                c.stream(url=_ws_url.strip())
         else:
             r.say("Hello, this is Sara. Please hold while we connect.")
         return str(r)
 
-    # Hard fallback: static XML that Twilio accepts even if the SDK is not available
+    # Hard fallback: static XML with <Connect><Stream/></Connect>
     def _emit_static_twiml(_ws_url: str | None) -> str:
         if _ws_url and isinstance(_ws_url, str) and _ws_url.strip().startswith("wss://"):
             return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Start>
-    <Stream url="{_ws_url.strip()}" track="both_tracks"/>
-  </Start>
+  <Connect>
+    <Stream url="{_ws_url.strip()}"/>
+  </Connect>
 </Response>"""
-        # Minimal say-only fallback
         return '<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice">Hello, this is Sara. Please hold while we connect.</Say></Response>'
 
-    # Try SDK path first; if *anything* goes wrong, fall back to static XML
+    # Try SDK path first; if anything goes wrong, fall back to static XML
     try:
         twiml_xml = _emit_twiml_with_sdk(ws_url)
         _structured_log("twilio_answer_twiML_emitted", level="info",
@@ -260,7 +258,6 @@ def twilio_events():
         return Response("Invalid signature", status=403, mimetype="text/plain")
     
     try:
-        # For GET requests, return service info (useful for debugging)
         if request.method == "GET":
             return jsonify({
                 "service": __service__,
@@ -270,8 +267,6 @@ def twilio_events():
                 "trace_id": trace_id
             }), 200
         
-        # For POST requests, process Twilio webhook data
-        # Twilio sends application/x-www-form-urlencoded - defensive parsing
         payload = request.form.to_dict() if request.form else {}
         _structured_log("twilio_status_webhook", level="info",
                       message="Received Twilio status webhook",
@@ -282,7 +277,7 @@ def twilio_events():
                       message=f"Error processing events webhook: {str(e)}",
                       trace_id=trace_id, error=str(e), traceback=traceback.format_exc())
         capture_exception_safe(e, {"service": __service__, "trace_id": trace_id})
-        return ("", 204)  # Always return 204 to Twilio even on errors
+        return ("", 204)
 
 # --------------------------------------------------------------------------
 # Phase 11-F Duplex Controller Initialization
@@ -393,13 +388,11 @@ def playback():
     session_id = payload.get("session_id")
     trace_id = payload.get("trace_id") or get_trace_id()
 
-    # Check for placeholder PUBLIC_AUDIO_BASE configuration
     if not CONFIG["PUBLIC_AUDIO_BASE"] or "your-domain.com" in CONFIG["PUBLIC_AUDIO_BASE"]:
         _structured_log("playback_config_missing", level="error",
                       message="PUBLIC_AUDIO_BASE not configured", trace_id=trace_id)
         return jsonify({"error": "PUBLIC_AUDIO_BASE not configured", "trace_id": trace_id}), 400
 
-    # Phase 11-F: Circuit breaker check
     if _is_circuit_breaker_open("twilio_client"):
         _structured_log("circuit_breaker_blocked", level="warning", 
                       message="Playback blocked by circuit breaker", trace_id=trace_id)
@@ -415,7 +408,6 @@ def playback():
                       trace_id=trace_id, session_id=session_id)
         return jsonify({"error": "Missing session_id or trace_id", "trace_id": trace_id}), 400
 
-    # Sanitize session_id for URL safety
     safe_session_id = os.path.basename(session_id) if session_id else None
     if not safe_session_id or safe_session_id != session_id:
         _structured_log("playback_invalid_session_id", level="error",
@@ -423,7 +415,6 @@ def playback():
         return jsonify({"error": "Invalid session_id", "trace_id": trace_id}), 400
 
     try:
-        # Phase 11-F: Safe Redis operation with bytes decoding
         redis_client_instance = _get_redis_client_safe()
         call_sid = safe_redis_operation(
             lambda: redis_client_instance.get(f"twilio_call:{safe_session_id}") if redis_client_instance else None,
@@ -431,7 +422,6 @@ def playback():
             operation_name="get_call_sid"
         )
         
-        # Decode bytes if needed
         if isinstance(call_sid, bytes):
             try:
                 call_sid = call_sid.decode("utf-8")
@@ -444,16 +434,13 @@ def playback():
                           trace_id=trace_id, session_id=safe_session_id)
             return jsonify({"error": "Call SID not found", "trace_id": trace_id}), 404
 
-        # Construct safe audio URL
         audio_url = f"{CONFIG['PUBLIC_AUDIO_BASE']}/{safe_session_id}/{trace_id}.wav"
 
-        # Build TwiML to play audio
         twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Play>{audio_url}</Play>
 </Response>"""
 
-        # Phase 11-F: Try duplex streaming first if available
         if CONFIG["DUPLEX_STREAMING_ENABLED"]:
             try:
                 controller = _init_duplex_controller()
@@ -478,7 +465,7 @@ def playback():
                               message="Duplex playback failed, falling back to standard Twilio",
                               trace_id=trace_id, session_id=safe_session_id, 
                               error=str(e))
-        # Fallback to standard Twilio client
+
         client = _init_twilio_client()
         if client is None:
             _structured_log("twilio_client_unavailable", level="error",
@@ -489,10 +476,8 @@ def playback():
                 pass
             return jsonify({"error": "Twilio client unavailable", "trace_id": trace_id}), 500
 
-        # Update Twilio call with explicit timeout
         client.calls(call_sid).update(twiml=twiml)
 
-        # Phase 11-F: Record success metrics and structured log
         latency_ms = (time.time() - start_time) * 1000
         _record_metrics("playback", "success", latency_ms, trace_id)
         _structured_log("twilio_playback_update", level="info",
@@ -510,12 +495,10 @@ def playback():
 
     except Exception as e:
         TwilioRestException = _get_twilio_exceptions()
-        # Phase 11-F: Exception handling
         latency_ms = (time.time() - start_time) * 1000
         _record_metrics("playback", "failure", latency_ms, trace_id)
         capture_exception_safe(e, {"service": __service__, "trace_id": trace_id, "session_id": safe_session_id})
         
-        # Check if it's a Twilio-specific exception
         if isinstance(e, TwilioRestException):
             _structured_log("twilio_playback_twilio_error", level="error",
                           message=str(e), trace_id=trace_id, session_id=safe_session_id,
@@ -562,7 +545,6 @@ def duplex_stream():
                           trace_id=trace_id, call_sid=call_sid)
             return jsonify({"error": "Duplex controller unavailable", "trace_id": trace_id}), 503
 
-        # Route to appropriate duplex handler
         if stream_type == "inbound":
             result = controller.handle_inbound_stream(call_sid, payload, trace_id)
         elif stream_type == "outbound":
@@ -607,7 +589,6 @@ def health_check():
     trace_id = get_trace_id()
     
     try:
-        # Phase 11-F: Safe Redis ping and circuit breaker check
         redis_client_instance = _get_redis_client_safe()
         redis_ok = safe_redis_operation(
             lambda: redis_client_instance.ping() if redis_client_instance else False, 
@@ -616,7 +597,6 @@ def health_check():
         )
         breaker_open = _is_circuit_breaker_open("twilio_client")
         
-        # Phase 11-F: Duplex controller health check
         duplex_healthy = False
         if CONFIG["DUPLEX_STREAMING_ENABLED"]:
             try:
@@ -625,8 +605,6 @@ def health_check():
             except Exception:
                 duplex_healthy = False
         
-        # Determine overall status - only unhealthy if circuit breaker is open
-        # Redis and duplex issues are considered degraded but not unhealthy
         if breaker_open:
             status = "unhealthy"
             http_code = 503
@@ -634,7 +612,6 @@ def health_check():
             status = "healthy" if redis_ok else "degraded"
             http_code = 200
         
-        # Record metrics
         latency_ms = (time.time() - start_time) * 1000
         _record_metrics("health_check", "success", latency_ms, trace_id)
         
@@ -652,12 +629,8 @@ def health_check():
             "duplex_enabled": CONFIG["DUPLEX_STREAMING_ENABLED"],
             "duplex_healthy": duplex_healthy,
             "components": {
-                "redis": {
-                    "status": "healthy" if redis_ok else "unhealthy"
-                },
-                "circuit_breaker": {
-                    "status": "open" if breaker_open else "closed"
-                },
+                "redis": {"status": "healthy" if redis_ok else "unhealthy"},
+                "circuit_breaker": {"status": "open" if breaker_open else "closed"},
                 "duplex_controller": {
                     "status": "healthy" if duplex_healthy else "unhealthy",
                     "enabled": CONFIG["DUPLEX_STREAMING_ENABLED"]
@@ -666,7 +639,6 @@ def health_check():
         }), http_code
         
     except Exception as e:
-        # Phase 11-F: Health check failure handling
         latency_ms = (time.time() - start_time) * 1000
         _record_metrics("health_check", "failure", latency_ms, trace_id)
         capture_exception_safe(e, {"service": __service__, "trace_id": trace_id})
@@ -698,13 +670,11 @@ def health_legacy():
 # Local Debug Entry (Preserved with Phase 11-F enhancements)
 # --------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Install signal handlers only when running directly
     _install_signal_handlers()
     
     app = Flask(__name__)
     app.register_blueprint(twilio_router_bp)
     
-    # Phase 11-F: Initialize duplex controller on startup
     if CONFIG["DUPLEX_STREAMING_ENABLED"]:
         _init_duplex_controller()
     
