@@ -13,7 +13,6 @@ from flask import Flask, request, Response, jsonify, Blueprint
 import signal
 import sys
 from logging_utils import get_logger
-from twilio.twiml.voice_response import VoiceResponse
 
 logger = get_logger("twilio_router")
 
@@ -185,101 +184,65 @@ def _verify_twilio_signature() -> bool:
 # --------------------------------------------------------------------------
 @twilio_router_bp.route("/twilio/answer", methods=["GET", "POST"])
 def twilio_answer():
-    """Handle incoming Twilio call - returns TwiML (XML) for both GET and POST"""
-    # --- DEBUG LOG: Twilio hit /twilio/answer ---
-    try:
-        media_ws_url = _media_ws_url()
-    except Exception as e:
-        # If something goes wrong computing it, we still want to know
-        log_event(
-            service="twilio_router",
-            event="twilio_answer_hit_error",
-            level="error",
-            message="Error computing media_ws_url in twilio_answer",
-            http_method=request.method,
-            remote_addr=request.headers.get("X-Forwarded-For", request.remote_addr),
-            error=str(e),
-        )
-        media_ws_url = None
-    else:
-        log_event(
-            service="twilio_router",
-            event="twilio_answer_hit",
-            level="info",
-            message="Twilio /twilio/answer invoked",
-            http_method=request.method,
-            remote_addr=request.headers.get("X-Forwarded-For", request.remote_addr),
-            media_ws_url=media_ws_url,
-            has_stream_url=bool(media_ws_url and media_ws_url.startswith("wss://")),
-        )
-    # --- END DEBUG LOG BLOCK ---
-
+    """
+    Handle incoming Twilio call. Always returns valid TwiML with application/xml content-type.
+    If Twilio SDK is unavailable at call-time, fall back to static TwiML string.
+    """
     trace_id = get_trace_id()
-    
-    # Verify Twilio signature if enabled
-    if not _verify_twilio_signature():
-        _structured_log("twilio_signature_failed", level="warning",
-                      message="Twilio signature verification failed", trace_id=trace_id)
-        return Response("Invalid signature", status=403, mimetype="text/plain")
-    
+
+    # Extremely defensive: precompute ws_url, but never let it crash the route.
     try:
-        r = VoiceResponse()
         ws_url = _media_ws_url()
-        
-        # Enhanced validation for WebSocket URL
-        is_valid_ws_url = ws_url and isinstance(ws_url, str) and ws_url.strip().startswith("wss://")
-        
-        if is_valid_ws_url:
-            # Use WebSocket streaming
-            with r.connect() as c:
-                c.stream(url=ws_url.strip())
-            twiml_path = "websocket_stream"
-            
-            # Log media stream mode usage
-            _structured_log("twilio_answer_mode", level="info",
-                          message="TwiML with WebSocket stream emitted",
-                          trace_id=trace_id, media_ws_url=ws_url.strip(), twiml_path=twiml_path,
-                          mode="media_stream")
-            
-            _structured_log("twilio_answer_twiML_emitted", level="info",
-                          message="TwiML with WebSocket stream emitted",
-                          trace_id=trace_id, media_ws_url=ws_url.strip(), twiml_path=twiml_path)
-        else:
-            # Fallback to Say-only (should not happen in production)
-            r.say("Hello, this is Sara. Please hold while we connect.")
-            twiml_path = "say_only_fallback"
-            
-            # Determine reason for fallback
-            reason = "missing_or_invalid_media_ws_url"
-            if not ws_url:
-                reason = "missing_media_ws_url"
-            elif not isinstance(ws_url, str):
-                reason = "media_ws_url_not_string"
-            elif not ws_url.strip().startswith("wss://"):
-                reason = "media_ws_url_invalid_format"
-            
-            # Log fallback mode usage
-            _structured_log("twilio_answer_mode", level="warning",
-                          message="TwiML fallback to Say-only - WebSocket URL missing or invalid",
-                          trace_id=trace_id, media_ws_url=ws_url, twiml_path=twiml_path,
-                          mode="fallback_say_only", reason=reason)
-            
-            _structured_log("twilio_answer_fallback", level="warning",
-                          message="TwiML fallback to Say-only - WebSocket URL missing or invalid",
-                          trace_id=trace_id, media_ws_url=ws_url, twiml_path=twiml_path,
-                          ws_url_empty=not bool(ws_url),
-                          ws_url_valid_format=bool(ws_url and ws_url.strip().startswith("wss://")))
-        
-        return Response(str(r), status=200, mimetype="application/xml")
     except Exception as e:
-        _structured_log("twilio_answer_error", level="error",
-                      message=f"Error processing answer webhook: {str(e)}",
-                      trace_id=trace_id, error=str(e), traceback=traceback.format_exc())
-        capture_exception_safe(e, {"service": __service__, "trace_id": trace_id})
-        # Fallback response
+        ws_url = None
+        _structured_log("twilio_answer_hit_error", level="error",
+                        message="Error computing media_ws_url in twilio_answer",
+                        trace_id=trace_id, error=str(e))
+
+    _structured_log("twilio_answer_hit", level="info",
+                    message="Twilio /twilio/answer invoked",
+                    trace_id=trace_id,
+                    has_stream_url=bool(ws_url and isinstance(ws_url, str) and ws_url.strip().startswith("wss://")),
+                    media_ws_url=ws_url)
+
+    # Signature check (will return 403 if enabled and invalid)
+    if not _verify_twilio_signature():
+        return Response("Invalid signature", status=403, mimetype="text/plain")
+
+    # Helper: safe TwiML emitter via SDK
+    def _emit_twiml_with_sdk(_ws_url: str | None) -> str:
+        # Lazy import at call-time so import issues don't break module import
+        from twilio.twiml.voice_response import VoiceResponse
         r = VoiceResponse()
-        r.say("Hello, this is Sara. Please hold while we connect.")
-        return Response(str(r), status=200, mimetype="application/xml")
+        if _ws_url and isinstance(_ws_url, str) and _ws_url.strip().startswith("wss://"):
+            with r.connect() as c:
+                c.stream(url=_ws_url.strip())
+        else:
+            r.say("Hello, this is Sara. Please hold while we connect.")
+        return str(r)
+
+    # Hard fallback: static XML that Twilio accepts even if the SDK is not available
+    def _emit_static_twiml(_ws_url: str | None) -> str:
+        if _ws_url and isinstance(_ws_url, str) and _ws_url.strip().startswith("wss://"):
+            # Minimal <Response><Connect><Stream/></Connect></Response> without SDK
+            return f'<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="{_ws_url.strip()}"/></Connect></Response>'
+        # Minimal say-only fallback
+        return '<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice">Hello, this is Sara. Please hold while we connect.</Say></Response>'
+
+    # Try SDK path first; if *anything* goes wrong, fall back to static XML
+    try:
+        twiml_xml = _emit_twiml_with_sdk(ws_url)
+        _structured_log("twilio_answer_twiML_emitted", level="info",
+                        message="Emitted TwiML (SDK)", trace_id=trace_id, media_ws_url=ws_url)
+    except Exception as e:
+        capture_exception_safe(e, {"service": __service__, "trace_id": trace_id})
+        _structured_log("twilio_answer_sdk_error", level="error",
+                        message="SDK TwiML generation failed; falling back to static XML",
+                        trace_id=trace_id, error=str(e))
+        twiml_xml = _emit_static_twiml(ws_url)
+
+    # Always return 200 + application/xml
+    return Response(twiml_xml, status=200, mimetype="application/xml")
 
 @twilio_router_bp.route("/twilio/events", methods=["GET", "POST"])
 def twilio_events():
