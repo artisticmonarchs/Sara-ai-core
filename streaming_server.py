@@ -2,22 +2,37 @@
 streaming_server.py — Phase 11-F (Unified Metrics Registry + Global Sync)
 Sara AI Core — Streaming Service
 
-- Uses unified metrics_registry.REGISTRY as the shared Prometheus registry
-- Restores persisted snapshot from Redis into metrics_collector on startup
-- Starts background metrics sync for global aggregation
-- /metrics returns generate_latest(REGISTRY) for unified metrics
-- /metrics_snapshot persists combined snapshot to Redis for cross-service restore
-- Adds RedisCircuitBreaker to isolate Redis outages
-- Retains SSE streaming, Twilio webhook, health endpoints, and structured logging
-- Enhanced with SSE heartbeat, connection lifecycle logging, and graceful disconnect handling
-- Added max concurrent streams enforcement with Redis counter
-- Implemented graceful shutdown handlers for Render scaling
-- Enhanced structured JSON logging throughout
-- Updated for new Render deployment with Valkey compatibility
-- Added retry logic for inference/TTS failures
-- Enhanced security headers and CORS
-- Auto-recovery for Redis circuit breaker
-- Sentry enrichment with deployment metadata
+Uses unified metrics_registry.REGISTRY as the shared Prometheus registry
+
+Restores persisted snapshot from Redis into metrics_collector on startup
+
+Starts background metrics sync for global aggregation
+
+/metrics returns generate_latest(REGISTRY) for unified metrics
+
+/metrics_snapshot persists combined snapshot to Redis for cross-service restore
+
+Adds RedisCircuitBreaker to isolate Redis outages
+
+Retains SSE streaming, Twilio webhook, health endpoints, and structured logging
+
+Enhanced with SSE heartbeat, connection lifecycle logging, and graceful disconnect handling
+
+Added max concurrent streams enforcement with Redis counter
+
+Implemented graceful shutdown handlers for Render scaling
+
+Enhanced structured JSON logging throughout
+
+Updated for new Render deployment with Valkey compatibility
+
+Added retry logic for inference/TTS failures
+
+Enhanced security headers and CORS
+
+Auto-recovery for Redis circuit breaker
+
+Sentry enrichment with deployment metadata
 """
 
 import json
@@ -30,6 +45,7 @@ import os
 import signal
 import atexit
 import sys
+import asyncio
 from typing import Generator, Optional, Dict, Any
 
 from flask import Flask, request, jsonify, Response, stream_with_context
@@ -44,7 +60,7 @@ except ImportError:
     # Fallback config for backward compatibility
     import os
     class config:
-        STREAM_HEARTBEAT_INTERVAL = float(os.getenv("STREAM_HEARTBEAT_INTERVAL", "25"))  # Increased for ALB/NGINX
+        STREAM_HEARTBEAT_INTERVAL = float(os.getenv("STREAM_HEARTBEAT_INTERVAL", "25")) # Increased for ALB/NGINX
         PORT = int(os.getenv("PORT", "7000"))
         MAX_CONCURRENT_STREAMS = int(os.getenv("MAX_CONCURRENT_STREAMS", "50"))
         STREAM_TIMEOUT_SECONDS = int(os.getenv("STREAM_TIMEOUT_SECONDS", "300"))
@@ -131,7 +147,7 @@ SHARED_REGISTRY = _get_registry()
 # Use default registry if shared registry isn't critical to avoid double registration
 def _get_metric_registry():
     """Get appropriate registry, defaulting to avoid double registration issues"""
-    return SHARED_REGISTRY  # Keep using shared registry for consistency
+    return SHARED_REGISTRY # Keep using shared registry for consistency
 
 METRIC_REGISTRY = _get_metric_registry()
 
@@ -151,7 +167,7 @@ def report_health_metrics(start_time, active_streams, redis_state, redis_failure
     from time import time
     import logging_utils
     import metrics_collector as mc
-
+    
     try:
         uptime_seconds = time() - start_time
         UPTIME_GAUGE.set(uptime_seconds)
@@ -160,17 +176,17 @@ def report_health_metrics(start_time, active_streams, redis_state, redis_failure
         mc.observe_latency("streaming.health_check.latency", 0.001)
 
         logging_utils.log_event(
-        service="streaming_server",
-        event="health_reported",
-        status="ok",
-        message="Health metrics reported successfully",
-        extra={
-            "uptime_seconds": uptime_seconds,
-            "active_streams": active_streams,
-            "redis_state": redis_state,
-            "redis_failures": redis_failures
-        }
-     )
+            service="streaming_server",
+            event="health_reported",
+            status="ok",
+            message="Health metrics reported successfully",
+            extra={
+                "uptime_seconds": uptime_seconds,
+                "active_streams": active_streams,
+                "redis_state": redis_state,
+                "redis_failures": redis_failures
+            }
+        )
 
     except Exception as e:
         logging_utils.log_event(
@@ -203,7 +219,7 @@ stream_events_total = Counter(
 )
 
 stream_errors_total = Counter(
-    "stream_errors_total", 
+    "stream_errors_total",
     "Total stream errors",
     ["error_type"],
     registry=METRIC_REGISTRY,
@@ -308,10 +324,11 @@ from redis_client import get_client
 # --------------------------------------------------------------------------
 # Configuration Constants
 # --------------------------------------------------------------------------
-HEARTBEAT_INTERVAL = 25  # Increased to 25s for ALB/NGINX compatibility
-CHECKPOINT_TTL = 3600    # 1 hour TTL for Redis checkpoints
-BACKPRESSURE_THRESHOLD = 1.0  # seconds for slow send detection
-HEARTBEAT_TIMEOUT = 30   # seconds for heartbeat timeout
+HEARTBEAT_INTERVAL = 25 # Increased to 25s for ALB/NGINX compatibility
+CHECKPOINT_TTL = 3600 # 1 hour TTL for Redis checkpoints
+BACKPRESSURE_THRESHOLD = 1.0 # seconds for slow send detection
+HEARTBEAT_TIMEOUT = 30 # seconds for heartbeat timeout
+
 # Clamp max concurrent streams to reasonable limits
 MAX_CONCURRENT_STREAMS = max(1, min(int(os.getenv("MAX_CONCURRENT_STREAMS", "50")), 1000))
 
@@ -333,7 +350,7 @@ def _mask_url(u: str) -> str:
         host = f"[{sp.hostname}]" if sp.hostname and ":" in sp.hostname else (sp.hostname or "")
         netloc = host + (f":{sp.port}" if sp.port else "")
         if sp.username or sp.password:
-            netloc = f"***:***@{netloc}"
+            netloc = f":@{netloc}"
         return urlunsplit((sp.scheme, netloc, sp.path, sp.query, sp.fragment))
     except Exception:
         return "<redacted>"
@@ -374,7 +391,7 @@ def with_retry(func, operation_name="unknown", max_retries=2, delay=1.0):
                     message=f"Retry attempt for {operation_name}",
                     extra={"operation": operation_name, "attempt": attempt + 1, "max_retries": max_retries, "error": str(e)},
                 )
-                time.sleep(delay * (attempt + 1))  # Exponential backoff
+            time.sleep(delay * (attempt + 1)) # Exponential backoff
 
 # --------------------------------------------------------------------------
 # Stream State Management for Recovery Checkpoints
@@ -382,11 +399,11 @@ def with_retry(func, operation_name="unknown", max_retries=2, delay=1.0):
 class StreamStateManager:
     def __init__(self):
         self.active_streams: Dict[str, Dict[str, Any]] = {}
-        self.checkpoint_interval = 30  # seconds
+        self.checkpoint_interval = 30 # seconds
         self.shutting_down = False
         # Thread lock for active_streams access
         self._lock = threading.RLock()
-        
+    
     def create_checkpoint(self, stream_id: str, state: Dict[str, Any]):
         """Store stream state checkpoint in Redis"""
         try:
@@ -456,18 +473,18 @@ class StreamStateManager:
                 extra={"stream_id": stream_id, "error": str(e)},
             )
             return None
-
+    
     def get_active_stream_count(self) -> int:
         """Get current number of active streams"""
         with self._lock:
             return len(self.active_streams)
-
+    
     def add_stream(self, session_id: str, stream_state: Dict[str, Any]) -> None:
         """Thread-safe add stream to active streams"""
         with self._lock:
             self.active_streams[session_id] = stream_state
             stream_active_connections.set(len(self.active_streams))
-
+    
     def remove_stream(self, session_id: str) -> bool:
         """Thread-safe remove stream from active streams"""
         with self._lock:
@@ -476,12 +493,12 @@ class StreamStateManager:
                 stream_active_connections.set(len(self.active_streams))
                 return True
             return False
-
+    
     def get_stream(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Thread-safe get stream state"""
         with self._lock:
             return self.active_streams.get(session_id)
-
+    
     def cleanup_all_streams(self):
         """Clean up all active streams during shutdown"""
         self.shutting_down = True
@@ -697,7 +714,7 @@ class ConcurrentStreamsManager:
             # Schedule a retry to clean up the count - USE threading.Timer consistently
             threading.Timer(5.0, self._retry_decrement).start()
             return False
-
+    
     def _retry_decrement(self):
         """Best-effort retry to decrement global count"""
         try:
@@ -741,7 +758,7 @@ class HealthMonitor:
         self.uptime_start = time.time()
         self.redis_state = "UNKNOWN"
         self.redis_failures = 0
-        
+    
     def start(self):
         """Start the health monitoring background thread"""
         if self.running:
@@ -868,7 +885,7 @@ try:
 except Exception:
     def check_r2_connectivity():
         return "not_available"
-
+    
     def check_redis_status():
         return "not_available"
 
@@ -1045,10 +1062,10 @@ def safe_redis_ping(client=None, trace_id: Optional[str] = None, session_id: Opt
     """Enhanced Redis ping with Valkey compatibility"""
     if client is None:
         client = get_client()
-        close_client = True  # Only close if we created the client
+        close_client = True # Only close if we created the client
     else:
-        close_client = False  # Don't close a client provided by caller
-        
+        close_client = False # Don't close a client provided by caller
+    
     if not client:
         log_event(
             service="streaming_server",
@@ -1128,7 +1145,7 @@ def check_heartbeat_timeout(stream_state: Dict[str, Any]) -> bool:
     last_heartbeat = stream_state.get("last_heartbeat")
     if not last_heartbeat:
         return False
-        
+    
     time_since_heartbeat = time.time() - last_heartbeat
     if time_since_heartbeat > HEARTBEAT_TIMEOUT:
         sse_heartbeat_timeouts_total.inc()
@@ -1162,7 +1179,7 @@ def metrics_endpoint():
             stream_events_total.labels(event_type="metrics_request").inc()
         except Exception:
             pass
-
+        
         # Generate unified metrics with fallback - using unified generate_latest signature
         # CRITICAL FIX: Avoid unconditional prometheus_client import that causes 500s
         try:
@@ -1215,7 +1232,7 @@ def metrics_snapshot():
             stream_events_total.labels(event_type="metrics_snapshot").inc()
         except Exception:
             pass
-
+        
         coll_snap = {}
         try:
             coll_snap = get_metrics().get_snapshot()
@@ -1326,11 +1343,11 @@ def healthz():
     
     active_streams = stream_state_mgr.get_active_stream_count()
     redis_global_count = streams_manager.get_global_count()
-    
+
     # Check actual Redis status - NO HARDCODED VALUES
     redis_ok = safe_redis_ping()
     redis_circuit_state = "CLOSED" if redis_ok else "OPEN"
-    
+
     log_event(
         service="streaming",
         event="healthz_check",
@@ -1364,7 +1381,7 @@ def health():
     # Check actual Redis status - NO HARDCODED VALUES
     redis_ok = safe_redis_ping()
     redis_circuit_state = "CLOSED" if redis_ok else "OPEN"
-    
+
     log_event(
         service="streaming",
         event="health_check",
@@ -1379,7 +1396,7 @@ def health():
             "env_mode": os.getenv("ENV_MODE", "unknown")
         }
     )
-    
+
     try:
         if redis_ok:
             return jsonify({
@@ -1477,10 +1494,8 @@ def system_status():
         }), 500
 
 # --------------------------------------------------------------------------
-
-# -----------------------------
 # Twilio Media Streams WebSocket Endpoint with Duplex Controller
-# -----------------------------
+# --------------------------------------------------------------------------
 @sock.route("/media")
 def media(ws):
     """
@@ -1497,7 +1512,8 @@ def media(ws):
     trace_id = None
     session_id = str(uuid.uuid4())
     start_ts = time.time()
-    
+    outbound_frame_sequence = 0  # Initialize early to avoid NameError in finally block
+
     log_event(
         service="streaming_server",
         event="twilio_ws_connect",
@@ -1545,16 +1561,13 @@ def media(ws):
             }
         )
 
-        # Outbound audio tracking
-        outbound_frame_sequence = 0
-        
         while True:
             # Check for outbound audio frames from controller
             if call_sid:
-                controller = controller_manager.get_controller_sync(call_sid)
+                controller = asyncio.run(controller_manager.get_controller(call_sid))
                 if controller:
                     # Poll for outbound audio frames
-                    outbound_audio = controller.get_next_outbound_frame_sync()
+                    outbound_audio = asyncio.run(controller.get_next_outbound_frame())
                     if outbound_audio:
                         # Encode and send outbound audio to Twilio
                         try:
@@ -1642,15 +1655,15 @@ def media(ws):
                 trace_id = msg.get("start", {}).get("trace_id") or new_trace()
                 
                 # Initialize duplex controller for this call
-                controller = controller_manager.get_or_create_controller_sync(
+                controller = asyncio.run(controller_manager.get_or_create_controller(
                     call_sid=call_sid or session_id,
                     trace_id=trace_id,
                     websocket=ws
-                )
+                ))
                 
                 # Enqueue greeting message
                 greeting_text = "Hey, this is Sara calling from Noblecom Solutions. Just checking you can hear me clearly on your side."
-                controller.enqueue_greeting(greeting_text)
+                asyncio.run(controller.enqueue_greeting(greeting_text))
                 
                 log_event(
                     service="streaming_server",
@@ -1676,9 +1689,9 @@ def media(ws):
                     try:
                         # Decode audio and forward to duplex controller
                         audio_bytes = base64.b64decode(b64_payload)
-                        controller = controller_manager.get_controller_sync(call_sid)
+                        controller = asyncio.run(controller_manager.get_controller(call_sid))
                         if controller:
-                            controller.handle_inbound_audio_sync(audio_bytes)
+                            asyncio.run(controller.handle_inbound_audio(audio_bytes))
                         log_event(
                             service="streaming_server",
                             event="twilio_ws_inbound_media",
@@ -1709,9 +1722,9 @@ def media(ws):
                 # Marks are optional sync points
                 mark_name = msg.get("mark", {}).get("name")
                 if mark_name and call_sid:
-                    controller = controller_manager.get_controller_sync(call_sid)
+                    controller = asyncio.run(controller_manager.get_controller(call_sid))
                     if controller:
-                        controller.handle_mark_sync(mark_name)
+                        asyncio.run(controller.handle_mark(mark_name))
                     log_event(
                         service="streaming_server",
                         event="twilio_ws_mark",
@@ -1725,10 +1738,10 @@ def media(ws):
             elif event == "stop":
                 # graceful end from Twilio
                 if call_sid:
-                    controller = controller_manager.get_controller_sync(call_sid)
+                    controller = asyncio.run(controller_manager.get_controller(call_sid))
                     if controller:
-                        controller.handle_stream_stop_sync()
-                        controller_manager.cleanup_controller_sync(call_sid)
+                        asyncio.run(controller.handle_stream_stop())
+                        asyncio.run(controller_manager.cleanup_controller(call_sid))
                 
                 log_event(
                     service="streaming_server",
@@ -1782,7 +1795,7 @@ def media(ws):
         # Cleanup
         if call_sid:
             try:
-                controller_manager.cleanup_controller_sync(call_sid)
+                asyncio.run(controller_manager.cleanup_controller(call_sid))
                 log_event(
                     service="streaming_server",
                     event="twilio_ws_controller_cleanup",
@@ -1822,16 +1835,16 @@ def media(ws):
             }
         )
 
+# --------------------------------------------------------------------------
 # SSE Streaming Endpoint with Enhanced Resilience and Retry Logic
 # --------------------------------------------------------------------------
-
 @app.route("/stream", methods=["POST"])
 def stream():
     trace_id = None
     session_id = None
     stream_start_time = time.time()
     global_count_inc = False
-
+    
     try:
         get_metrics().increment_metric("stream_requests_total", 1)
         stream_events_total.labels(event_type="stream_request").inc()
@@ -2303,7 +2316,7 @@ def stream():
 @app.route("/twilio_tts", methods=["POST"])
 def twilio_tts():
     from flask import Response as TwilioResponse
-
+    
     trace_id = new_trace()
     session_id = str(uuid.uuid4())
 
@@ -2427,7 +2440,7 @@ if __name__ == "__main__":
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, graceful_shutdown.initiate_shutdown)
     signal.signal(signal.SIGTERM, graceful_shutdown.initiate_shutdown)
-    
+
     # Initialize metrics system on startup with delay to avoid race conditions
     def _delayed_init():
         try:
@@ -2468,10 +2481,10 @@ if __name__ == "__main__":
                 status="error",
                 message=str(e)
             )
-    
+
     # Delay 5s to allow Prometheus and Redis to be ready - USE threading.Timer consistently
     threading.Timer(5.0, _delayed_init).start()
-    
+
     # Enhanced cleanup handler
     def _cleanup():
         try:
@@ -2496,7 +2509,7 @@ if __name__ == "__main__":
                 message=str(e)
             )
     atexit.register(_cleanup)
-    
+
     log_event(
         service="streaming",
         event="startup",
@@ -2510,14 +2523,14 @@ if __name__ == "__main__":
             "env_mode": os.getenv("ENV_MODE", "unknown")
         }
     )
-    
+
     log_event(
         service="streaming", 
         event="metrics_namespace",
         status="info", 
         message="Per-service metric isolation deferred to 11-G"
     )
-    
+
     # Render requires binding to $PORT; fall back to STREAMING_PORT then 5000
     port = int(os.getenv("PORT", os.getenv("STREAMING_PORT", "5000")))
     app.run(host="0.0.0.0", port=port, threaded=True)
