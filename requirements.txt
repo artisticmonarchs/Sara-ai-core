@@ -60,3 +60,4 @@ wsproto==1.2.0
 # Gunicorn WS deps used elsewhere
 h11==0.16.0
 wsproto==1.2.0
+gevent-websocket==0.10.1
