@@ -1496,6 +1496,8 @@ def system_status():
 # --------------------------------------------------------------------------
 # Twilio Media Streams WebSocket Endpoint with Duplex Controller
 # --------------------------------------------------------------------------
+from simple_websocket.errors import ConnectionClosed  # add near imports
+
 @sock.route("/media")
 def media(ws):
     """
@@ -1613,14 +1615,18 @@ def media(ws):
                             }
                         )
 
-            raw_msg = ws.receive()
-            if raw_msg is None:
+            try:
+                raw_msg = ws.receive()
+                if raw_msg is None:
+                    # client closed gracefully
+                    break
+            except ConnectionClosed as e:
                 log_event(
                     service="streaming_server",
-                    event="twilio_ws_closed",
+                    event="twilio_media_stream_closed_by_peer",
                     status="info",
-                    message="Twilio WebSocket closed (None received)",
-                    extra={"call_sid": call_sid, "stream_sid": stream_sid}
+                    message=f"Twilio closed websocket: {getattr(e, 'reason', str(e))}",
+                    extra={"call_sid": call_sid, "stream_sid": stream_sid},
                 )
                 break
 
