@@ -9,8 +9,10 @@ import time
 import uuid
 import os
 import audioop
+import queue  # ADDED: For thread-safe sync queue
 from typing import Optional, Dict, Any, Callable
 import traceback
+import threading  # ADDED: For sync method threading
 
 # Phase 12: Core imports with resilience patterns
 try:
@@ -95,6 +97,190 @@ except ImportError:
         def has_data(self) -> bool:
             return len(self.buffer) > 0
 
+# --------------------------------------------------------------------------
+# Controller Manager (Singleton) with Resilience - MOVED UP
+# --------------------------------------------------------------------------
+
+class DuplexControllerManager:
+    """
+    Phase 12: Manages multiple DuplexVoiceController instances with resilience patterns
+    """
+    
+    def __init__(self):
+        self.controllers: Dict[str, 'DuplexVoiceController'] = {}  # CHANGED: Forward reference
+        self._lock = asyncio.Lock()
+        # ADDED: Event loop for sync method execution
+        self._event_loop = None
+        self._event_loop_thread = None
+    
+    async def get_controller(self, call_sid: str, websocket, config: Optional[Dict] = None) -> 'DuplexVoiceController':  # CHANGED: Forward reference
+        """Get or create controller for call_sid with Phase 12 resilience"""
+        async with self._lock:
+            if call_sid not in self.controllers:
+                from . import DuplexVoiceController  # CHANGED: Local import to avoid circular reference
+                self.controllers[call_sid] = DuplexVoiceController(call_sid, websocket, config)
+                logger.info("New controller created", extra={
+                    "call_sid": call_sid,
+                    "service": "streaming_server",
+                    "controller": "duplex"
+                })
+            
+            return self.controllers[call_sid]
+    
+    def get_or_create_controller_sync(self, call_sid: str, stream_sid: str, trace_id: Optional[str] = None, websocket = None) -> 'DuplexVoiceController':
+        """
+        Synchronous adapter for get_or_create controller.
+        Called from Flask /media loop to attach controller to Twilio media session.
+        """
+        try:
+            # Use existing async method via thread-safe execution
+            if self._event_loop is None:
+                self._event_loop = asyncio.new_event_loop()
+                self._event_loop_thread = threading.Thread(target=self._run_event_loop, daemon=True)
+                self._event_loop_thread.start()
+            
+            # Run async method in dedicated event loop
+            future = asyncio.run_coroutine_threadsafe(
+                self.get_controller(call_sid, websocket, config={"trace_id": trace_id}),
+                self._event_loop
+            )
+            controller = future.result(timeout=5.0)
+            
+            # Persist stream_sid and metadata if not already set
+            if hasattr(controller, 'stream_sid') and not controller.stream_sid:
+                controller.stream_sid = stream_sid
+            if trace_id and hasattr(controller, 'trace_id'):
+                controller.trace_id = trace_id
+            
+            logger.info("Controller retrieved/created via sync adapter", extra={
+                "call_sid": call_sid,
+                "stream_sid": stream_sid,
+                "trace_id": trace_id,
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            
+            return controller
+            
+        except Exception as e:
+            logger.error("Error in get_or_create_controller_sync", extra={
+                "call_sid": call_sid,
+                "stream_sid": stream_sid,
+                "error": str(e),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            raise
+    
+    async def remove_controller(self, call_sid: str):
+        """Remove and cleanup controller with Phase 12 resilience"""
+        async with self._lock:
+            if call_sid in self.controllers:
+                controller = self.controllers[call_sid]
+                await controller.stop()
+                del self.controllers[call_sid]
+                logger.info("Controller removed", extra={
+                    "call_sid": call_sid,
+                    "service": "streaming_server",
+                    "controller": "duplex"
+                })
+    
+    def cleanup_controller_sync(self, call_sid: str, stream_sid: str, trace_id: Optional[str] = None):
+        """
+        Synchronous adapter for controller cleanup.
+        Called from Flask /media loop on "stop" or cleanup.
+        """
+        try:
+            # Use existing async method via thread-safe execution
+            if self._event_loop is None:
+                self._event_loop = asyncio.new_event_loop()
+                self._event_loop_thread = threading.Thread(target=self._run_event_loop, daemon=True)
+                self._event_loop_thread.start()
+            
+            # Check if controller exists before attempting removal
+            if call_sid in self.controllers:
+                # Call stop_sync on controller first
+                controller = self.controllers[call_sid]
+                if hasattr(controller, 'stop_sync'):
+                    controller.stop_sync()
+                
+                # Then remove from manager
+                future = asyncio.run_coroutine_threadsafe(
+                    self.remove_controller(call_sid),
+                    self._event_loop
+                )
+                future.result(timeout=5.0)
+                
+                logger.info("Controller cleaned up via sync adapter", extra={
+                    "call_sid": call_sid,
+                    "stream_sid": stream_sid,
+                    "trace_id": trace_id,
+                    "service": "streaming_server",
+                    "controller": "duplex"
+                })
+            else:
+                logger.debug("Controller already removed, skipping cleanup", extra={
+                    "call_sid": call_sid,
+                    "stream_sid": stream_sid,
+                    "service": "streaming_server",
+                    "controller": "duplex"
+                })
+                
+        except Exception as e:
+            logger.error("Error in cleanup_controller_sync", extra={
+                "call_sid": call_sid,
+                "stream_sid": stream_sid,
+                "error": str(e),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            # Don't raise - cleanup should be best-effort
+    
+    def _run_event_loop(self):
+        """Run dedicated event loop for sync method execution"""
+        asyncio.set_event_loop(self._event_loop)
+        self._event_loop.run_forever()
+    
+    def get_active_controllers(self) -> Dict[str, Dict[str, Any]]:
+        """Get status of all active controllers with resilience information"""
+        return {
+            call_sid: controller.get_status()
+            for call_sid, controller in self.controllers.items()
+        }
+    
+    async def get_controller_heartbeat(self, call_sid: str) -> Optional[Dict[str, Any]]:
+        """Get heartbeat for specific controller with resilience checks"""
+        if call_sid in self.controllers:
+            return await self.controllers[call_sid].heartbeat()
+        return None
+
+    async def health_check(self) -> Dict[str, Any]:
+        """Health check for controller manager with Phase 12 resilience"""
+        try:
+            active_controllers = len(self.controllers)
+            circuit_breaker_open = _is_circuit_breaker_open("duplex_controller")
+            
+            status = "healthy"
+            if circuit_breaker_open:
+                status = "degraded"
+            
+            return {
+                "service": "duplex_controller_manager",
+                "status": status,
+                "active_controllers": active_controllers,
+                "circuit_breaker_open": circuit_breaker_open
+            }
+        except Exception as e:
+            return {
+                "service": "duplex_controller_manager",
+                "status": "unhealthy",
+                "error": str(e)
+            }
+
+
+# Phase 12: Global manager instance - MOVED UP
+controller_manager = DuplexControllerManager()
+
 # Phase 12: Circuit breaker check
 def _is_circuit_breaker_open(service: str = "duplex_controller") -> bool:
     """Check if circuit breaker is open for duplex operations"""
@@ -124,10 +310,11 @@ def _check_idempotency_key(operation_id: str) -> bool:
             return True
             
         # Set key with 1-hour TTL
-        redis_client.setex(idempotency_key, 3600, "executed")
+        redis_client.setex(idempotencyency_key, 3600, "executed")
         return False
     except Exception:
         return False
+
 
 # --------------------------------------------------------------------------
 # DuplexVoiceController Class
@@ -179,8 +366,13 @@ class DuplexVoiceController:
         # Phase 12: Per-call state for inbound/outbound audio bridging
         self.jitter_buffer = JitterBuffer()  # Inbound buffer for STT
         self.outbound_frames = asyncio.Queue()  # Thread-safe queue of PCM frames for Twilio
-        self._sync_outbound_frames = asyncio.Queue()  # Mirror queue for sync access
+        self._sync_outbound_frames = queue.Queue(maxsize=1000)  # CHANGED: Thread-safe queue.Queue for sync access
         self.greeting_sent = False  # Flag to track if initial greeting has been sent
+        
+        # ADDED: Stream metadata and event loop for sync methods
+        self.stream_sid = None
+        self._sync_event_loop = None
+        self._sync_event_loop_thread = None
         
         logger.info("DuplexVoiceController initialized", extra={
             "call_sid": call_sid,
@@ -199,6 +391,7 @@ class DuplexVoiceController:
         Static method to get controller instance for compatibility with existing code.
         Uses the global controller_manager to ensure consistent access patterns.
         """
+        # CHANGED: Access the global controller_manager that's now defined above
         return await controller_manager.get_controller(call_sid, websocket, config)
     
     @staticmethod
@@ -233,6 +426,132 @@ class DuplexVoiceController:
             "service": "streaming_server",
             "controller": "duplex"
         })
+    
+    # --------------------------------------------------------------------------
+    # Phase 12: Sync Adapter Methods for Server Calls
+    # --------------------------------------------------------------------------
+    
+    def handle_inbound_audio_sync(self, pcm_bytes: bytes):
+        """
+        Synchronous adapter for inbound audio processing.
+        Called from Flask /media loop when Twilio sends "media" frames.
+        Non-blocking - schedules async processing.
+        """
+        try:
+            # Schedule async processing without blocking
+            if self._sync_event_loop is None:
+                self._sync_event_loop = asyncio.new_event_loop()
+                self._sync_event_loop_thread = threading.Thread(
+                    target=self._run_sync_event_loop,
+                    daemon=True
+                )
+                self._sync_event_loop_thread.start()
+            
+            # Schedule async processing
+            asyncio.run_coroutine_threadsafe(
+                self.handle_inbound_audio(pcm_bytes),
+                self._sync_event_loop
+            )
+            
+        except Exception as e:
+            logger.error("Error in handle_inbound_audio_sync", extra={
+                "call_sid": self.call_sid,
+                "error": str(e),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+    
+    def next_outbound_frame_sync(self, timeout_ms: int = 100) -> Optional[bytes]:
+        """
+        Synchronous adapter for outbound frame retrieval.
+        Called from Flask /media loop to get audio for Twilio.
+        Returns μ-law 8 kHz frame or None if timeout.
+        """
+        try:
+            # Use thread-safe queue for sync access
+            return self._sync_outbound_frames.get(timeout=timeout_ms / 1000.0)
+        except queue.Empty:
+            return None
+        except Exception as e:
+            logger.error("Error in next_outbound_frame_sync", extra={
+                "call_sid": self.call_sid,
+                "error": str(e),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            return None
+    
+    def enqueue_greeting_sync(self, text: str):
+        """
+        Synchronous adapter for greeting enqueue.
+        Called from Flask /media loop after "start" event.
+        Non-blocking - schedules async processing.
+        """
+        try:
+            # Schedule async processing without blocking
+            if self._sync_event_loop is None:
+                self._sync_event_loop = asyncio.new_event_loop()
+                self._sync_event_loop_thread = threading.Thread(
+                    target=self._run_sync_event_loop,
+                    daemon=True
+                )
+                self._sync_event_loop_thread.start()
+            
+            # Schedule async processing
+            asyncio.run_coroutine_threadsafe(
+                self.enqueue_greeting_if_needed(),
+                self._sync_event_loop
+            )
+            
+        except Exception as e:
+            logger.error("Error in enqueue_greeting_sync", extra={
+                "call_sid": self.call_sid,
+                "error": str(e),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+    
+    def stop_sync(self):
+        """
+        Synchronous adapter for controller shutdown.
+        Called from Flask /media loop on "stop" or cleanup.
+        """
+        try:
+            # Schedule async stop and wait for completion
+            if self._sync_event_loop is None:
+                self._sync_event_loop = asyncio.new_event_loop()
+                self._sync_event_loop_thread = threading.Thread(
+                    target=self._run_sync_event_loop,
+                    daemon=True
+                )
+                self._sync_event_loop_thread.start()
+            
+            # Schedule async stop
+            future = asyncio.run_coroutine_threadsafe(
+                self.stop(),
+                self._sync_event_loop
+            )
+            future.result(timeout=10.0)  # Wait for stop to complete
+            
+            logger.info("Controller stopped via sync adapter", extra={
+                "call_sid": self.call_sid,
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            
+        except Exception as e:
+            logger.error("Error in stop_sync", extra={
+                "call_sid": self.call_sid,
+                "error": str(e),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            # Don't raise - cleanup should be best-effort
+    
+    def _run_sync_event_loop(self):
+        """Run dedicated event loop for sync method execution"""
+        asyncio.set_event_loop(self._sync_event_loop)
+        self._sync_event_loop.run_forever()
     
     # --------------------------------------------------------------------------
     # Phase 12: Outbound Methods (TTS → Twilio)
@@ -296,7 +615,17 @@ class DuplexVoiceController:
                 
                 # Enqueue frame for outbound streaming
                 await self.outbound_frames.put(twilio_frame)
-                await self._sync_outbound_frames.put(twilio_frame)
+                # CHANGED: Use thread-safe queue.put_nowait for sync queue
+                try:
+                    self._sync_outbound_frames.put_nowait(twilio_frame)
+                except queue.Full:
+                    # Drop frame if queue is full (backpressure)
+                    logger.warning("Sync outbound queue full, dropping frame", extra={
+                        "call_sid": self.call_sid,
+                        "queue_size": self._sync_outbound_frames.qsize(),
+                        "service": "streaming_server",
+                        "controller": "duplex"
+                    })
                 
                 logger.debug("TTS frame enqueued", extra={
                     "call_sid": self.call_sid,
@@ -352,25 +681,7 @@ class DuplexVoiceController:
                 "controller": "duplex"
             })
             return None
-    
-    def next_outbound_frame_sync(self, timeout_ms: int = 100) -> Optional[bytes]:
-        """
-        Synchronous version for Twilio media session access.
-        Returns next outbound frame or None if timeout.
-        """
-        try:
-            # Use the mirror queue for synchronous access
-            frame = asyncio.run_coroutine_threadsafe(
-                asyncio.wait_for(
-                    self._sync_outbound_frames.get(),
-                    timeout=timeout_ms / 1000.0
-                ),
-                asyncio.get_event_loop()
-            ).result(timeout=(timeout_ms + 50) / 1000.0)
-            return frame
-        except Exception as e:
-            return None
-    
+        
     # --------------------------------------------------------------------------
     # Phase 12: Inbound Methods (Twilio → STT)
     # --------------------------------------------------------------------------
@@ -641,8 +952,8 @@ class DuplexVoiceController:
                     except (asyncio.CancelledError, asyncio.TimeoutError):
                         pass
                 
-                # Send silence or stop marker to WebSocket (AI→Twilio)
-                await self._send_silence_frame()
+                # CHANGED: Do not send Twilio JSON frames from controller
+                # Server will handle sending silence frames
                 
                 self.last_interruption_time = time.time()
                 
@@ -999,8 +1310,8 @@ class DuplexVoiceController:
                 if not self.is_playing or not self.is_active:
                     break
                 
-                # Send audio frame to Twilio WebSocket
-                await self._send_audio_frame(audio_frame)
+                # CHANGED: Do not send Twilio JSON frames from controller
+                # Only enqueue raw PCM frames for server to handle
                 
                 # Also enqueue to Twilio outbound queue if session is available
                 if self.twilio_media_session and hasattr(self.twilio_media_session, 'enqueue_outbound_frame'):
@@ -1191,51 +1502,20 @@ class DuplexVoiceController:
             })
     
     # --------------------------------------------------------------------------
-    # WebSocket Communication with Resilience
+    # WebSocket Communication with Resilience - CHANGED: Removed Twilio JSON sending
     # --------------------------------------------------------------------------
     
     async def _send_audio_frame(self, audio_data: bytes):
         """Send audio frame to Twilio WebSocket with resilience"""
-        try:
-            if self.websocket and not self.websocket.closed:
-                # Twilio MediaStream format - use base64 encoding for PCM audio
-                import base64
-                message = {
-                    "event": "media",
-                    "streamSid": self.call_sid,
-                    "media": {
-                        "payload": base64.b64encode(audio_data).decode('utf-8')  # Convert to base64 string
-                    }
-                }
-                await self.websocket.send(json.dumps(message))
-        except Exception as e:
-            logger.error("Error sending audio frame", extra={
-                "call_sid": self.call_sid,
-                "error": str(e),
-                "service": "streaming_server",
-                "controller": "duplex"
-            })
+        # CHANGED: Do not send Twilio JSON frames from controller
+        # Server will handle sending appropriate frames
+        pass
     
     async def _send_silence_frame(self):
         """Send silence frame to immediately stop audio with resilience"""
-        try:
-            if self.websocket and not self.websocket.closed:
-                # Send empty media packet or silence
-                silence_message = {
-                    "event": "media", 
-                    "streamSid": self.call_sid,
-                    "media": {
-                        "payload": ""  # Empty payload for silence
-                    }
-                }
-                await self.websocket.send(json.dumps(silence_message))
-        except Exception as e:
-            logger.error("Error sending silence frame", extra={
-                "call_sid": self.call_sid,
-                "error": str(e),
-                "service": "streaming_server",
-                "controller": "duplex"
-            })
+        # CHANGED: Do not send Twilio JSON frames from controller
+        # Server will handle sending silence frames
+        pass
     
     # --------------------------------------------------------------------------
     # State Persistence with Resilience
@@ -1378,83 +1658,3 @@ class DuplexVoiceController:
             "outbound_queue_size": self.outbound_frames.qsize(),
             "jitter_buffer_has_data": self.jitter_buffer.has_data()
         }
-
-
-# --------------------------------------------------------------------------
-# Controller Manager (Singleton) with Resilience
-# --------------------------------------------------------------------------
-
-class DuplexControllerManager:
-    """
-    Phase 12: Manages multiple DuplexVoiceController instances with resilience patterns
-    """
-    
-    def __init__(self):
-        self.controllers: Dict[str, DuplexVoiceController] = {}
-        self._lock = asyncio.Lock()
-    
-    async def get_controller(self, call_sid: str, websocket, config: Optional[Dict] = None) -> DuplexVoiceController:
-        """Get or create controller for call_sid with Phase 12 resilience"""
-        async with self._lock:
-            if call_sid not in self.controllers:
-                self.controllers[call_sid] = DuplexVoiceController(call_sid, websocket, config)
-                logger.info("New controller created", extra={
-                    "call_sid": call_sid,
-                    "service": "streaming_server",
-                    "controller": "duplex"
-                })
-            
-            return self.controllers[call_sid]
-    
-    async def remove_controller(self, call_sid: str):
-        """Remove and cleanup controller with Phase 12 resilience"""
-        async with self._lock:
-            if call_sid in self.controllers:
-                controller = self.controllers[call_sid]
-                await controller.stop()
-                del self.controllers[call_sid]
-                logger.info("Controller removed", extra={
-                    "call_sid": call_sid,
-                    "service": "streaming_server",
-                    "controller": "duplex"
-                })
-    
-    def get_active_controllers(self) -> Dict[str, Dict[str, Any]]:
-        """Get status of all active controllers with resilience information"""
-        return {
-            call_sid: controller.get_status()
-            for call_sid, controller in self.controllers.items()
-        }
-    
-    async def get_controller_heartbeat(self, call_sid: str) -> Optional[Dict[str, Any]]:
-        """Get heartbeat for specific controller with resilience checks"""
-        if call_sid in self.controllers:
-            return await self.controllers[call_sid].heartbeat()
-        return None
-
-    async def health_check(self) -> Dict[str, Any]:
-        """Health check for controller manager with Phase 12 resilience"""
-        try:
-            active_controllers = len(self.controllers)
-            circuit_breaker_open = _is_circuit_breaker_open("duplex_controller")
-            
-            status = "healthy"
-            if circuit_breaker_open:
-                status = "degraded"
-            
-            return {
-                "service": "duplex_controller_manager",
-                "status": status,
-                "active_controllers": active_controllers,
-                "circuit_breaker_open": circuit_breaker_open
-            }
-        except Exception as e:
-            return {
-                "service": "duplex_controller_manager",
-                "status": "unhealthy",
-                "error": str(e)
-            }
-
-
-# Phase 12: Global manager instance
-controller_manager = DuplexControllerManager()
