@@ -9,6 +9,7 @@ import uuid
 import time
 import asyncio
 import json
+import httpx
 from typing import AsyncGenerator, Optional, Dict, Any
 from openai import OpenAI, AsyncOpenAI
 from logging_utils import log_event
@@ -53,11 +54,11 @@ except ImportError:
     class Config:
         OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
         OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
-        # Pick OPENAI_BASE_URL first, then OPENAI_API_URL, default to Responses API:
+        # Pick OPENAI_BASE_URL first, then OPENAI_API_URL, default to API root:
         OPENAI_BASE_URL = (
             os.getenv("OPENAI_BASE_URL")
             or os.getenv("OPENAI_API_URL")
-            or "https://api.openai.com/v1/responses"
+            or "https://api.openai.com/v1"
         )
         MODEL_VERSION = os.getenv("MODEL_VERSION", "v2")
         GPT_MAX_TOKENS = int(os.getenv("GPT_MAX_TOKENS", "1000"))
@@ -180,12 +181,9 @@ def _validate_prompt_size(prompt: str, trace_id: str | None = None) -> tuple[boo
 # --------------------------------------------------------------------------
 def _use_responses_api() -> bool:
     """
-    We use Responses API if the env/base url includes '/responses'
-    OR an explicit flag is set. Client base_url should remain at '/v1'.
+    We use Responses API based on explicit flag only.
     """
-    base = os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_URL", "")
-    flag = os.getenv("USE_OPENAI_RESPONSES", "").lower() in ("1", "true", "yes")
-    return flag or base.rstrip("/").endswith("/responses")
+    return os.getenv("USE_OPENAI_RESPONSES", "").lower() in ("1", "true", "yes")
 
 USE_RESPONSES = _use_responses_api()
 
@@ -217,13 +215,13 @@ def _extract_from_responses(data) -> str:
     return ""
 
 # --------------------------------------------------------------------------
-# Environment & Safety Fixes
+# Environment & Safety Fixes - OPTIONAL proxy disabling
 # --------------------------------------------------------------------------
-# Render and some CI/CD environments inject proxy variables automatically.
-# These break the new OpenAI SDK (v1.0+), which does not support proxies.
-for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-    if key in os.environ:
-        del os.environ[key]
+# Optionally disable proxy env vars for OpenAI only (doesn't affect other clients)
+# Gate this behind an explicit flag to avoid breaking other network clients
+if os.getenv("OPENAI_DISABLE_PROXY", "0").lower() in ("1", "true", "yes"):
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        os.environ.pop(key, None)
         # record this environment mutation for diagnostics
         log_event(
             service="gpt_client", 
@@ -243,39 +241,101 @@ class RetryConfig:
     BACKOFF_FACTOR = 2.0
 
 # --------------------------------------------------------------------------
-# OpenAI Client Initialization
+# OpenAI Client Initialization - LAZY LOADING VERSION
 # --------------------------------------------------------------------------
-# Explicit API key validation before client initialization
-if not getattr(Config, 'OPENAI_API_KEY', None):
-    raise EnvironmentError("Missing OPENAI_API_KEY in environment or config.py")
+# Globals that other functions in this module already reference
+client: Optional[OpenAI] = None
+async_client: Optional[AsyncOpenAI] = None
 
-ROOT_BASE_URL = (os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_URL") or "https://api.openai.com/v1")
-# Normalize to the root (strip trailing '/responses' if present)
-if ROOT_BASE_URL.rstrip("/").endswith("/responses"):
-    ROOT_BASE_URL = ROOT_BASE_URL.rsplit("/responses", 1)[0]
+def _build_httpx_clients(timeout_s: float):
+    """
+    Build sync/async httpx clients only if proxy env vars are set.
+    OpenAI SDK v1.x does NOT accept `proxies=` directly; it accepts
+    an httpx client via `http_client=...`.
+    """
+    proxy = os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")
+    if not proxy:
+        return None, None
 
-try:
-    # Synchronous client for non-streaming operations
-    client = OpenAI(
-        api_key=Config.OPENAI_API_KEY,
-        base_url=ROOT_BASE_URL,
-        timeout=getattr(Config, 'GPT_TIMEOUT', 30),
-    )
-    # Async client for streaming operations
-    async_client = AsyncOpenAI(
-        api_key=Config.OPENAI_API_KEY,
-        base_url=ROOT_BASE_URL,
-        timeout=getattr(Config, 'GPT_TIMEOUT', 30),
-    )
-except Exception as e:
-    # Replace logging.exception with structured logging
+    # NOTE: httpx accepts a mapping or a single string for `proxies`
+    sync_http = httpx.Client(proxies=proxy, timeout=timeout_s)
+    async_http = httpx.AsyncClient(proxies=proxy, timeout=timeout_s)
+    return sync_http, async_http
+
+def _get_base_url() -> Optional[str]:
+    # Support both names you used across the codebase/envs
+    base = os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_URL")
+    if base:
+        return base.rstrip("/")
+    return None
+
+def _ensure_clients():
+    """
+    Lazily (re)build the OpenAI clients exactly once.
+    Safe to call repeatedly.
+    """
+    global client, async_client
+
+    if client is not None and async_client is not None:
+        return
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        # Don't crash import; just log a clear message.
+        log_event(
+            service="gpt_client",
+            event="client_init_skipped",
+            status="warn",
+            message="OPENAI_API_KEY not set; client will be initialized when provided."
+        )
+        # Leave clients as None; callers should handle this gracefully.
+        return
+
+    timeout_s = float(os.getenv("GPT_TIMEOUT", "30"))
+    base_url = _get_base_url()
+
+    sync_http, async_http = _build_httpx_clients(timeout_s)
+
+    # Build clients. Only pass http_client if we actually created one for proxies.
+    client_kwargs = {"api_key": api_key}
+    async_kwargs = {"api_key": api_key}
+
+    if base_url:
+        client_kwargs["base_url"] = base_url
+        async_kwargs["base_url"] = base_url
+
+    if sync_http:
+        client_kwargs["http_client"] = sync_http
+    if async_http:
+        async_kwargs["http_client"] = async_http
+
+    try:
+        _client = OpenAI(**client_kwargs)
+        _async_client = AsyncOpenAI(**async_kwargs)
+    except Exception as e:
+        # Do NOT crash at import time anywhere. Just log.
+        log_event(
+            service="gpt_client",
+            event="client_init_failed",
+            status="error",
+            message=f"Failed to initialize OpenAI client: {e}"
+        )
+        # Keep them None so the rest of the app can still boot
+        return
+
+    client = _client
+    async_client = _async_client
     log_event(
         service="gpt_client",
-        event="client_init",
-        status="error",
-        message=f"Failed to initialize OpenAI client: {e}"
+        event="client_init_ok",
+        status="info",
+        message="OpenAI clients initialized",
+        extra={
+            "base_url": base_url or "default",
+            "timeout_s": timeout_s,
+            "proxy_enabled": bool(sync_http or async_http)
+        }
     )
-    raise RuntimeError(f"OpenAI client init failed: {e}")
 
 # --------------------------------------------------------------------------
 # Token Latency Tracking
@@ -408,6 +468,11 @@ async def generate_reply(prompt: str, trace_id: str | None = None, persona: str 
     )
 
     try:
+        # Ensure clients are initialized
+        _ensure_clients()
+        if async_client is None:
+            raise RuntimeError("OpenAI client not initialized - check OPENAI_API_KEY")
+        
         # Use client.with_options for explicit per-call timeout enforcement (seconds)
         timeout_client = async_client.with_options(timeout=getattr(Config, 'GPT_TIMEOUT', 30))
         
@@ -570,6 +635,11 @@ async def generate_reply_streaming(
     latency_tracker.start()
 
     try:
+        # Ensure clients are initialized
+        _ensure_clients()
+        if async_client is None:
+            raise RuntimeError("OpenAI client not initialized - check OPENAI_API_KEY")
+        
         # Use client.with_options for explicit per-call timeout enforcement (seconds)
         timeout_client = async_client.with_options(timeout=getattr(Config, 'GPT_TIMEOUT', 30))
         
@@ -726,6 +796,18 @@ async def validate_gpt_connection(trace_id: str | None = None) -> bool:
     """
     trace_id = trace_id or str(uuid.uuid4())
     try:
+        # Ensure clients are initialized
+        _ensure_clients()
+        if async_client is None:
+            log_event(
+                service="gpt_client",
+                event="connection_validation_failed",
+                status="error",
+                message="OpenAI client not initialized - check OPENAI_API_KEY",
+                trace_id=trace_id
+            )
+            return False
+        
         # Test with a simple prompt
         test_prompt = "Hello, respond with just 'OK'"
         
@@ -780,6 +862,18 @@ async def validate_gpt_streaming(trace_id: str | None = None) -> bool:
     """
     trace_id = trace_id or str(uuid.uuid4())
     try:
+        # Ensure clients are initialized
+        _ensure_clients()
+        if async_client is None:
+            log_event(
+                service="gpt_client",
+                event="streaming_validation_failed",
+                status="error",
+                message="OpenAI client not initialized - check OPENAI_API_KEY",
+                trace_id=trace_id
+            )
+            return False
+        
         test_prompt = "Say OK"
         async for token in generate_reply_streaming(test_prompt, trace_id):
             if "OK" in token.upper():
