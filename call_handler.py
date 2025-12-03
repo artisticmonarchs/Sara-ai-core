@@ -350,6 +350,9 @@ def handle_call_event(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Handle lifecycle events (status updates) from Twilio or internal sources.
     Expected keys: CallSid, CallStatus, Timestamp (optional)
+    
+    Intended to be called from a unified /twilio/events endpoint.
+    Handles call-level side effects: persisting status, storing recording URLs, etc.
     """
     trace_id = get_trace_id()
     sentry = _get_sentry_utils()

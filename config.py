@@ -141,7 +141,8 @@ class Config:
     STREAM_HEALTH_INTERVAL_SEC: int = _to_int(os.getenv("STREAM_HEALTH_INTERVAL_SEC"), 5)
 
     # Twilio MediaStream Configuration - NEW
-    TWILIO_MEDIA_WS_URL: str = os.getenv("TWILIO_MEDIA_WS_URL", "wss://your-streaming-server.example.com/media")
+    TWILIO_MEDIA_WS_URL: str = os.getenv("TWILIO_MEDIA_WS_URL", 
+                                         f"{os.getenv('APP_BASE_URL', 'wss://your-streaming-server.example.com').replace('https://', 'wss://').replace('http://', 'ws://')}/media")
     DUPLEX_STREAMING_ENABLED: bool = _to_bool(os.getenv("DUPLEX_STREAMING_ENABLED", "true"), True)
     
     # MediaStream buffer and queue settings - NEW

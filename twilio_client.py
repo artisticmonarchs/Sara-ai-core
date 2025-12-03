@@ -215,6 +215,16 @@ def _init_twilio_client():
                       message="Twilio credentials missing in environment")
         return None
     _twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    
+    # One-time sanity log to verify URLs
+    _structured_log("twilio_client_initialized", level="INFO",
+                  message="Twilio client initialized with canonical URLs",
+                  extra={
+                      "twilio_answer_url": TWILIO_ANSWER_URL,
+                      "status_callback_url": STATUS_CALLBACK_URL,
+                      "app_base_url": APP_BASE_URL
+                  })
+    
     return _twilio_client
 
 # Basic E.164 check (conservative)

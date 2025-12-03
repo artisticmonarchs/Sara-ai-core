@@ -1061,7 +1061,7 @@ class OutboundDialer:
     
     def _get_status_callback_url(self, lead: Lead) -> str:
         """Generate status callback URL for Twilio"""
-        return f"{Config.STATUS_WEBHOOK_BASE}/twilio/status?lead_id={lead.lead_id}&campaign_id={lead.campaign_id}"
+        return f"{Config.STATUS_WEBHOOK_BASE}/twilio/events?lead_id={lead.lead_id}&campaign_id={lead.campaign_id}"
     
     # --------------------------------------------------------------------------
     # Call Lifecycle Management
@@ -1301,4 +1301,4 @@ async def shutdown_outbound_dialer():
     global _dialer_instance
     if _dialer_instance:
         await _dialer_instance.stop()
-        _dialer_instance = None
+        _ialer_instance = None

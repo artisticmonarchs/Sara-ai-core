@@ -216,9 +216,10 @@ def twilio_answer():
             # <Connect><Stream/></Connect> is the blocking verb required for full-duplex
             with r.connect() as c:
                 c.stream(url=_ws_url.strip())
+            return str(r), "streaming"
         else:
             r.say("Hello, this is Sara. Please hold while we connect.")
-        return str(r)
+            return str(r), "say_only"
 
     # Hard fallback: static XML with <Connect><Stream/></Connect>
     def _emit_static_twiml(_ws_url: str | None) -> str:
@@ -228,20 +229,30 @@ def twilio_answer():
   <Connect>
     <Stream url="{_ws_url.strip()}"/>
   </Connect>
-</Response>"""
-        return '<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice">Hello, this is Sara. Please hold while we connect.</Say></Response>'
+</Response>""", "streaming"
+        return '<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice">Hello, this is Sara. Please hold while we connect.</Say></Response>', "say_only"
 
     # Try SDK path first; if anything goes wrong, fall back to static XML
     try:
-        twiml_xml = _emit_twiml_with_sdk(ws_url)
+        twiml_xml, twiml_type = _emit_twiml_with_sdk(ws_url)
         _structured_log("twilio_answer_twiML_emitted", level="info",
-                        message="Emitted TwiML (SDK)", trace_id=trace_id, media_ws_url=ws_url)
+                        message="Emitted TwiML (SDK)", 
+                        trace_id=trace_id, 
+                        media_ws_url=ws_url,
+                        twiml_type=twiml_type,
+                        using_streaming_twiml=(twiml_type == "streaming"))
     except Exception as e:
         capture_exception_safe(e, {"service": __service__, "trace_id": trace_id})
         _structured_log("twilio_answer_sdk_error", level="error",
                         message="SDK TwiML generation failed; falling back to static XML",
                         trace_id=trace_id, error=str(e))
-        twiml_xml = _emit_static_twiml(ws_url)
+        twiml_xml, twiml_type = _emit_static_twiml(ws_url)
+        _structured_log("twilio_answer_fallback_twiML", level="info",
+                        message="Emitted fallback TwiML (static)",
+                        trace_id=trace_id,
+                        media_ws_url=ws_url,
+                        twiml_type=twiml_type,
+                        using_streaming_twiml=(twiml_type == "streaming"))
 
     # Always return 200 + application/xml
     return Response(twiml_xml, status=200, mimetype="application/xml")
@@ -268,9 +279,14 @@ def twilio_events():
             }), 200
         
         payload = request.form.to_dict() if request.form else {}
+        # Enhanced logging with call details
         _structured_log("twilio_status_webhook", level="info",
                       message="Received Twilio status webhook",
-                      trace_id=trace_id, **payload)
+                      trace_id=trace_id, 
+                      call_sid=payload.get('CallSid'),
+                      call_status=payload.get('CallStatus'),
+                      callback_type=payload.get('CallStatus') and "status_callback" or "event_callback",
+                      **{k: v for k, v in payload.items() if k not in ['CallSid', 'CallStatus']})
         return ("", 204)
     except Exception as e:
         _structured_log("twilio_events_error", level="error",

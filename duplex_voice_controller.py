@@ -10,7 +10,7 @@ import uuid
 import os
 import audioop
 import queue  # ADDED: For thread-safe sync queue
-from typing import Optional, Dict, Any, Callable
+from typing import Optional, Dict, Any, Callable, List
 import traceback
 import threading  # ADDED: For sync method threading
 
@@ -139,17 +139,27 @@ class DuplexControllerManager:
                 self._event_loop_thread = threading.Thread(target=self._run_event_loop, daemon=True)
                 self._event_loop_thread.start()
             
+            # CHANGED: Handle case where websocket is None (Flask media handler)
+            # Create a minimal websocket-like object if None
+            ws_for_controller = websocket
+            if ws_for_controller is None:
+                class MinimalWebSocket:
+                    def __init__(self):
+                        self.closed = False
+                    async def close(self):
+                        self.closed = True
+                ws_for_controller = MinimalWebSocket()
+            
             # Run async method in dedicated event loop
             future = asyncio.run_coroutine_threadsafe(
-                self.get_controller(call_sid, websocket, config={"trace_id": trace_id}),
+                self.get_controller(call_sid, ws_for_controller, config={"trace_id": trace_id}),
                 self._event_loop
             )
             controller = future.result(timeout=5.0)
             
-            # Persist stream_sid and metadata if not already set
-            if hasattr(controller, 'stream_sid') and not controller.stream_sid:
-                controller.stream_sid = stream_sid
-            if trace_id and hasattr(controller, 'trace_id'):
+            # CHANGED: Always set stream_sid and metadata
+            controller.stream_sid = stream_sid
+            if trace_id:
                 controller.trace_id = trace_id
             
             logger.info("Controller retrieved/created via sync adapter", extra={
@@ -157,7 +167,8 @@ class DuplexControllerManager:
                 "stream_sid": stream_sid,
                 "trace_id": trace_id,
                 "service": "streaming_server",
-                "controller": "duplex"
+                "controller": "duplex",
+                "event": "duplex_controller_created"  # ADDED: Explicit event marker
             })
             
             return controller
@@ -310,7 +321,7 @@ def _check_idempotency_key(operation_id: str) -> bool:
             return True
             
         # Set key with 1-hour TTL
-        redis_client.setex(idempotencyency_key, 3600, "executed")
+        redis_client.setex(idempotency_key, 3600, "executed")
         return False
     except Exception:
         return False
@@ -374,11 +385,17 @@ class DuplexVoiceController:
         self._sync_event_loop = None
         self._sync_event_loop_thread = None
         
+        # ADDED: Inbound queue for non-blocking audio processing
+        self._inbound_queue = queue.Queue(maxsize=1000)
+        self._inbound_worker_task = None
+        self._closed = False  # ADDED: Closed flag for lifecycle management
+        
         logger.info("DuplexVoiceController initialized", extra={
             "call_sid": call_sid,
             "trace_id": self.trace_id,
             "service": "streaming_server",
-            "controller": "duplex"
+            "controller": "duplex",
+            "event": "duplex_controller_initialized"  # ADDED: Explicit event marker
         })
     
     # --------------------------------------------------------------------------
@@ -438,7 +455,22 @@ class DuplexVoiceController:
         Non-blocking - schedules async processing.
         """
         try:
-            # Schedule async processing without blocking
+            if self._closed:
+                return
+            
+            # Push pcm_bytes into thread-safe inbound queue
+            try:
+                self._inbound_queue.put_nowait(pcm_bytes)
+            except queue.Full:
+                # Drop frame if queue is full (backpressure)
+                logger.warning("Inbound queue full, dropping audio frame", extra={
+                    "call_sid": self.call_sid,
+                    "queue_size": self._inbound_queue.qsize(),
+                    "service": "streaming_server",
+                    "controller": "duplex"
+                })
+            
+            # Schedule async processing on dedicated event loop
             if self._sync_event_loop is None:
                 self._sync_event_loop = asyncio.new_event_loop()
                 self._sync_event_loop_thread = threading.Thread(
@@ -447,11 +479,12 @@ class DuplexVoiceController:
                 )
                 self._sync_event_loop_thread.start()
             
-            # Schedule async processing
-            asyncio.run_coroutine_threadsafe(
-                self.handle_inbound_audio(pcm_bytes),
-                self._sync_event_loop
-            )
+            # Start inbound worker if not already running
+            if self._inbound_worker_task is None or self._inbound_worker_task.done():
+                self._inbound_worker_task = asyncio.run_coroutine_threadsafe(
+                    self._inbound_worker(),
+                    self._sync_event_loop
+                )
             
         except Exception as e:
             logger.error("Error in handle_inbound_audio_sync", extra={
@@ -461,15 +494,18 @@ class DuplexVoiceController:
                 "controller": "duplex"
             })
     
-    def next_outbound_frame_sync(self, timeout_ms: int = 100) -> Optional[bytes]:
+    def next_outbound_frame_sync(self, timeout_ms: int = 0) -> Optional[bytes]:
         """
         Synchronous adapter for outbound frame retrieval.
         Called from Flask /media loop to get audio for Twilio.
         Returns μ-law 8 kHz frame or None if timeout.
         """
         try:
-            # Use thread-safe queue for sync access
-            return self._sync_outbound_frames.get(timeout=timeout_ms / 1000.0)
+            if self._closed:
+                return None
+            
+            timeout_sec = timeout_ms / 1000.0
+            return self._sync_outbound_frames.get(timeout=timeout_sec)
         except queue.Empty:
             return None
         except Exception as e:
@@ -488,6 +524,9 @@ class DuplexVoiceController:
         Non-blocking - schedules async processing.
         """
         try:
+            if self._closed:
+                return
+            
             # Schedule async processing without blocking
             if self._sync_event_loop is None:
                 self._sync_event_loop = asyncio.new_event_loop()
@@ -517,21 +556,32 @@ class DuplexVoiceController:
         Called from Flask /media loop on "stop" or cleanup.
         """
         try:
-            # Schedule async stop and wait for completion
-            if self._sync_event_loop is None:
-                self._sync_event_loop = asyncio.new_event_loop()
-                self._sync_event_loop_thread = threading.Thread(
-                    target=self._run_sync_event_loop,
-                    daemon=True
-                )
-                self._sync_event_loop_thread.start()
+            self._closed = True
             
-            # Schedule async stop
-            future = asyncio.run_coroutine_threadsafe(
-                self.stop(),
-                self._sync_event_loop
-            )
-            future.result(timeout=10.0)  # Wait for stop to complete
+            # Cancel inbound worker
+            if self._inbound_worker_task and not self._inbound_worker_task.done():
+                self._inbound_worker_task.cancel()
+            
+            # Clear queues
+            while not self._inbound_queue.empty():
+                try:
+                    self._inbound_queue.get_nowait()
+                except queue.Empty:
+                    break
+            
+            while not self._sync_outbound_frames.empty():
+                try:
+                    self._sync_outbound_frames.get_nowait()
+                except queue.Empty:
+                    break
+            
+            # Schedule async stop if event loop exists
+            if self._sync_event_loop and not self._sync_event_loop.is_closed():
+                future = asyncio.run_coroutine_threadsafe(
+                    self.stop(),
+                    self._sync_event_loop
+                )
+                future.result(timeout=5.0)  # Wait for stop to complete
             
             logger.info("Controller stopped via sync adapter", extra={
                 "call_sid": self.call_sid,
@@ -554,6 +604,103 @@ class DuplexVoiceController:
         self._sync_event_loop.run_forever()
     
     # --------------------------------------------------------------------------
+    # Async Worker for Inbound Audio Processing
+    # --------------------------------------------------------------------------
+    
+    async def _inbound_worker(self):
+        """
+        Async worker that processes inbound audio frames from the queue.
+        This does the heavy work (ASR processing) without blocking the WS loop.
+        """
+        try:
+            while not self._closed and self.is_active:
+                try:
+                    # Get next audio frame from queue with timeout
+                    pcm_bytes = await asyncio.get_event_loop().run_in_executor(
+                        None, 
+                        lambda: self._inbound_queue.get(timeout=0.1)
+                    )
+                    
+                    if pcm_bytes:
+                        # Process the audio asynchronously
+                        await self._process_inbound_audio_async(pcm_bytes)
+                        
+                except queue.Empty:
+                    # No audio to process, continue loop
+                    await asyncio.sleep(0.01)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error("Error in inbound worker", extra={
+                        "call_sid": self.call_sid,
+                        "error": str(e),
+                        "service": "streaming_server",
+                        "controller": "duplex"
+                    })
+                    await asyncio.sleep(0.1)  # Back off on error
+                    
+        except asyncio.CancelledError:
+            logger.info("Inbound worker cancelled", extra={
+                "call_sid": self.call_sid,
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+        except Exception as e:
+            logger.error("Unexpected error in inbound worker", extra={
+                "call_sid": self.call_sid,
+                "error": str(e),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+    
+    async def _process_inbound_audio_async(self, pcm_bytes: bytes):
+        """
+        Process inbound audio asynchronously (heavy work).
+        Called by inbound worker, not by WS loop.
+        """
+        try:
+            # Phase 12: Circuit breaker check
+            if _is_circuit_breaker_open("audio_processing"):
+                logger.warning("Inbound audio processing blocked by circuit breaker", extra={
+                    "call_sid": self.call_sid,
+                    "trace_id": self.trace_id,
+                    "service": "streaming_server",
+                    "controller": "duplex"
+                })
+                metrics.increment_metric("inbound_audio_circuit_breaker_hits_total")
+                return
+            
+            # Push to jitter buffer for STT processing
+            self.jitter_buffer.push(pcm_bytes)
+            
+            # Update activity timestamp
+            self.last_activity_time = time.time()
+            
+            # For MVP: Option A - Just store, don't process STT yet
+            # Future: Option B - Process STT when enough audio buffered
+            
+            logger.debug("Inbound audio processed asynchronously", extra={
+                "call_sid": self.call_sid,
+                "audio_length": len(pcm_bytes),
+                "jitter_buffer_has_data": self.jitter_buffer.has_data(),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            
+            metrics.increment_metric("inbound_audio_chunks_processed_total")
+            
+        except Exception as e:
+            logger.error("Error processing inbound audio async", extra={
+                "call_sid": self.call_sid,
+                "error": str(e),
+                "stack": traceback.format_exc(),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            metrics.increment_metric("inbound_audio_processing_errors_total")
+            await self._handle_error()
+    
+    # --------------------------------------------------------------------------
     # Phase 12: Outbound Methods (TTS → Twilio)
     # --------------------------------------------------------------------------
     
@@ -562,7 +709,7 @@ class DuplexVoiceController:
         Enqueue initial greeting if not already sent.
         Uses persona-appropriate greeting text (no AI mentions).
         """
-        if self.greeting_sent:
+        if self.greeting_sent or self._closed:
             return
             
         try:
@@ -595,6 +742,9 @@ class DuplexVoiceController:
         Only accepts persona-appropriate text (no AI mentions).
         """
         try:
+            if self._closed:
+                return
+            
             # Phase 12: Circuit breaker check
             if _is_circuit_breaker_open("tts_generation"):
                 logger.warning("TTS generation blocked by circuit breaker", extra={
@@ -610,29 +760,37 @@ class DuplexVoiceController:
             
             # Generate TTS audio frames using voice engine
             async for audio_frame in self.voice_engine.text_to_speech_stream(text):
-                # Convert to Twilio-compatible format
-                twilio_frame = await self._convert_to_twilio_format(audio_frame)
+                if self._closed:
+                    break
                 
-                # Enqueue frame for outbound streaming
-                await self.outbound_frames.put(twilio_frame)
-                # CHANGED: Use thread-safe queue.put_nowait for sync queue
-                try:
-                    self._sync_outbound_frames.put_nowait(twilio_frame)
-                except queue.Full:
-                    # Drop frame if queue is full (backpressure)
-                    logger.warning("Sync outbound queue full, dropping frame", extra={
+                # Convert to Twilio-compatible format and chunk into 20ms frames
+                twilio_frames = await self._convert_to_twilio_format_chunked(audio_frame)
+                
+                for twilio_frame in twilio_frames:
+                    if self._closed:
+                        break
+                    
+                    # Enqueue frame for async outbound streaming
+                    await self.outbound_frames.put(twilio_frame)
+                    
+                    # Also enqueue to sync queue for WS loop access
+                    try:
+                        self._sync_outbound_frames.put_nowait(twilio_frame)
+                    except queue.Full:
+                        # Drop frame if queue is full (backpressure)
+                        logger.warning("Sync outbound queue full, dropping frame", extra={
+                            "call_sid": self.call_sid,
+                            "queue_size": self._sync_outbound_frames.qsize(),
+                            "service": "streaming_server",
+                            "controller": "duplex"
+                        })
+                    
+                    logger.debug("TTS frame enqueued", extra={
                         "call_sid": self.call_sid,
-                        "queue_size": self._sync_outbound_frames.qsize(),
+                        "frame_length": len(twilio_frame),
                         "service": "streaming_server",
                         "controller": "duplex"
                     })
-                
-                logger.debug("TTS frame enqueued", extra={
-                    "call_sid": self.call_sid,
-                    "frame_length": len(twilio_frame),
-                    "service": "streaming_server",
-                    "controller": "duplex"
-                })
             
             generation_latency = (time.time() - start_time) * 1000
             metrics.observe_latency("tts_generation_latency_ms", generation_latency)
@@ -664,6 +822,9 @@ class DuplexVoiceController:
         Returns None if no frames available within timeout.
         """
         try:
+            if self._closed:
+                return None
+            
             # Try to get frame with timeout
             frame = await asyncio.wait_for(
                 self.outbound_frames.get(), 
@@ -683,55 +844,54 @@ class DuplexVoiceController:
             return None
         
     # --------------------------------------------------------------------------
-    # Phase 12: Inbound Methods (Twilio → STT)
+    # Audio Format Conversion (Twilio-compatible)
     # --------------------------------------------------------------------------
     
-    async def handle_inbound_audio(self, pcm_bytes: bytes):
+    async def _convert_to_twilio_format_chunked(self, audio_frame: bytes) -> List[bytes]:
         """
-        Handle incoming PCM audio from Twilio.
-        Stores in jitter buffer for STT processing.
+        Convert audio frame to Twilio-compatible format (8 kHz μ-law mono)
+        and chunk into 20ms frames (160 bytes each for μ-law).
         """
         try:
-            # Phase 12: Circuit breaker check
-            if _is_circuit_breaker_open("audio_processing"):
-                logger.warning("Inbound audio processing blocked by circuit breaker", extra={
-                    "call_sid": self.call_sid,
-                    "trace_id": self.trace_id,
-                    "service": "streaming_server",
-                    "controller": "duplex"
-                })
-                metrics.increment_metric("inbound_audio_circuit_breaker_hits_total")
-                return
+            # Assume input is 16-bit PCM, 16kHz, mono
+            # Convert to 8kHz using audioop.ratecv
+            converted_frame = audioop.ratecv(audio_frame, 2, 1, 16000, 8000, None)
             
-            # Push to jitter buffer for STT processing
-            self.jitter_buffer.push(pcm_bytes)
+            # Convert to μ-law
+            ulaw_frame = audioop.lin2ulaw(converted_frame[0], 2)
             
-            # Update activity timestamp
-            self.last_activity_time = time.time()
+            # Chunk into 20ms frames (160 bytes for μ-law, 8000 samples/sec * 0.02 sec = 160 samples)
+            frame_size = 160  # 20 ms * 8000 samples/sec * 1 byte/sample (μ-law)
+            frames = []
             
-            # For MVP: Option A - Just store, don't process STT yet
-            # Future: Option B - Process STT when enough audio buffered
+            for i in range(0, len(ulaw_frame), frame_size):
+                chunk = ulaw_frame[i:i + frame_size]
+                if len(chunk) == frame_size:  # Only add full frames
+                    frames.append(chunk)
+                # Note: Last partial chunk is dropped to ensure consistent frame size
             
-            logger.debug("Inbound audio handled", extra={
-                "call_sid": self.call_sid,
-                "audio_length": len(pcm_bytes),
-                "jitter_buffer_has_data": self.jitter_buffer.has_data(),
-                "service": "streaming_server",
-                "controller": "duplex"
-            })
-            
-            metrics.increment_metric("inbound_audio_chunks_processed_total")
+            return frames
             
         except Exception as e:
-            logger.error("Error handling inbound audio", extra={
+            logger.error("Error converting audio to Twilio format", extra={
                 "call_sid": self.call_sid,
                 "error": str(e),
-                "stack": traceback.format_exc(),
+                "input_length": len(audio_frame),
                 "service": "streaming_server",
                 "controller": "duplex"
             })
-            metrics.increment_metric("inbound_audio_processing_errors_total")
-            await self._handle_error()
+            # Return empty list as fallback
+            return []
+    
+    async def _convert_to_twilio_format(self, audio_frame: bytes) -> bytes:
+        """
+        Convert audio frame to Twilio-compatible format (8 kHz μ-law mono)
+        Legacy method for compatibility.
+        """
+        frames = await self._convert_to_twilio_format_chunked(audio_frame)
+        if frames:
+            return frames[0]  # Return first frame for backward compatibility
+        return b''
     
     # --------------------------------------------------------------------------
     # Public API with Resilience Patterns
@@ -739,8 +899,8 @@ class DuplexVoiceController:
     
     async def start(self):
         """Start the duplex conversation controller with Phase 12 resilience"""
-        if self.is_active:
-            logger.warning("Controller already active", extra={
+        if self.is_active or self._closed:
+            logger.warning("Controller already active or closed", extra={
                 "call_sid": self.call_sid,
                 "service": "streaming_server",
                 "controller": "duplex"
@@ -771,6 +931,7 @@ class DuplexVoiceController:
         self.is_active = True
         self._stop_event.clear()
         self.consecutive_errors = 0
+        self._closed = False
         
         try:
             # Start voice engine first to avoid Redis race
@@ -796,6 +957,7 @@ class DuplexVoiceController:
             
         except Exception as e:
             self.is_active = False
+            self._closed = True
             logger.error("Failed to start duplex controller", extra={
                 "call_sid": self.call_sid,
                 "error": str(e),
@@ -809,7 +971,7 @@ class DuplexVoiceController:
     
     async def stop(self):
         """Stop the duplex conversation controller and cleanup with Phase 12 resilience"""
-        if not self.is_active:
+        if not self.is_active or self._closed:
             return
         
         # Phase 12: Idempotency check
@@ -823,6 +985,7 @@ class DuplexVoiceController:
             return
         
         self.is_active = False
+        self._closed = True
         self._stop_event.set()
         
         try:
@@ -842,6 +1005,30 @@ class DuplexVoiceController:
                             "service": "streaming_server",
                             "controller": "duplex"
                         })
+            
+            # Cancel inbound worker
+            if self._inbound_worker_task and not self._inbound_worker_task.done():
+                self._inbound_worker_task.cancel()
+            
+            # Clear queues
+            while not self._inbound_queue.empty():
+                try:
+                    self._inbound_queue.get_nowait()
+                except queue.Empty:
+                    break
+            
+            while not self._sync_outbound_frames.empty():
+                try:
+                    self._sync_outbound_frames.get_nowait()
+                except queue.Empty:
+                    break
+            
+            # Clear async queues
+            while not self.outbound_frames.empty():
+                try:
+                    await self.outbound_frames.get()
+                except Exception:
+                    break
             
             # Stop voice engine
             await self.voice_engine.stop()
@@ -890,6 +1077,9 @@ class DuplexVoiceController:
         Handle incoming user audio data from WebSocket with Phase 12 resilience
         """
         try:
+            if self._closed:
+                return
+            
             start_time = time.time()
             
             # Phase 12: Circuit breaker check
@@ -939,6 +1129,9 @@ class DuplexVoiceController:
         Target: stop-to-silence ≤ 150 ms
         """
         try:
+            if self._closed:
+                return
+            
             interrupt_start = time.time()
             
             if self.is_playing:
@@ -985,6 +1178,13 @@ class DuplexVoiceController:
         Health check endpoint for supervisor probing with Phase 12 resilience
         """
         try:
+            if self._closed:
+                return {
+                    "status": "closed",
+                    "call_sid": self.call_sid,
+                    "trace_id": self.trace_id
+                }
+            
             # Check circuit breaker state
             circuit_breaker_open = _is_circuit_breaker_open("duplex_controller")
             
@@ -1014,7 +1214,10 @@ class DuplexVoiceController:
                 "redis_ok": redis_ok,
                 "greeting_sent": self.greeting_sent,
                 "outbound_queue_size": self.outbound_frames.qsize(),
-                "jitter_buffer_has_data": self.jitter_buffer.has_data()
+                "sync_outbound_queue_size": self._sync_outbound_frames.qsize(),
+                "inbound_queue_size": self._inbound_queue.qsize(),
+                "jitter_buffer_has_data": self.jitter_buffer.has_data(),
+                "closed": self._closed
             }
             
         except Exception as e:
@@ -1046,7 +1249,7 @@ class DuplexVoiceController:
         })
         
         try:
-            while self.is_active and not self._stop_event.is_set():
+            while self.is_active and not self._stop_event.is_set() and not self._closed:
                 try:
                     # Phase 12: Circuit breaker check
                     if _is_circuit_breaker_open("duplex_controller"):
@@ -1110,6 +1313,9 @@ class DuplexVoiceController:
         Detect user voice activity using VAD or ASR partial transcripts with resilience
         """
         try:
+            if self._closed:
+                return False
+            
             # Use external API wrapper for voice activity detection
             def detect_voice():
                 return self.voice_engine.detect_voice_activity()
@@ -1215,7 +1421,7 @@ class DuplexVoiceController:
         """
         Determine if we should generate a response with resilience checks
         """
-        if not self.conversation_history:
+        if not self.conversation_history or self._closed:
             return False
         
         last_entry = self.conversation_history[-1]
@@ -1307,20 +1513,21 @@ class DuplexVoiceController:
             
             # Convert text to audio frames (streaming) with external API wrapper
             async for audio_frame in self.voice_engine.text_to_speech_stream(text):
-                if not self.is_playing or not self.is_active:
+                if not self.is_playing or not self.is_active or self._closed:
                     break
                 
-                # CHANGED: Do not send Twilio JSON frames from controller
-                # Only enqueue raw PCM frames for server to handle
+                # Convert to Twilio-compatible format and chunk into 20ms frames
+                twilio_frames = await self._convert_to_twilio_format_chunked(audio_frame)
                 
-                # Also enqueue to Twilio outbound queue if session is available
-                if self.twilio_media_session and hasattr(self.twilio_media_session, 'enqueue_outbound_frame'):
+                for twilio_frame in twilio_frames:
+                    if not self.is_playing or self._closed:
+                        break
+                    
+                    # Enqueue to sync outbound queue for WS loop access
                     try:
-                        # Convert audio frame to Twilio format (8 kHz μ-law mono)
-                        twilio_frame = await self._convert_to_twilio_format(audio_frame)
-                        self.twilio_media_session.enqueue_outbound_frame(twilio_frame)
-                        
+                        self._sync_outbound_frames.put_nowait(twilio_frame)
                         frame_sequence += 1
+                        
                         logger.debug("TTS frame enqueued for Twilio", extra={
                             "call_sid": self.call_sid,
                             "frame_sequence": frame_sequence,
@@ -1328,11 +1535,10 @@ class DuplexVoiceController:
                             "service": "streaming_server",
                             "controller": "duplex"
                         })
-                    except Exception as e:
-                        logger.error("Error enqueuing TTS frame to Twilio", extra={
+                    except queue.Full:
+                        logger.warning("Sync outbound queue full, dropping TTS frame", extra={
                             "call_sid": self.call_sid,
-                            "error": str(e),
-                            "frame_sequence": frame_sequence,
+                            "queue_size": self._sync_outbound_frames.qsize(),
                             "service": "streaming_server",
                             "controller": "duplex"
                         })
@@ -1371,31 +1577,6 @@ class DuplexVoiceController:
         finally:
             self.is_playing = False
     
-    async def _convert_to_twilio_format(self, audio_frame: bytes) -> bytes:
-        """
-        Convert audio frame to Twilio-compatible format (8 kHz μ-law mono)
-        """
-        try:
-            # Assume input is 16-bit PCM, 16kHz, mono
-            # Convert to 8kHz using audioop.ratecv
-            converted_frame = audioop.ratecv(audio_frame, 2, 1, 16000, 8000, None)
-            
-            # Convert to μ-law
-            ulaw_frame = audioop.lin2ulaw(converted_frame[0], 2)
-            
-            return ulaw_frame
-            
-        except Exception as e:
-            logger.error("Error converting audio to Twilio format", extra={
-                "call_sid": self.call_sid,
-                "error": str(e),
-                "input_length": len(audio_frame),
-                "service": "streaming_server",
-                "controller": "duplex"
-            })
-            # Return original frame as fallback
-            return audio_frame
-    
     # --------------------------------------------------------------------------
     # Error Handling & Circuit Breaker
     # --------------------------------------------------------------------------
@@ -1433,10 +1614,10 @@ class DuplexVoiceController:
         Log conversation context snapshot every 30 seconds with resilience
         """
         try:
-            while self.is_active and not self._stop_event.is_set():
+            while self.is_active and not self._stop_event.is_set() and not self._closed:
                 await asyncio.sleep(30)  # 30-second intervals
                 
-                if self.is_active:
+                if self.is_active and not self._closed:
                     await self._log_conversation_context("periodic_snapshot")
                     
         except asyncio.CancelledError:
@@ -1458,7 +1639,7 @@ class DuplexVoiceController:
         Log current conversation context snapshot with resilience
         """
         try:
-            if not self.conversation_history:
+            if not self.conversation_history or self._closed:
                 return
             
             current_time = time.time()
@@ -1474,7 +1655,8 @@ class DuplexVoiceController:
                     "is_playing": self.is_playing,
                     "is_listening": self.is_listening,
                     "uptime_seconds": current_time - self.start_time,
-                    "consecutive_errors": self.consecutive_errors
+                    "consecutive_errors": self.consecutive_errors,
+                    "closed": self._closed
                 }
             }
             
@@ -1524,7 +1706,7 @@ class DuplexVoiceController:
     async def _save_conversation_state(self):
         """Persist conversation state to Redis with Phase 12 resilience"""
         try:
-            if self.redis_client:
+            if self.redis_client and not self._closed:
                 state_key = f"session:{self.call_sid}"
                 state_data = {
                     "conversation_history": self.conversation_history,
@@ -1571,7 +1753,7 @@ class DuplexVoiceController:
     async def _load_conversation_state(self):
         """Load conversation state from Redis with Phase 12 resilience"""
         try:
-            if self.redis_client:
+            if self.redis_client and not self._closed:
                 state_key = f"session:{self.call_sid}"
                 
                 # Use async Redis client or wrap sync call
@@ -1625,7 +1807,7 @@ class DuplexVoiceController:
     
     def _get_conversation_context(self) -> str:
         """Format conversation history for LLM context"""
-        if not self.conversation_history:
+        if not self.conversation_history or self._closed:
             return "Hello! How can I help you today?"
         
         # Get last few exchanges for context
@@ -1656,5 +1838,8 @@ class DuplexVoiceController:
             "twilio_session_attached": self.twilio_media_session is not None,
             "greeting_sent": self.greeting_sent,
             "outbound_queue_size": self.outbound_frames.qsize(),
-            "jitter_buffer_has_data": self.jitter_buffer.has_data()
+            "sync_outbound_queue_size": self._sync_outbound_frames.qsize(),
+            "inbound_queue_size": self._inbound_queue.qsize(),
+            "jitter_buffer_has_data": self.jitter_buffer.has_data(),
+            "closed": self._closed
         }

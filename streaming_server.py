@@ -66,6 +66,13 @@ except ImportError:
         STREAM_TIMEOUT_SECONDS = int(os.getenv("STREAM_TIMEOUT_SECONDS", "300"))
 
 # --------------------------------------------------------------------------
+# Twilio Echo Mode Configuration - ADDED FOR DEBUGGING
+# --------------------------------------------------------------------------
+TWILIO_ECHO_MODE = os.getenv("SARA_TWILIO_ECHO_MODE", "false").lower() in ("true", "1", "yes")
+if TWILIO_ECHO_MODE:
+    print(f"⚠️  TWILIO ECHO MODE ENABLED: Will echo audio back to Twilio without processing")
+
+# --------------------------------------------------------------------------
 # Phase 11-D Metrics Integration - Lazy Import Shim
 # --------------------------------------------------------------------------
 def _get_metrics():
@@ -139,6 +146,7 @@ def _get_prometheus_client():
             return "# metrics_unavailable\n"
             
         return NoopMetric, NoopMetric, NoopMetric, _generate_latest_fallback, "text/plain"
+
 
 # Initialize metrics with lazy loading - SINGLE DEFINITION
 Summary, Gauge, Counter, generate_latest, CONTENT_TYPE_LATEST = _get_prometheus_client()
@@ -992,6 +1000,7 @@ def _initialize_metrics_system():
             extra={"error": str(e), "stack": traceback.format_exc(), "phase": "11-F"}
         )
 
+
 def _initialize_metrics_restore():
     """Lazy metrics restore - called on first request"""
     try:
@@ -1515,6 +1524,7 @@ def media(ws):
     session_id = str(uuid.uuid4())
     start_ts = time.time()
     outbound_frame_sequence = 0  # Initialize early to avoid NameError in finally block
+    inbound_frames = 0
     controller = None  # Store controller reference for reuse
 
     log_event(
@@ -1522,7 +1532,7 @@ def media(ws):
         event="twilio_ws_connect",
         status="info",
         message="Twilio WebSocket connection opened",
-        extra={"stream_sid": stream_sid, "session_id": session_id}
+        extra={"session_id": session_id}
     )
 
     try:
@@ -1560,60 +1570,62 @@ def media(ws):
             extra={
                 "type": "websocket",
                 "active_connections": stream_state_mgr.get_active_stream_count(),
-                "stream_sid": stream_sid
+                "stream_sid": stream_sid,
+                "echo_mode": TWILIO_ECHO_MODE  # ADDED: Log echo mode status
             }
         )
 
         while True:
-            # Check for outbound audio frames from controller
-            if call_sid and stream_sid and controller:
+            # Check for outbound audio frames from controller - ONLY IF WE HAVE stream_sid
+            if stream_sid and call_sid and not TWILIO_ECHO_MODE:  # MODIFIED: Added echo mode check and stream_sid check
                 # Poll for outbound audio frames using correct SYNC method
-                outbound_audio = controller.next_outbound_frame_sync(timeout_ms=100)
-                if outbound_audio:
-                    # Encode and send outbound audio to Twilio
-                    try:
-                        encoded_payload = base64.b64encode(outbound_audio).decode('utf-8')
-                        media_message = {
-                            "event": "media",
-                            "streamSid": stream_sid,
-                            "media": {
-                                "payload": encoded_payload
+                if controller:
+                    outbound_audio = controller.next_outbound_frame_sync(timeout_ms=100)
+                    if outbound_audio:
+                        # Encode and send outbound audio to Twilio
+                        try:
+                            encoded_payload = base64.b64encode(outbound_audio).decode('utf-8')
+                            media_message = {
+                                "event": "media",
+                                "streamSid": stream_sid,
+                                "media": {
+                                    "payload": encoded_payload
+                                }
                             }
-                        }
-                        ws.send(json.dumps(media_message))
-                        outbound_frame_sequence += 1
-                        
-                        log_event(
-                            service="streaming_server",
-                            event="twilio_outbound_audio_sent",
-                            status="info",
-                            message="Sent outbound audio frame to Twilio",
-                            trace_id=trace_id,
-                            session_id=session_id,
-                            extra={
-                                "frame_sequence": outbound_frame_sequence,
-                                "audio_bytes": len(outbound_audio),
-                                "encoded_length": len(encoded_payload),
-                                "stream_sid": stream_sid,
-                                "call_sid": call_sid
-                            }
-                        )
-                    except Exception as e:
-                        stream_errors_total.labels(error_type="outbound_media_send").inc()
-                        log_event(
-                            service="streaming_server",
-                            event="outbound_audio_send_error",
-                            status="error",
-                            message="Error sending outbound audio to Twilio",
-                            trace_id=trace_id,
-                            session_id=session_id,
-                            extra={
-                                "error": str(e),
-                                "frame_sequence": outbound_frame_sequence,
-                                "call_sid": call_sid,
-                                "stream_sid": stream_sid
-                            }
-                        )
+                            ws.send(json.dumps(media_message))
+                            outbound_frame_sequence += 1
+                            
+                            log_event(
+                                service="streaming_server",
+                                event="twilio_outbound_audio_sent",
+                                status="info",
+                                message="Sent outbound audio frame to Twilio",
+                                trace_id=trace_id,
+                                session_id=session_id,
+                                extra={
+                                    "frame_sequence": outbound_frame_sequence,
+                                    "audio_bytes": len(outbound_audio),
+                                    "encoded_length": len(encoded_payload),
+                                    "stream_sid": stream_sid,
+                                    "call_sid": call_sid
+                                }
+                            )
+                        except Exception as e:
+                            stream_errors_total.labels(error_type="outbound_media_send").inc()
+                            log_event(
+                                service="streaming_server",
+                                event="outbound_audio_send_error",
+                                status="error",
+                                message="Error sending outbound audio to Twilio",
+                                trace_id=trace_id,
+                                session_id=session_id,
+                                extra={
+                                    "error": str(e),
+                                    "frame_sequence": outbound_frame_sequence,
+                                    "call_sid": call_sid,
+                                    "stream_sid": stream_sid
+                                }
+                            )
 
             try:
                 raw_msg = ws.receive()
@@ -1644,6 +1656,22 @@ def media(ws):
 
             event_type = msg.get("event")
             event = (msg.get("event") or "").lower()
+            
+            # LOG ALL INBOUND EVENTS BEFORE PROCESSING - ADDED FOR DEBUGGING
+            log_event(
+                service="streaming_server",
+                event="twilio_ws_inbound_event",
+                status="info",
+                message=f"Processing Twilio event: {event_type}",
+                session_id=session_id,
+                trace_id=trace_id,
+                extra={
+                    "event": event,
+                    "raw_event_type": event_type,
+                    "has_stream_sid": bool(stream_sid),
+                    "has_call_sid": bool(call_sid)
+                }
+            )
             
             # Handle Twilio "connected" event (no-op)
             if event == "connected":
@@ -1688,29 +1716,56 @@ def media(ws):
                 if not call_sid:
                     call_sid = session_id  # Fallback to session ID
                 
-                # Create duplex controller for this call using sync adapter
-                controller = controller_manager.get_or_create_controller_sync(
-                    call_sid=call_sid,
-                    stream_sid=stream_sid,
+                log_event(
+                    service="streaming_server",
+                    event="twilio_stream_start_received",
+                    status="info",
+                    message="Received Twilio start event",
                     trace_id=trace_id,
-                    websocket=ws
+                    session_id=session_id,
+                    extra={
+                        "call_sid": call_sid,
+                        "stream_sid": stream_sid,
+                        "echo_mode": TWILIO_ECHO_MODE
+                    }
                 )
                 
-                # Enqueue greeting message using sync wrapper
-                greeting_text = "Hey, this is Sara calling from Noblecom Solutions. Just checking you can hear me clearly on your side."
-                if controller:
-                    controller.enqueue_greeting_sync(greeting_text)
-                    greeting_enqueued = True
+                # Only initialize controller if NOT in echo mode
+                if not TWILIO_ECHO_MODE:
+                    # Create duplex controller for this call using sync adapter
+                    controller = controller_manager.get_or_create_controller_sync(
+                        call_sid=call_sid,
+                        stream_sid=stream_sid,
+                        trace_id=trace_id,
+                        websocket=ws
+                    )
+                    
+                    # Enqueue greeting message using sync wrapper
+                    greeting_text = "Hey, this is Sara calling from Noblecom Solutions. Just checking you can hear me clearly on your side."
+                    if controller:
+                        controller.enqueue_greeting_sync(greeting_text)
+                        greeting_enqueued = True
+                    else:
+                        greeting_enqueued = False
+                        log_event(
+                            service="streaming_server",
+                            event="greeting_enqueue_skipped",
+                            status="warn",
+                            message="Controller not available for greeting",
+                            trace_id=trace_id,
+                            session_id=session_id,
+                            extra={"call_sid": call_sid, "stream_sid": stream_sid}
+                        )
                 else:
+                    # Echo mode: no controller needed
                     greeting_enqueued = False
                     log_event(
                         service="streaming_server",
-                        event="greeting_enqueue_skipped",
-                        status="warn",
-                        message="Controller not available for greeting",
+                        event="echo_mode_start",
+                        status="info",
+                        message="Echo mode enabled - will echo audio back to Twilio",
                         trace_id=trace_id,
                         session_id=session_id,
-                        extra={"call_sid": call_sid, "stream_sid": stream_sid}
                     )
                 
                 log_event(
@@ -1723,62 +1778,113 @@ def media(ws):
                     extra={
                         "call_sid": call_sid,
                         "stream_sid": stream_sid,
-                        "controller_initialized": True,
-                        "greeting_enqueued": greeting_enqueued
+                        "controller_initialized": (not TWILIO_ECHO_MODE and controller is not None),
+                        "greeting_enqueued": greeting_enqueued,
+                        "echo_mode": TWILIO_ECHO_MODE
                     }
                 )
 
             elif event == "media":
                 # Inbound audio from Twilio (base64-encoded)
+                inbound_frames += 1
                 media_data = msg.get("media") or {}
                 b64_payload = media_data.get("payload")
                 
                 if b64_payload and call_sid and stream_sid:
                     try:
-                        # Decode audio and forward to duplex controller using sync adapter
+                        # Decode audio
                         audio_bytes = base64.b64decode(b64_payload)
-                        if controller:
-                            # Use sync adapter for inbound audio processing
-                            controller.handle_inbound_audio_sync(audio_bytes)
-                            audio_processed = True
+                        
+                        if TWILIO_ECHO_MODE:
+                            # ECHO MODE: Simply echo the audio back
+                            try:
+                                media_message = {
+                                    "event": "media",
+                                    "streamSid": stream_sid,
+                                    "media": {
+                                        "payload": b64_payload  # Use original payload
+                                    }
+                                }
+                                ws.send(json.dumps(media_message))
+                                outbound_frame_sequence += 1
+                                
+                                log_event(
+                                    service="streaming_server",
+                                    event="twilio_echo_sent",
+                                    status="debug",
+                                    message="Echoed audio back to Twilio",
+                                    trace_id=trace_id,
+                                    session_id=session_id,
+                                    extra={
+                                        "frame_sequence": outbound_frame_sequence,
+                                        "audio_bytes": len(audio_bytes),
+                                        "stream_sid": stream_sid,
+                                        "call_sid": call_sid,
+                                        "echo_mode": True,
+                                        "inbound_frames": inbound_frames
+                                    }
+                                )
+                            except Exception as e:
+                                stream_errors_total.labels(error_type="echo_send").inc()
+                                log_event(
+                                    service="streaming_server",
+                                    event="echo_send_error",
+                                    status="error",
+                                    message="Error echoing audio to Twilio",
+                                    trace_id=trace_id,
+                                    session_id=session_id,
+                                    extra={
+                                        "error": str(e),
+                                        "call_sid": call_sid,
+                                        "stream_sid": stream_sid
+                                    }
+                                )
                         else:
-                            # Get controller if not stored
-                            controller = controller_manager.get_or_create_controller_sync(
-                                call_sid=call_sid,
-                                stream_sid=stream_sid,
-                                trace_id=trace_id,
-                                websocket=ws
-                            )
+                            # NORMAL MODE: Process through duplex controller
+                            audio_processed = False
                             if controller:
+                                # Use sync adapter for inbound audio processing
                                 controller.handle_inbound_audio_sync(audio_bytes)
                                 audio_processed = True
                             else:
-                                audio_processed = False
+                                # Get controller if not stored
+                                controller = controller_manager.get_or_create_controller_sync(
+                                    call_sid=call_sid,
+                                    stream_sid=stream_sid,
+                                    trace_id=trace_id,
+                                    websocket=ws
+                                )
+                                if controller:
+                                    controller.handle_inbound_audio_sync(audio_bytes)
+                                    audio_processed = True
+                                else:
+                                    audio_processed = False
+                                    log_event(
+                                        service="streaming_server",
+                                        event="inbound_audio_skipped",
+                                        status="warn",
+                                        message="Controller not available for inbound audio",
+                                        trace_id=trace_id,
+                                        session_id=session_id,
+                                        extra={"call_sid": call_sid, "stream_sid": stream_sid, "audio_bytes": len(audio_bytes)}
+                                    )
+                            
+                            if audio_processed:
                                 log_event(
                                     service="streaming_server",
-                                    event="inbound_audio_skipped",
-                                    status="warn",
-                                    message="Controller not available for inbound audio",
+                                    event="twilio_ws_inbound_media",
+                                    status="info",
+                                    message="Processed inbound media from Twilio",
                                     trace_id=trace_id,
                                     session_id=session_id,
-                                    extra={"call_sid": call_sid, "stream_sid": stream_sid, "audio_bytes": len(audio_bytes)}
+                                    extra={
+                                        "payload_length": len(b64_payload),
+                                        "audio_bytes": len(audio_bytes),
+                                        "stream_sid": stream_sid,
+                                        "call_sid": call_sid,
+                                        "inbound_frames": inbound_frames
+                                    }
                                 )
-                        
-                        if audio_processed:
-                            log_event(
-                                service="streaming_server",
-                                event="twilio_ws_inbound_media",
-                                status="info",
-                                message="Processed inbound media from Twilio",
-                                trace_id=trace_id,
-                                session_id=session_id,
-                                extra={
-                                    "payload_length": len(b64_payload),
-                                    "audio_bytes": len(audio_bytes),
-                                    "stream_sid": stream_sid,
-                                    "call_sid": call_sid
-                                }
-                            )
                     except Exception as e:
                         stream_errors_total.labels(error_type="media_decode").inc()
                         log_event(
@@ -1808,11 +1914,11 @@ def media(ws):
             elif event == "stop":
                 # graceful end from Twilio
                 if call_sid and stream_sid:
-                    # Cleanup controller using sync adapters
-                    if controller:
+                    # Cleanup controller using sync adapters (only if not in echo mode)
+                    if not TWILIO_ECHO_MODE and controller:
                         controller.stop_sync()
-                    controller_manager.cleanup_controller_sync(call_sid, stream_sid, trace_id)
-                    controller = None
+                        controller_manager.cleanup_controller_sync(call_sid, stream_sid, trace_id)
+                        controller = None
                 
                 log_event(
                     service="streaming_server",
@@ -1850,7 +1956,10 @@ def media(ws):
                 "error": str(e),
                 "stack": traceback.format_exc(),
                 "call_sid": call_sid,
-                "stream_sid": stream_sid
+                "stream_sid": stream_sid,
+                "echo_mode": TWILIO_ECHO_MODE,
+                "inbound_frames": inbound_frames,
+                "outbound_frames": outbound_frame_sequence
             }
         )
         # Capture exception with Sentry
@@ -1860,11 +1969,14 @@ def media(ws):
             "trace_id": trace_id,
             "call_sid": call_sid,
             "stream_sid": stream_sid,
-            "endpoint": "media_websocket"
+            "echo_mode": TWILIO_ECHO_MODE,
+            "endpoint": "media_websocket",
+            "inbound_frames": inbound_frames,
+            "outbound_frames": outbound_frame_sequence
         })
     finally:
         # Cleanup
-        if call_sid:
+        if call_sid and not TWILIO_ECHO_MODE:  # Only cleanup controller if not in echo mode
             try:
                 # Cleanup controller if still exists using sync adapters
                 if controller:
@@ -1893,6 +2005,7 @@ def media(ws):
         stream_state_mgr.remove_stream(session_id)
         streams_manager.decrement_global_count()
         
+        duration = time.time() - start_ts
         log_event(
             service="streaming_server",
             event="twilio_media_stream_closed",
@@ -1903,9 +2016,11 @@ def media(ws):
             extra={
                 "call_sid": call_sid,
                 "stream_sid": stream_sid,
-                "duration_seconds": round(time.time() - start_ts, 2),
+                "duration_seconds": round(duration, 2),
+                "inbound_frames_received": inbound_frames,
                 "outbound_frames_sent": outbound_frame_sequence,
-                "active_connections": stream_state_mgr.get_active_stream_count()
+                "active_connections": stream_state_mgr.get_active_stream_count(),
+                "echo_mode": TWILIO_ECHO_MODE
             }
         )
 
@@ -2365,7 +2480,7 @@ def stream():
         )
         # Capture fatal exception with Sentry
         capture_exception_safe(e, {
-            "service": "streaming_server", 
+            "service": streamer, 
             "session_id": session_id,
             "trace_id": trace,
             "stage": "stream_setup"
@@ -2545,7 +2660,8 @@ if __name__ == "__main__":
                     "streaming_url": _mask_url(os.getenv("STREAMING_URL", "")),
                     "phase": os.getenv("SARA_PHASE", "unknown"),
                     "max_concurrent_streams": streams_manager.max_streams,
-                    "heartbeat_interval": HEARTBEAT_INTERVAL
+                    "heartbeat_interval": HEARTBEAT_INTERVAL,
+                    "twilio_echo_mode": TWILIO_ECHO_MODE  # ADDED: Log echo mode
                 }
             )
         except Exception as e:
@@ -2594,7 +2710,8 @@ if __name__ == "__main__":
             "max_concurrent_streams": streams_manager.max_streams,
             "heartbeat_interval": HEARTBEAT_INTERVAL,
             "graceful_shutdown_enabled": True,
-            "env_mode": os.getenv("ENV_MODE", "unknown")
+            "env_mode": os.getenv("ENV_MODE", "unknown"),
+            "twilio_echo_mode": TWILIO_ECHO_MODE  # ADDED: Log echo mode
         }
     )
 
