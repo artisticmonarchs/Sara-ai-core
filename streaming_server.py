@@ -829,6 +829,7 @@ class HealthMonitor:
                 message="Failed to report health metrics",
                 extra={"error": str(e)},
             )
+        return False
 
 # Initialize health monitor
 health_monitor = HealthMonitor()
@@ -1507,6 +1508,106 @@ def system_status():
 # --------------------------------------------------------------------------
 from simple_websocket.errors import ConnectionClosed  # add near imports
 
+@sock.route("/media_echo")
+def media_echo(ws):
+    """
+    Minimal Twilio-compliant echo bot for infrastructure testing.
+    Echoes back media.payload in Twilio's outbound media format.
+    """
+    stream_sid = None
+    call_sid = None
+
+    log_event(
+        service="streaming_server",
+        event="twilio_echo_ws_connect",
+        status="info",
+        message="Twilio echo WebSocket connected"
+    )
+
+    try:
+        while not ws.closed:
+            raw_msg = ws.receive()
+            if raw_msg is None:
+                log_event(
+                    service="streaming_server",
+                    event="twilio_echo_ws_closed_by_peer",
+                    status="info",
+                    message="Twilio echo WS closed by peer (None receive)"
+                )
+                break
+
+            try:
+                data = json.loads(raw_msg)
+            except Exception:
+                log_event(
+                    service="streaming_server",
+                    event="twilio_echo_non_json",
+                    status="warn",
+                    message="Twilio echo: non-JSON frame received"
+                )
+                continue
+
+            event = (data.get("event") or "").lower()
+
+            if event == "connected":
+                log_event(
+                    service="streaming_server",
+                    event="twilio_echo_connected",
+                    status="info",
+                    message="Twilio echo event=connected"
+                )
+                continue
+
+            if event == "start":
+                start = data.get("start", {})
+                stream_sid = start.get("streamSid")
+                call_sid = start.get("callSid")
+                log_event(
+                    service="streaming_server",
+                    event="twilio_echo_start",
+                    status="info",
+                    message="Twilio echo event=start",
+                    extra={"streamSid": stream_sid, "callSid": call_sid}
+                )
+                continue
+
+            if event == "media":
+                if stream_sid and data.get("media", {}).get("payload"):
+                    payload = data["media"]["payload"]
+                    echo_msg = {
+                        "event": "media",
+                        "streamSid": stream_sid,
+                        "media": {"payload": payload},
+                    }
+                    ws.send(json.dumps(echo_msg))
+                continue
+
+            if event == "stop":
+                log_event(
+                    service="streaming_server",
+                    event="twilio_echo_stop",
+                    status="info",
+                    message="Twilio echo event=stop",
+                    extra={"streamSid": stream_sid}
+                )
+                break
+
+    except Exception as e:
+        log_event(
+            service="streaming_server",
+            event="twilio_echo_error",
+            status="error",
+            message="Twilio echo WS handler error",
+            extra={"error": str(e), "stack": traceback.format_exc()}
+        )
+    finally:
+        log_event(
+            service="streaming_server",
+            event="twilio_echo_finished",
+            status="info",
+            message="Twilio echo WS handler finished"
+        )
+
 @sock.route("/media")
 def media(ws):
     """
@@ -1526,6 +1627,7 @@ def media(ws):
     outbound_frame_sequence = 0  # Initialize early to avoid NameError in finally block
     inbound_frames = 0
     controller = None  # Store controller reference for reuse
+    have_seen_inbound_media = False  # New: flag to track when we've seen inbound media
 
     log_event(
         service="streaming_server",
@@ -1536,16 +1638,18 @@ def media(ws):
     )
 
     try:
-        # Capacity control
+        # Capacity control - DEBUG MODE: Log but don't close
         if not streams_manager.can_accept_new_stream():
             log_event(
                 service="streaming_server",
-                event="twilio_ws_rejected_capacity",
-                status="info",
-                message="Twilio WebSocket rejected - maximum concurrent streams reached"
+                event="stream_capacity_soft_limit",
+                status="warn",
+                message="Max concurrent streams reached, but allowing for debug",
+                trace_id=trace_id,
+                extra={"current_streams": stream_state_mgr.get_active_stream_count()},
             )
-            ws.close()
-            return
+            # IMPORTANT: Do NOT close the WebSocket here during debugging.
+            # Just log and continue to accept this stream.
 
         # Track locally
         stream_state_mgr.add_stream(session_id, {
@@ -1575,62 +1679,78 @@ def media(ws):
             }
         )
 
-        while True:
-            # Check for outbound audio frames from controller - ONLY IF WE HAVE stream_sid
-            if stream_sid and call_sid and not TWILIO_ECHO_MODE:  # MODIFIED: Added echo mode check and stream_sid check
+        while not ws.closed:
+            # Check for outbound audio frames from controller - ONLY IF WE HAVE stream_sid AND have seen inbound media
+            if stream_sid and call_sid and have_seen_inbound_media and not TWILIO_ECHO_MODE and controller:
                 # Poll for outbound audio frames using correct SYNC method
-                if controller:
-                    outbound_audio = controller.next_outbound_frame_sync(timeout_ms=100)
-                    if outbound_audio:
-                        # Encode and send outbound audio to Twilio
-                        try:
-                            encoded_payload = base64.b64encode(outbound_audio).decode('utf-8')
-                            media_message = {
-                                "event": "media",
-                                "streamSid": stream_sid,
-                                "media": {
-                                    "payload": encoded_payload
-                                }
+                outbound_audio = controller.next_outbound_frame_sync(timeout_ms=50)
+                if outbound_audio:
+                    # Encode and send outbound audio to Twilio
+                    try:
+                        encoded_payload = base64.b64encode(outbound_audio).decode('utf-8')
+                        media_message = {
+                            "event": "media",
+                            "streamSid": stream_sid,
+                            "media": {
+                                "payload": encoded_payload
                             }
-                            ws.send(json.dumps(media_message))
-                            outbound_frame_sequence += 1
-                            
-                            log_event(
-                                service="streaming_server",
-                                event="twilio_outbound_audio_sent",
-                                status="info",
-                                message="Sent outbound audio frame to Twilio",
-                                trace_id=trace_id,
-                                session_id=session_id,
-                                extra={
-                                    "frame_sequence": outbound_frame_sequence,
-                                    "audio_bytes": len(outbound_audio),
-                                    "encoded_length": len(encoded_payload),
-                                    "stream_sid": stream_sid,
-                                    "call_sid": call_sid
-                                }
-                            )
-                        except Exception as e:
-                            stream_errors_total.labels(error_type="outbound_media_send").inc()
-                            log_event(
-                                service="streaming_server",
-                                event="outbound_audio_send_error",
-                                status="error",
-                                message="Error sending outbound audio to Twilio",
-                                trace_id=trace_id,
-                                session_id=session_id,
-                                extra={
-                                    "error": str(e),
-                                    "frame_sequence": outbound_frame_sequence,
-                                    "call_sid": call_sid,
-                                    "stream_sid": stream_sid
-                                }
-                            )
+                        }
+                        ws.send(json.dumps(media_message))
+                        
+                        # Optionally send a Twilio mark event after each outbound frame
+                        mark_message = {
+                            "event": "mark",
+                            "streamSid": stream_sid,
+                            "mark": {"name": f"chunk-{outbound_frame_sequence}"}
+                        }
+                        ws.send(json.dumps(mark_message))
+                        
+                        outbound_frame_sequence += 1
+                        
+                        log_event(
+                            service="streaming_server",
+                            event="twilio_outbound_audio_sent",
+                            status="debug",
+                            message="Outbound audio frame sent to Twilio",
+                            trace_id=trace_id,
+                            session_id=session_id,
+                            extra={
+                                "frame_sequence": outbound_frame_sequence,
+                                "audio_bytes": len(outbound_audio),
+                                "encoded_length": len(encoded_payload),
+                                "stream_sid": stream_sid,
+                                "call_sid": call_sid
+                            }
+                        )
+                    except Exception as e:
+                        stream_errors_total.labels(error_type="outbound_media_send").inc()
+                        log_event(
+                            service="streaming_server",
+                            event="outbound_audio_send_error",
+                            status="error",
+                            message="Error sending outbound audio to Twilio",
+                            trace_id=trace_id,
+                            session_id=session_id,
+                            extra={
+                                "error": str(e),
+                                "frame_sequence": outbound_frame_sequence,
+                                "call_sid": call_sid,
+                                "stream_sid": stream_sid
+                            }
+                        )
 
             try:
                 raw_msg = ws.receive()
                 if raw_msg is None:
-                    # client closed gracefully
+                    # Twilio has closed the WebSocket
+                    log_event(
+                        service="streaming_server",
+                        event="twilio_media_stream_closed_by_peer",
+                        status="info",
+                        message="Twilio closed websocket (None frame)",
+                        trace_id=trace_id,
+                        extra={"call_sid": call_sid, "stream_sid": stream_sid},
+                    )
                     break
             except ConnectionClosed as e:
                 log_event(
@@ -1787,6 +1907,7 @@ def media(ws):
             elif event == "media":
                 # Inbound audio from Twilio (base64-encoded)
                 inbound_frames += 1
+                have_seen_inbound_media = True  # New: Mark that we've seen real inbound media
                 media_data = msg.get("media") or {}
                 b64_payload = media_data.get("payload")
                 
@@ -1959,7 +2080,8 @@ def media(ws):
                 "stream_sid": stream_sid,
                 "echo_mode": TWILIO_ECHO_MODE,
                 "inbound_frames": inbound_frames,
-                "outbound_frames": outbound_frame_sequence
+                "outbound_frames": outbound_frame_sequence,
+                "have_seen_inbound_media": have_seen_inbound_media
             }
         )
         # Capture exception with Sentry
@@ -1972,7 +2094,8 @@ def media(ws):
             "echo_mode": TWILIO_ECHO_MODE,
             "endpoint": "media_websocket",
             "inbound_frames": inbound_frames,
-            "outbound_frames": outbound_frame_sequence
+            "outbound_frames": outbound_frame_sequence,
+            "have_seen_inbound_media": have_seen_inbound_media
         })
     finally:
         # Cleanup
@@ -2020,7 +2143,8 @@ def media(ws):
                 "inbound_frames_received": inbound_frames,
                 "outbound_frames_sent": outbound_frame_sequence,
                 "active_connections": stream_state_mgr.get_active_stream_count(),
-                "echo_mode": TWILIO_ECHO_MODE
+                "echo_mode": TWILIO_ECHO_MODE,
+                "have_seen_inbound_media": have_seen_inbound_media
             }
         )
 
@@ -2480,7 +2604,7 @@ def stream():
         )
         # Capture fatal exception with Sentry
         capture_exception_safe(e, {
-            "service": streamer, 
+            "service": "streaming_server",
             "session_id": session_id,
             "trace_id": trace,
             "stage": "stream_setup"

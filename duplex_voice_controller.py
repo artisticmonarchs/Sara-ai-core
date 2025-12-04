@@ -390,12 +390,17 @@ class DuplexVoiceController:
         self._inbound_worker_task = None
         self._closed = False  # ADDED: Closed flag for lifecycle management
         
+        # ADDED: Echo mode support
+        self.echo_mode = config.get("echo_mode", False) if config else False
+        self._echo_frames = queue.Queue(maxsize=1000)  # Thread-safe echo queue
+        
         logger.info("DuplexVoiceController initialized", extra={
             "call_sid": call_sid,
             "trace_id": self.trace_id,
             "service": "streaming_server",
             "controller": "duplex",
-            "event": "duplex_controller_initialized"  # ADDED: Explicit event marker
+            "event": "duplex_controller_initialized",  # ADDED: Explicit event marker
+            "echo_mode": self.echo_mode
         })
     
     # --------------------------------------------------------------------------
@@ -470,6 +475,14 @@ class DuplexVoiceController:
                     "controller": "duplex"
                 })
             
+            # If in echo mode, also push to echo queue for immediate playback
+            if self.echo_mode:
+                try:
+                    self._echo_frames.put_nowait(pcm_bytes)
+                except queue.Full:
+                    # Drop echo frame if queue is full
+                    pass
+            
             # Schedule async processing on dedicated event loop
             if self._sync_event_loop is None:
                 self._sync_event_loop = asyncio.new_event_loop()
@@ -494,6 +507,11 @@ class DuplexVoiceController:
                 "controller": "duplex"
             })
     
+    # ADDED: Alias for handle_inbound_audio_sync to match WS handler expectations
+    def handle_inbound_frame(self, pcm_bytes: bytes) -> None:
+        """Alias for handle_inbound_audio_sync to match WS handler interface"""
+        self.handle_inbound_audio_sync(pcm_bytes)
+    
     def next_outbound_frame_sync(self, timeout_ms: int = 0) -> Optional[bytes]:
         """
         Synchronous adapter for outbound frame retrieval.
@@ -510,6 +528,28 @@ class DuplexVoiceController:
             return None
         except Exception as e:
             logger.error("Error in next_outbound_frame_sync", extra={
+                "call_sid": self.call_sid,
+                "error": str(e),
+                "service": "streaming_server",
+                "controller": "duplex"
+            })
+            return None
+    
+    def next_echo_frame(self, timeout_ms: int = 0) -> Optional[bytes]:
+        """
+        Get next echo frame for echo mode.
+        Returns μ-law 8 kHz frame or None if timeout or not in echo mode.
+        """
+        try:
+            if not self.echo_mode or self._closed:
+                return None
+            
+            timeout_sec = timeout_ms / 1000.0
+            return self._echo_frames.get(timeout=timeout_sec)
+        except queue.Empty:
+            return None
+        except Exception as e:
+            logger.error("Error in next_echo_frame", extra={
                 "call_sid": self.call_sid,
                 "error": str(e),
                 "service": "streaming_server",
@@ -572,6 +612,13 @@ class DuplexVoiceController:
             while not self._sync_outbound_frames.empty():
                 try:
                     self._sync_outbound_frames.get_nowait()
+                except queue.Empty:
+                    break
+            
+            # Clear echo queue
+            while not self._echo_frames.empty():
+                try:
+                    self._echo_frames.get_nowait()
                 except queue.Empty:
                     break
             
@@ -1023,6 +1070,13 @@ class DuplexVoiceController:
                 except queue.Empty:
                     break
             
+            # Clear echo queue
+            while not self._echo_frames.empty():
+                try:
+                    self._echo_frames.get_nowait()
+                except queue.Empty:
+                    break
+            
             # Clear async queues
             while not self.outbound_frames.empty():
                 try:
@@ -1217,7 +1271,9 @@ class DuplexVoiceController:
                 "sync_outbound_queue_size": self._sync_outbound_frames.qsize(),
                 "inbound_queue_size": self._inbound_queue.qsize(),
                 "jitter_buffer_has_data": self.jitter_buffer.has_data(),
-                "closed": self._closed
+                "closed": self._closed,
+                "echo_mode": self.echo_mode,
+                "echo_queue_size": self._echo_frames.qsize()
             }
             
         except Exception as e:
@@ -1841,5 +1897,7 @@ class DuplexVoiceController:
             "sync_outbound_queue_size": self._sync_outbound_frames.qsize(),
             "inbound_queue_size": self._inbound_queue.qsize(),
             "jitter_buffer_has_data": self.jitter_buffer.has_data(),
-            "closed": self._closed
+            "closed": self._closed,
+            "echo_mode": self.echo_mode,
+            "echo_queue_size": self._echo_frames.qsize()
         }

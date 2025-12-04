@@ -148,11 +148,12 @@ logger.info("Twilio router blueprint initialized successfully.")
 # --------------------------------------------------------------------------
 def _media_ws_url() -> str | None:
     """Get WebSocket URL for media streaming from environment"""
-    ws_url = os.getenv("TWILIO_MEDIA_WS_URL", "wss://srv-d43eqvemcj7s73b0pum0.onrender.com/media").strip()
+    ws_url = os.getenv("TWILIO_MEDIA_WS_URL", "").strip()
     if not ws_url:
+        logger.error("TWILIO_MEDIA_WS_URL not set")
         return None
     if not ws_url.startswith("wss://"):
-        logger.warning("TWILIO_MEDIA_WS_URL must be wss://, got %s", ws_url)
+        logger.error("TWILIO_MEDIA_WS_URL must start with wss://, got %s", ws_url)
         return None
     return ws_url
 
@@ -183,83 +184,46 @@ def _verify_twilio_signature() -> bool:
 # --------------------------------------------------------------------------
 @twilio_router_bp.route("/twilio/answer", methods=["GET", "POST"])
 def twilio_answer():
-    """
-    Handle incoming Twilio call. Always returns valid TwiML with application/xml content-type.
-    Uses <Connect><Stream/></Connect> for proper full-duplex Media Streams (blocking verb).
-    """
+    """Handle incoming Twilio call. Always returns valid TwiML with application/xml content-type."""
     trace_id = get_trace_id()
-
-    # Extremely defensive: precompute ws_url, but never let it crash the route.
-    try:
-        ws_url = _media_ws_url()
-    except Exception as e:
-        ws_url = None
-        _structured_log("twilio_answer_hit_error", level="error",
-                        message="Error computing media_ws_url in twilio_answer",
-                        trace_id=trace_id, error=str(e))
-
-    _structured_log("twilio_answer_hit", level="info",
-                    message="Twilio /twilio/answer invoked",
-                    trace_id=trace_id,
-                    has_stream_url=bool(ws_url and isinstance(ws_url, str) and ws_url.strip().startswith("wss://")),
-                    media_ws_url=ws_url)
-
-    # Signature check (will return 403 if enabled and invalid)
+    
+    ws_url = _media_ws_url()
+    if not ws_url:
+        _structured_log(
+            "twilio_answer_media_ws_missing",
+            level="error",
+            message="TWILIO_MEDIA_WS_URL not configured or invalid",
+            trace_id=trace_id,
+        )
+        return Response("Media Streams not configured", status=500, mimetype="text/plain")
+    
     if not _verify_twilio_signature():
         return Response("Invalid signature", status=403, mimetype="text/plain")
-
-    # Helper: safe TwiML emitter via SDK
-    def _emit_twiml_with_sdk(_ws_url: str | None) -> str:
-        from twilio.twiml.voice_response import VoiceResponse
-        r = VoiceResponse()
-        if _ws_url and isinstance(_ws_url, str) and _ws_url.strip().startswith("wss://"):
-            # <Connect><Stream/></Connect> is the blocking verb required for full-duplex
-            with r.connect() as c:
-                c.stream(url=_ws_url.strip())
-            return str(r), "streaming"
-        else:
-            r.say("Hello, this is Sara. Please hold while we connect.")
-            return str(r), "say_only"
-
-    # Hard fallback: static XML with <Connect><Stream/></Connect>
-    def _emit_static_twiml(_ws_url: str | None) -> str:
-        if _ws_url and isinstance(_ws_url, str) and _ws_url.strip().startswith("wss://"):
-            return f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Connect>
-    <Stream url="{_ws_url.strip()}"/>
-  </Connect>
-</Response>""", "streaming"
-        return '<?xml version="1.0" encoding="UTF-8"?><Response><Say voice="alice">Hello, this is Sara. Please hold while we connect.</Say></Response>', "say_only"
-
-    # Try SDK path first; if anything goes wrong, fall back to static XML
-    try:
-        twiml_xml, twiml_type = _emit_twiml_with_sdk(ws_url)
-        _structured_log("twilio_answer_twiML_emitted", level="info",
-                        message="Emitted TwiML (SDK)", 
-                        trace_id=trace_id, 
-                        media_ws_url=ws_url,
-                        twiml_type=twiml_type,
-                        using_streaming_twiml=(twiml_type == "streaming"))
-    except Exception as e:
-        capture_exception_safe(e, {"service": __service__, "trace_id": trace_id})
-        _structured_log("twilio_answer_sdk_error", level="error",
-                        message="SDK TwiML generation failed; falling back to static XML",
-                        trace_id=trace_id, error=str(e))
-        twiml_xml, twiml_type = _emit_static_twiml(ws_url)
-        _structured_log("twilio_answer_fallback_twiML", level="info",
-                        message="Emitted fallback TwiML (static)",
-                        trace_id=trace_id,
-                        media_ws_url=ws_url,
-                        twiml_type=twiml_type,
-                        using_streaming_twiml=(twiml_type == "streaming"))
-
-    # Always return 200 + application/xml
+    
+    from twilio.twiml.voice_response import VoiceResponse
+    
+    r = VoiceResponse()
+    r.say("Connecting you to Sara. Please hold.")
+    
+    with r.connect() as c:
+        # IMPORTANT: explicitly track inbound, to match start.tracks=["inbound"]
+        c.stream(url=ws_url, track="inbound")
+    
+    twiml_xml = str(r)
+    _structured_log(
+        "twilio_answer_twiml_emitted",
+        level="info",
+        message="Emitted streaming TwiML",
+        trace_id=trace_id,
+        media_ws_url=ws_url,
+        using_streaming_twiml=True,
+    )
+    
     return Response(twiml_xml, status=200, mimetype="application/xml")
 
-@twilio_router_bp.route("/twilio/events", methods=["GET", "POST"])
+@twilio_router_bp.route("/twilio/events", methods=["POST"])
 def twilio_events():
-    """Handle Twilio status webhooks - accepts application/x-www-form-urlencoded"""
+    """Handle Twilio status webhooks"""
     trace_id = get_trace_id()
     
     # Verify Twilio signature if enabled
@@ -269,24 +233,14 @@ def twilio_events():
         return Response("Invalid signature", status=403, mimetype="text/plain")
     
     try:
-        if request.method == "GET":
-            return jsonify({
-                "service": __service__,
-                "status": "healthy",
-                "phase": __phase__,
-                "schema_version": __schema_version__,
-                "trace_id": trace_id
-            }), 200
-        
-        payload = request.form.to_dict() if request.form else {}
-        # Enhanced logging with call details
-        _structured_log("twilio_status_webhook", level="info",
-                      message="Received Twilio status webhook",
-                      trace_id=trace_id, 
-                      call_sid=payload.get('CallSid'),
-                      call_status=payload.get('CallStatus'),
-                      callback_type=payload.get('CallStatus') and "status_callback" or "event_callback",
-                      **{k: v for k, v in payload.items() if k not in ['CallSid', 'CallStatus']})
+        payload = request.form.to_dict()
+        _structured_log(
+            "twilio_status_callback",
+            level="info",
+            message="Received Twilio status callback",
+            trace_id=trace_id,
+            payload=payload,
+        )
         return ("", 204)
     except Exception as e:
         _structured_log("twilio_events_error", level="error",

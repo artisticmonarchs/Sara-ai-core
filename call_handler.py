@@ -359,6 +359,7 @@ def handle_call_event(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     call_sid = (payload.get("CallSid") or payload.get("call_sid") or "").strip()
     call_status = (payload.get("CallStatus") or payload.get("call_status") or payload.get("Status") or "").strip()
+    sequence_number = (payload.get("SequenceNumber") or payload.get("sequence_number") or "").strip()
 
     if not call_sid:
         _structured_log("event_missing_call_sid", level="error", 
@@ -368,7 +369,8 @@ def handle_call_event(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     _structured_log("call_event_received", level="debug",
                    message="Call lifecycle event received", 
-                   call_sid=call_sid, call_status=call_status, trace_id=trace_id)
+                   call_sid=call_sid, call_status=call_status, 
+                   sequence_number=sequence_number if sequence_number else "unknown", trace_id=trace_id)
 
     # Update Redis session if present
     try:

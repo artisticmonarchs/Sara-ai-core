@@ -35,8 +35,7 @@ except ImportError:
         RATE_LIMIT_CALLS_PER_MINUTE = int(os.getenv("RATE_LIMIT_CALLS_PER_MINUTE", "60"))
         TIMEZONE_CHECK_ENABLED = os.getenv("TIMEZONE_CHECK_ENABLED", "true").lower() == "true"
         DNC_CHECK_ENABLED = os.getenv("DNC_CHECK_ENABLED", "true").lower() == "true"
-        VOICE_WEBHOOK_BASE = os.getenv("VOICE_WEBHOOK_BASE", "https://srv-d43eqvemcj7s73b0pum0.onrender.com")
-        STATUS_WEBHOOK_BASE = os.getenv("STATUS_WEBHOOK_BASE", "https://srv-d43eqvemcj7s73b0pum0.onrender.com")
+        APP_URL = os.getenv("APP_URL", "https://srv-d43eqvemcj7s73b0pum0.onrender.com").rstrip("/")
 
 try:
     # Phase 12: use the unified helpers and avoid raw ops
@@ -949,10 +948,11 @@ class OutboundDialer:
             call_config = {
                 "to": lead.phone_number,
                 "from_": self._get_caller_id(lead.campaign_id),
-                "url": self._get_webhook_url(lead),
-                "timeout": Config.DIAL_TIMEOUT_SECONDS,
-                "status_callback": self._get_status_callback_url(lead),
-                "status_events": ["initiated", "ringing", "answered", "completed"],
+                "url": f"{Config.APP_URL}/twilio/answer",
+                "timeout": 55,
+                "status_callback": f"{Config.APP_URL}/twilio/events",
+                "status_callback_event": ["initiated", "ringing", "answered", "completed"],
+                "status_callback_method": "POST",
                 "machine_detection": "Enable",
                 "async_amd": "true"
             }
@@ -1057,11 +1057,11 @@ class OutboundDialer:
     
     def _get_webhook_url(self, lead: Lead) -> str:
         """Generate webhook URL for Twilio call"""
-        return f"{Config.VOICE_WEBHOOK_BASE}/twilio/voice?lead_id={lead.lead_id}&campaign_id={lead.campaign_id}"
+        return f"{Config.APP_URL}/twilio/answer?lead_id={lead.lead_id}&campaign_id={lead.campaign_id}"
     
     def _get_status_callback_url(self, lead: Lead) -> str:
         """Generate status callback URL for Twilio"""
-        return f"{Config.STATUS_WEBHOOK_BASE}/twilio/events?lead_id={lead.lead_id}&campaign_id={lead.campaign_id}"
+        return f"{Config.APP_URL}/twilio/events?lead_id={lead.lead_id}&campaign_id={lead.campaign_id}"
     
     # --------------------------------------------------------------------------
     # Call Lifecycle Management
@@ -1301,4 +1301,4 @@ async def shutdown_outbound_dialer():
     global _dialer_instance
     if _dialer_instance:
         await _dialer_instance.stop()
-        _ialer_instance = None
+        _dialer_instance = None

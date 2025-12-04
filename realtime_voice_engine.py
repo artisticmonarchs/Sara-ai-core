@@ -539,13 +539,8 @@ class DeepgramTTSProvider(TTSProvider):
                                 "service": "realtime_voice_engine"
                             })
                         
-                        # Process chunk: Deepgram outputs μ-law 8kHz, convert to 16kHz 16-bit PCM
-                        processed_chunk = await loop.run_in_executor(
-                            self.thread_pool, 
-                            self._process_audio_chunk, 
-                            chunk
-                        )
-                        yield processed_chunk
+                        # For Twilio: Deepgram outputs μ-law 8kHz, return as-is (no conversion needed)
+                        yield chunk
             else:
                 error_text = await response.text()
                 logger.error("Deepgram TTS request failed", extra={
@@ -574,34 +569,10 @@ class DeepgramTTSProvider(TTSProvider):
             raise TransientError(f"Deepgram TTS streaming error: {str(e)}") from e
     
     def _process_audio_chunk(self, chunk: bytes) -> bytes:
-        """Process audio chunk - Deepgram outputs μ-law 8kHz, convert to 16kHz 16-bit PCM"""
-        # Convert μ-law 8kHz to 16kHz 16-bit PCM
-        if not chunk:
-            return chunk
-        
-        try:
-            # Convert μ-law to 16-bit linear PCM
-            pcm_data = audioop.ulaw2lin(chunk, 2)  # 2 bytes per sample for 16-bit
-            
-            # Resample from 8kHz to 16kHz
-            resampled_data, _ = audioop.ratecv(
-                pcm_data,
-                2,  # 2 bytes per sample
-                1,  # 1 channel (mono)
-                8000,  # Source sample rate
-                16000,  # Target sample rate
-                None
-            )
-            
-            return resampled_data
-        except Exception as e:
-            logger.error("Failed to process Deepgram audio chunk", extra={
-                "error": str(e),
-                "service": "realtime_voice_engine",
-                "provider": "deepgram"
-            })
-            # Return original chunk as fallback
-            return chunk
+        """Process audio chunk - Deepgram outputs μ-law 8kHz, return as-is for Twilio"""
+        # Deepgram already outputs μ-law 8kHz which is perfect for Twilio
+        # No conversion needed
+        return chunk
     
     async def validate_connection(self) -> bool:
         """Validate Deepgram connection with Phase 12 resilience"""
@@ -713,7 +684,7 @@ class ElevenLabsTTSProvider(TTSProvider):
                                 "service": "realtime_voice_engine"
                             })
                         
-                        # Process chunk: ElevenLabs outputs PCM, ensure 16kHz 16-bit mono
+                        # Process chunk: Convert to Twilio format (μ-law 8kHz)
                         processed_chunk = await loop.run_in_executor(
                             self.thread_pool, 
                             self._process_audio_chunk, 
@@ -748,30 +719,43 @@ class ElevenLabsTTSProvider(TTSProvider):
             raise TransientError(f"ElevenLabs TTS streaming error: {str(e)}") from e
     
     def _process_audio_chunk(self, chunk: bytes) -> bytes:
-        """Process audio chunk - ElevenLabs outputs PCM, ensure 16kHz 16-bit mono"""
-        # Note: ElevenLabs API outputs 24kHz PCM by default
-        # We need to convert to 16kHz 16-bit mono
+        """Process audio chunk - Convert to Twilio format (μ-law 8kHz mono)"""
+        # ElevenLabs API outputs 24kHz PCM by default
+        # Convert to μ-law 8kHz mono for Twilio
         if not chunk:
             return chunk
         
         try:
-            # Assume input is 24kHz, 16-bit, mono (common ElevenLabs default)
-            # Convert to target format
-            processed_chunk = _ensure_output_format(
-                chunk,
-                input_sample_rate=24000,  # ElevenLabs default
-                input_bits_per_sample=16,
-                input_channels=1
+            # First, ensure we have 16-bit PCM at 24kHz (ElevenLabs default)
+            # Convert to 16-bit if needed
+            if len(chunk) % 2 != 0:
+                # Assume it's already 16-bit aligned
+                chunk = chunk[:len(chunk) - (len(chunk) % 2)]
+            
+            # Convert to μ-law: 24kHz 16-bit PCM → 8kHz μ-law
+            # Step 1: Resample from 24kHz to 8kHz
+            pcm_data = chunk
+            resampled_pcm, _ = audioop.ratecv(
+                pcm_data,
+                2,  # 2 bytes per sample for 16-bit
+                1,  # 1 channel (mono)
+                24000,  # Source sample rate (ElevenLabs default)
+                8000,   # Target sample rate for Twilio
+                None
             )
-            return processed_chunk
+            
+            # Step 2: Convert 16-bit PCM to μ-law
+            ulaw_data = audioop.lin2ulaw(resampled_pcm, 2)
+            
+            return ulaw_data
         except Exception as e:
-            logger.error("Failed to process ElevenLabs audio chunk", extra={
+            logger.error("Failed to process ElevenLabs audio chunk for Twilio", extra={
                 "error": str(e),
                 "service": "realtime_voice_engine",
                 "provider": "elevenlabs"
             })
-            # Return original chunk as fallback
-            return chunk
+            # Return empty chunk as fallback
+            return b""
     
     async def validate_connection(self) -> bool:
         """Validate ElevenLabs connection with Phase 12 resilience"""
@@ -831,8 +815,8 @@ class FallbackTTSProvider(TTSProvider):
                 "service": "realtime_voice_engine",
                 "provider": "fallback"
             })
-            # Ensure cached audio is in correct format
-            processed_audio = await self._ensure_audio_format(cached_audio)
+            # Ensure cached audio is in Twilio format (μ-law 8kHz)
+            processed_audio = await self._ensure_twilio_format(cached_audio)
             yield processed_audio
             return
         
@@ -844,8 +828,8 @@ class FallbackTTSProvider(TTSProvider):
                 "service": "realtime_voice_engine", 
                 "provider": "fallback"
             })
-            # Ensure cached audio is in correct format
-            processed_audio = await self._ensure_audio_format(r2_audio)
+            # Ensure cached audio is in Twilio format (μ-law 8kHz)
+            processed_audio = await self._ensure_twilio_format(r2_audio)
             # Cache in Redis for future use
             await self._cache_audio(text, processed_audio)
             yield processed_audio
@@ -860,8 +844,8 @@ class FallbackTTSProvider(TTSProvider):
         })
         yield b""
     
-    async def _ensure_audio_format(self, audio_data: bytes) -> bytes:
-        """Ensure audio is in 16kHz 16-bit mono PCM format"""
+    async def _ensure_twilio_format(self, audio_data: bytes) -> bytes:
+        """Ensure audio is in Twilio format: μ-law 8kHz mono"""
         if not audio_data:
             return audio_data
         
@@ -869,11 +853,52 @@ class FallbackTTSProvider(TTSProvider):
             loop = asyncio.get_event_loop()
             processed_data = await loop.run_in_executor(
                 self.thread_pool,
-                lambda: _ensure_output_format(audio_data)
+                lambda: self._convert_to_twilio_format(audio_data)
             )
             return processed_data
         except Exception as e:
-            logger.error("Failed to ensure audio format", extra={
+            logger.error("Failed to convert audio to Twilio format", extra={
+                "error": str(e),
+                "service": "realtime_voice_engine",
+                "provider": "fallback"
+            })
+            return audio_data
+    
+    def _convert_to_twilio_format(self, audio_data: bytes) -> bytes:
+        """Convert audio to Twilio format: μ-law 8kHz mono"""
+        try:
+            # Try to detect format and convert
+            # If it's already μ-law, return as-is
+            try:
+                # Test if it's μ-law by trying to decode
+                test_pcm = audioop.ulaw2lin(audio_data[:160], 2)  # Try first 160 bytes
+                # If no exception, it's μ-law
+                # Ensure it's 8kHz (μ-law is typically 8kHz)
+                return audio_data
+            except:
+                # Not μ-law, assume it's PCM
+                pass
+            
+            # Assume it's 16kHz 16-bit PCM (default internal format)
+            # Convert to μ-law 8kHz for Twilio
+            
+            # First resample 16kHz → 8kHz
+            pcm_16k = audio_data
+            pcm_8k, _ = audioop.ratecv(
+                pcm_16k,
+                2,  # 2 bytes per sample for 16-bit
+                1,  # 1 channel (mono)
+                16000,  # Source sample rate
+                8000,   # Target sample rate for Twilio
+                None
+            )
+            
+            # Convert to μ-law
+            ulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
+            
+            return ulaw_8k
+        except Exception as e:
+            logger.error("Audio format conversion failed", extra={
                 "error": str(e),
                 "service": "realtime_voice_engine",
                 "provider": "fallback"
@@ -1109,7 +1134,7 @@ class RealtimeVoiceEngine:
         Convert text to streaming audio with low latency and Phase 12 resilience.
         Supports both plain text and SSML input.
         
-        Yields audio chunks in 16kHz, 16-bit, mono PCM format.
+        Yields audio chunks in μ-law 8kHz, mono format for Twilio.
         """
         self.stream_start_time = time.time()
         chunks_yielded = 0
@@ -1160,8 +1185,8 @@ class RealtimeVoiceEngine:
                     is_silence = await self._analyze_audio_chunk(audio_chunk)
                     
                     # Calculate chunk duration (approximate)
-                    # 16kHz 16-bit mono: bytes_per_ms = (16000 * 2) / 1000 = 32 bytes/ms
-                    duration_ms = len(audio_chunk) / 32
+                    # For μ-law 8kHz: bytes_per_ms = 8000 / 1000 = 8 bytes/ms
+                    duration_ms = len(audio_chunk) / 8
                     
                     # Add to buffer manager
                     await self.audio_buffer.put_packet(audio_chunk, duration_ms, is_silence)
@@ -1247,57 +1272,27 @@ class RealtimeVoiceEngine:
         total_audio = b""
         
         try:
-            # Collect all audio chunks from TTS stream (in 16kHz 16-bit PCM)
+            # Collect all audio chunks from TTS stream (in μ-law 8kHz)
             async for audio_chunk in self.text_to_speech_stream(text, voice_settings):
                 if audio_chunk:
                     total_audio += audio_chunk
             
-            # Convert 16kHz 16-bit PCM to 8kHz μ-law for Twilio
-            # First resample 16kHz → 8kHz
-            try:
-                # Resample to 8kHz
-                resampled_audio, _ = audioop.ratecv(
-                    total_audio,
-                    2,  # 2 bytes per sample for 16-bit
-                    1,  # 1 channel (mono)
-                    16000,  # Source sample rate
-                    8000,   # Target sample rate
-                    None
-                )
-                
-                # Convert to μ-law
-                ulaw_audio = audioop.lin2ulaw(resampled_audio, 2)
-                
-                # Split into 20ms frames (160 bytes per frame for 8kHz μ-law)
-                # 8000 samples/sec * 0.02s = 160 samples, μ-law uses 1 byte per sample
-                frame_size = 160
-                for i in range(0, len(ulaw_audio), frame_size):
-                    frame = ulaw_audio[i:i + frame_size]
-                    if len(frame) == frame_size:  # Only yield complete frames
-                        frames.append(frame)
-                    elif len(frame) > 0:  # Pad final frame if needed
-                        padded_frame = frame + b"\x00" * (frame_size - len(frame))
-                        frames.append(padded_frame)
-            except Exception as e:
-                logger.error("Failed to convert audio to Twilio format", extra={
-                    "error": str(e),
-                    "service": "realtime_voice_engine"
-                })
-                # Fallback: use original audio
-                frame_size = 320  # 8kHz 16-bit PCM: 8000 * 2 * 0.02 = 320
-                for i in range(0, len(total_audio), frame_size):
-                    frame = total_audio[i:i + frame_size]
-                    if len(frame) == frame_size:
-                        frames.append(frame)
-                    elif len(frame) > 0:
-                        padded_frame = frame + b"\x00" * (frame_size - len(frame))
-                        frames.append(padded_frame)
+            # Split into 20ms frames (160 bytes per frame for 8kHz μ-law)
+            # 8000 samples/sec * 0.02s = 160 samples, μ-law uses 1 byte per sample
+            frame_size = 160
+            for i in range(0, len(total_audio), frame_size):
+                frame = total_audio[i:i + frame_size]
+                if len(frame) == frame_size:  # Only yield complete frames
+                    frames.append(frame)
+                elif len(frame) > 0:  # Pad final frame if needed
+                    padded_frame = frame + b"\x00" * (frame_size - len(frame))
+                    frames.append(padded_frame)
             
             logger.info("Text synthesized to frames", extra={
                 "text_length": len(text),
                 "total_audio_bytes": len(total_audio),
                 "frames_generated": len(frames),
-                "frame_format": "8kHz_μ-law" if 'ulaw_audio' in locals() else "8kHz_16-bit_PCM",
+                "frame_format": "8kHz_μ-law",
                 "service": "realtime_voice_engine"
             })
             
@@ -1431,8 +1426,8 @@ class RealtimeVoiceEngine:
             is_silence = await self._analyze_audio_chunk(processed_data)
             
             # Calculate duration and add to buffer
-            # Assuming 16kHz 16-bit mono: bytes_per_ms = (16000 * 2) / 1000 = 32 bytes/ms
-            duration_ms = len(processed_data) / 32
+            # For μ-law 8kHz: bytes_per_ms = 8000 / 1000 = 8 bytes/ms
+            duration_ms = len(processed_data) / 8
             await self.audio_buffer.put_packet(processed_data, duration_ms, is_silence)
             
             # Record performance metrics
