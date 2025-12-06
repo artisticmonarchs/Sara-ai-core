@@ -146,7 +146,7 @@ logger.info("Twilio router blueprint initialized successfully.")
 # --------------------------------------------------------------------------
 # Twilio Webhook Helper Functions
 # --------------------------------------------------------------------------
-def _media_ws_url() -> str | None:
+def _media_ws_url():
     """Get WebSocket URL for media streaming from environment"""
     ws_url = os.getenv("TWILIO_MEDIA_WS_URL", "").strip()
     if not ws_url:
@@ -157,7 +157,7 @@ def _media_ws_url() -> str | None:
         return None
     return ws_url
 
-def _verify_twilio_signature() -> bool:
+def _verify_twilio_signature():
     """Verify Twilio request signature if enabled"""
     if not VERIFY_TWILIO_SIGNATURE:
         return True
@@ -206,8 +206,9 @@ def twilio_answer():
     r.say("Connecting you to Sara. Please hold.")
     
     with r.connect() as c:
-        # IMPORTANT: explicitly track inbound, to match start.tracks=["inbound"]
-        c.stream(url=ws_url, track="inbound")
+        # Twilio expects inbound_track / outbound_track / both_tracks here.
+        # We only need inbound audio from the caller for our Media Stream.
+        c.stream(url=ws_url, track="inbound_track")
     
     twiml_xml = str(r)
     _structured_log(
@@ -435,7 +436,6 @@ def playback():
                               message="Duplex playback failed, falling back to standard Twilio",
                               trace_id=trace_id, session_id=safe_session_id, 
                               error=str(e))
-
         client = _init_twilio_client()
         if client is None:
             _structured_log("twilio_client_unavailable", level="error",
@@ -454,7 +454,6 @@ def playback():
                       message=f"Updated Twilio call {call_sid} with audio {audio_url}",
                       trace_id=trace_id, session_id=safe_session_id, call_sid=call_sid, 
                       audio_url=audio_url, latency_ms=latency_ms, via="standard_twilio")
-
         return jsonify({
             "status": "success", 
             "audio_url": audio_url, 
@@ -531,7 +530,6 @@ def duplex_stream():
                       message=f"Duplex stream handled for {stream_type}",
                       trace_id=trace_id, call_sid=call_sid, stream_type=stream_type,
                       latency_ms=latency_ms)
-
         return jsonify({
             "status": "success",
             "stream_type": stream_type,
